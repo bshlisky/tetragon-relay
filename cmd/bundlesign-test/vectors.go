@@ -34,6 +34,14 @@ type fakeEpochSource struct{ current uint64 }
 
 func (f fakeEpochSource) Current(string) (uint64, error) { return f.current, nil }
 
+// allowAllGuardrails is the explicit "no restrictions" fake used so that
+// generation-time self-checks of ACCEPT vectors exercise the real
+// verify.Verify guardrail step (step 1 review A2: a nil Guardrails now
+// fails closed) without this tool needing the real guardrail engine.
+type allowAllGuardrails struct{}
+
+func (allowAllGuardrails) Check([]verify.Policy) error { return nil }
+
 // validPolicyYAML returns deterministic, padded YAML content of at least
 // minBytes, so size-limit vectors can be built precisely.
 func validPolicyYAML(name string, minBytes int) string {
@@ -143,6 +151,7 @@ func checkVerify(v testvectors.Vector) error {
 		TetragonVersion: v.TetragonVersion,
 		Trust:           tv,
 		Epochs:          fakeEpochSource{current: v.CurrentEpoch},
+		Guardrails:      allowAllGuardrails{},
 	})
 	if result.Code.String() != v.ExpectedResult {
 		return fmt.Errorf("%s: got %s want %s (reason: %s)", v.Name, result.Code, v.ExpectedResult, result.Reason)
@@ -151,14 +160,17 @@ func checkVerify(v testvectors.Vector) error {
 }
 
 var trustErrorsByName = map[string]error{
-	"ErrUnsupportedKeyType": trust.ErrUnsupportedKeyType,
-	"ErrKeyIDMismatch":      trust.ErrKeyIDMismatch,
-	"ErrThresholdNotMet":    trust.ErrThresholdNotMet,
-	"ErrOldThresholdNotMet": trust.ErrOldThresholdNotMet,
-	"ErrNewThresholdNotMet": trust.ErrNewThresholdNotMet,
-	"ErrVersionRollback":    trust.ErrVersionRollback,
-	"ErrVersionSkip":        trust.ErrVersionSkip,
-	"ErrExpiredMetadata":    trust.ErrExpiredMetadata,
+	"ErrUnsupportedKeyType":    trust.ErrUnsupportedKeyType,
+	"ErrKeyIDMismatch":         trust.ErrKeyIDMismatch,
+	"ErrThresholdNotMet":       trust.ErrThresholdNotMet,
+	"ErrOldThresholdNotMet":    trust.ErrOldThresholdNotMet,
+	"ErrNewThresholdNotMet":    trust.ErrNewThresholdNotMet,
+	"ErrVersionRollback":       trust.ErrVersionRollback,
+	"ErrVersionSkip":           trust.ErrVersionSkip,
+	"ErrExpiredMetadata":       trust.ErrExpiredMetadata,
+	"ErrMalformedMetadata":     trust.ErrMalformedMetadata,
+	"ErrInvalidRoleDefinition": trust.ErrInvalidRoleDefinition,
+	"ErrRootValidityTooLong":   trust.ErrRootValidityTooLong,
 }
 
 func checkTrustLoad(v testvectors.Vector) error {
@@ -376,10 +388,10 @@ func generateAll(dir string) error {
 		if err != nil {
 			return err
 		}
-		v := vector("duplicate_signature_same_key_threshold2", "Two signatures are present but both come from the same key; threshold 2 requires 2 DISTINCT keys.", testvectors.KindVerify)
+		v := vector("duplicate_signature_same_key_threshold2", "Two signatures are present but both come from the same key; rejected at envelope parsing (step 1 review A4: duplicate signature keyids are never legitimate and are rejected outright, before threshold counting is ever reached).", testvectors.KindVerify)
 		v.RootMetadataB64 = b64(thr2Root.envelope)
 		v.EnvelopeB64 = b64(env)
-		v.ExpectedResult = verify.CodeRejectedSignature.String()
+		v.ExpectedResult = verify.CodeRejectedSchema.String()
 		if err := saveChecked(dir, v); err != nil {
 			return err
 		}
@@ -537,6 +549,7 @@ func generateAll(dir string) error {
 	// 14. expired
 	{
 		spec := stdBundleSpec()
+		spec.notBefore = baseNow.Add(-2 * time.Hour)
 		spec.expires = baseNow.Add(-1 * time.Hour)
 		payload, err := buildBundlePayload(spec)
 		if err != nil {
@@ -551,6 +564,54 @@ func generateAll(dir string) error {
 		v.EnvelopeB64 = b64(env)
 		v.ExpectedResult = verify.CodeRejectedExpired.String()
 		if err := saveChecked(dir, v); err != nil {
+			return err
+		}
+	}
+
+	// Boundary-exact clock skew vectors (step 1 review A5). All four use
+	// the standard bundle's not_before/expires (baseNow-1h / baseNow+24h)
+	// and vary only the vector's "now".
+	{
+		spec := stdBundleSpec()
+		payload, err := buildBundlePayload(spec)
+		if err != nil {
+			return err
+		}
+		env, err := signEnvelope(bundlePayloadType, payload, t1)
+		if err != nil {
+			return err
+		}
+
+		mk := func(name, desc string, now time.Time, expected verify.Code) error {
+			v := vector(name, desc, testvectors.KindVerify)
+			v.RootMetadataB64 = b64(stdRoot.envelope)
+			v.EnvelopeB64 = b64(env)
+			v.Now = now.Format(time.RFC3339)
+			v.ExpectedResult = expected.String()
+			return saveChecked(dir, v)
+		}
+
+		notBefore := spec.notBefore
+		expires := spec.expires
+
+		if err := mk("not_before_minus_skew_exact_accept",
+			"now is exactly not_before - 300s (the clock skew boundary); still accepted.",
+			notBefore.Add(-300*time.Second), verify.CodeAccept); err != nil {
+			return err
+		}
+		if err := mk("not_before_minus_skew_plus_one_reject",
+			"now is 301s before not_before, one second past the clock skew boundary; rejected as not yet valid.",
+			notBefore.Add(-301*time.Second), verify.CodeRejectedExpired); err != nil {
+			return err
+		}
+		if err := mk("expires_plus_skew_minus_one_accept",
+			"now is exactly expires + 299s, one second inside the clock skew boundary; still accepted.",
+			expires.Add(299*time.Second), verify.CodeAccept); err != nil {
+			return err
+		}
+		if err := mk("expires_plus_skew_exact_reject",
+			"now is exactly expires + 300s (the clock skew boundary); rejected as expired.",
+			expires.Add(300*time.Second), verify.CodeRejectedExpired); err != nil {
 			return err
 		}
 	}
@@ -775,6 +836,131 @@ func generateAll(dir string) error {
 		}
 	}
 
+	// mode_empty, mode_enforce_uppercase, mode_audit: bundle.mode must be
+	// exactly "monitor" or "enforce" (step 1 review A3).
+	for _, tc := range []struct {
+		name, mode string
+	}{
+		{"mode_empty", ""},
+		{"mode_enforce_uppercase", "ENFORCE"},
+		{"mode_audit", "audit"},
+	} {
+		spec := stdBundleSpec()
+		spec.mode = tc.mode
+		payload, err := buildBundlePayload(spec)
+		if err != nil {
+			return err
+		}
+		env, err := signEnvelope(bundlePayloadType, payload, t1)
+		if err != nil {
+			return err
+		}
+		v := vector(tc.name, fmt.Sprintf("Bundle mode is %q, neither \"monitor\" nor \"enforce\" (case-sensitive).", tc.mode), testvectors.KindVerify)
+		v.RootMetadataB64 = b64(stdRoot.envelope)
+		v.EnvelopeB64 = b64(env)
+		v.ExpectedResult = verify.CodeRejectedSchema.String()
+		if err := saveChecked(dir, v); err != nil {
+			return err
+		}
+	}
+
+	// case_fold_duplicate_bundle_scope: the bundle payload has both
+	// "scope" and "SCOPE" keys, which fold to the same key (step 1
+	// review A1). Rejected at strict payload parsing (step 5).
+	{
+		payload, err := buildBundlePayload(stdBundleSpec())
+		if err != nil {
+			return err
+		}
+		injected := strings.Replace(string(payload), `"scope":"`+stdScope+`"`, `"scope":"`+stdScope+`","SCOPE":"other"`, 1)
+		env, err := signEnvelope(bundlePayloadType, []byte(injected), t1)
+		if err != nil {
+			return err
+		}
+		v := vector("case_fold_duplicate_bundle_scope", "Bundle payload has both \"scope\" and \"SCOPE\", which fold to the same key under Unicode simple case folding.", testvectors.KindVerify)
+		v.RootMetadataB64 = b64(stdRoot.envelope)
+		v.EnvelopeB64 = b64(env)
+		v.ExpectedResult = verify.CodeRejectedSchema.String()
+		if err := saveChecked(dir, v); err != nil {
+			return err
+		}
+	}
+
+	// case_fold_duplicate_envelope_payloadtype: the envelope's own JSON
+	// has both "payloadType" and "PayloadType" at the top level. Rejected
+	// while parsing the envelope itself (step 2), before any signature or
+	// payload work.
+	{
+		payload, err := buildBundlePayload(stdBundleSpec())
+		if err != nil {
+			return err
+		}
+		env, err := signEnvelope(bundlePayloadType, payload, t1)
+		if err != nil {
+			return err
+		}
+		injected := strings.Replace(string(env), `{"payloadType"`, `{"PayloadType":"x","payloadType"`, 1)
+		v := vector("case_fold_duplicate_envelope_payloadtype", "Envelope JSON has both \"payloadType\" and \"PayloadType\" at the top level, which fold to the same key.", testvectors.KindVerify)
+		v.RootMetadataB64 = b64(stdRoot.envelope)
+		v.EnvelopeB64 = b64([]byte(injected))
+		v.ExpectedResult = verify.CodeRejectedSchema.String()
+		if err := saveChecked(dir, v); err != nil {
+			return err
+		}
+	}
+
+	// case_fold_duplicate_root_metadata_keyid: root metadata's "keys" map
+	// has two entries whose IDs are equal under Unicode simple case
+	// folding (an uppercase-hex variant of a real key ID). Rejected while
+	// parsing the root payload.
+	{
+		r1, err := newP384Key()
+		if err != nil {
+			return err
+		}
+		r2, err := newP384Key()
+		if err != nil {
+			return err
+		}
+		tk, err := newP384Key()
+		if err != nil {
+			return err
+		}
+		lk, err := newP384Key()
+		if err != nil {
+			return err
+		}
+		spec := rootSpec{
+			version: 1,
+			expires: baseNow.Add(365 * 24 * time.Hour),
+			keys:    []*testKey{r1, r2, tk, lk},
+			root:    roleOf([]*testKey{r1, r2}, 2),
+			targets: roleOf([]*testKey{tk}, 1),
+			log:     roleOf([]*testKey{lk}, 1),
+		}
+		payload, err := buildRootPayload(spec)
+		if err != nil {
+			return err
+		}
+		upper := strings.ToUpper(strings.TrimPrefix(tk.id, "sha256:"))
+		duplicateKeyEntry := fmt.Sprintf(`,"sha256:%s":{"keytype":"ecdsa-p384","public_key_der_b64":%q}`, upper, tk.publicB64)
+		injected := strings.Replace(string(payload), `"`+tk.id+`":{"keytype":"ecdsa-p384","public_key_der_b64":"`+tk.publicB64+`"}`,
+			`"`+tk.id+`":{"keytype":"ecdsa-p384","public_key_der_b64":"`+tk.publicB64+`"}`+duplicateKeyEntry, 1)
+		if injected == string(payload) {
+			return fmt.Errorf("case_fold_duplicate_root_metadata_keyid: injection needle not found")
+		}
+		env, err := signEnvelope(rootPayloadType, []byte(injected), r1, r2)
+		if err != nil {
+			return err
+		}
+		v := vector("case_fold_duplicate_root_metadata_keyid", "Root metadata's \"keys\" map has two entries whose IDs are equal under Unicode simple case folding (an uppercase-hex variant of a real key ID).", testvectors.KindTrustLoad)
+		v.RootMetadataB64 = b64(env)
+		v.ExpectedError = "ErrMalformedMetadata"
+		if err := saveChecked(dir, v); err != nil {
+			return err
+		}
+	}
+
 	// 25. non_p384_key: root metadata contains a non-P-384 key entry.
 	{
 		r1, err := newP384Key()
@@ -823,6 +1009,55 @@ func generateAll(dir string) error {
 		if err := saveChecked(dir, v); err != nil {
 			return err
 		}
+	}
+
+	// root_role_key_overlap: a key appears in both the root and targets
+	// roles, which step 1 review A6 requires to be pairwise disjoint.
+	{
+		r1, err := newP384Key()
+		if err != nil {
+			return err
+		}
+		r2, err := newP384Key()
+		if err != nil {
+			return err
+		}
+		l1k, err := newP384Key()
+		if err != nil {
+			return err
+		}
+		spec := rootSpec{
+			version: 1,
+			expires: baseNow.Add(365 * 24 * time.Hour),
+			keys:    []*testKey{r1, r2, l1k},
+			root:    roleOf([]*testKey{r1, r2}, 2),
+			// r1 is also listed in the targets role: not disjoint.
+			targets: roleOf([]*testKey{r1}, 1),
+			log:     roleOf([]*testKey{l1k}, 1),
+		}
+		payload, err := buildRootPayload(spec)
+		if err != nil {
+			return err
+		}
+		env, err := signEnvelope(rootPayloadType, payload, r1, r2)
+		if err != nil {
+			return err
+		}
+		v := vector("root_role_key_overlap", "A key is listed in both the root role and the targets role; roles must be pairwise disjoint.", testvectors.KindTrustLoad)
+		v.RootMetadataB64 = b64(env)
+		v.ExpectedError = "ErrInvalidRoleDefinition"
+		if err := saveChecked(dir, v); err != nil {
+			return err
+		}
+	}
+
+	// root_update_validity_too_long: a candidate root update's expiry is
+	// more than limits.MaxRootValidity (400 days) past "now" at Update
+	// time.
+	if err := genRootUpdateVectorWithExpiry(dir, "root_update_validity_too_long",
+		"Root update's expiry is 5 years past 'now' at Update time, exceeding the 400-day maximum validity window.",
+		1, 2, baseNow.Add(5*365*24*time.Hour), "ErrRootValidityTooLong", signOldKeys); err != nil {
+		return err
 	}
 
 	// 26. root_rollback: new version <= current version.

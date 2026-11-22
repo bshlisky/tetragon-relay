@@ -32,8 +32,16 @@ const (
 // candidate new root (newVersion, a DIFFERENT key set), signs the new root's
 // envelope with either the old or the new root key set per mode, and saves
 // a KindTrustUpdate vector asserting (*trust.Root).Update returns
-// expectedError.
+// expectedError. The new root's expiry is baseNow + 365 days; use
+// genRootUpdateVectorWithExpiry to control it explicitly.
 func genRootUpdateVector(dir, name, desc string, oldVersion, newVersion int, expectedError string, mode signMode) error {
+	return genRootUpdateVectorWithExpiry(dir, name, desc, oldVersion, newVersion, baseNow.Add(365*24*time.Hour), expectedError, mode)
+}
+
+// genRootUpdateVectorWithExpiry is genRootUpdateVector with an explicit
+// expiry for the candidate new root, so tests of the maximum-validity
+// window (step 1 review A6) can set it arbitrarily far in the future.
+func genRootUpdateVectorWithExpiry(dir, name, desc string, oldVersion, newVersion int, newExpires time.Time, expectedError string, mode signMode) error {
 	oldR1, oldR2, oldR3, err := threeP384Keys()
 	if err != nil {
 		return err
@@ -77,7 +85,7 @@ func genRootUpdateVector(dir, name, desc string, oldVersion, newVersion int, exp
 	}
 	newSpec := rootSpec{
 		version: newVersion,
-		expires: baseNow.Add(365 * 24 * time.Hour),
+		expires: newExpires,
 		keys:    []*testKey{newR1, newR2, newR3, newT1, newL1},
 		root:    roleOf([]*testKey{newR1, newR2, newR3}, 2),
 		targets: roleOf([]*testKey{newT1}, 1),
