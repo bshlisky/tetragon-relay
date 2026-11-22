@@ -152,6 +152,48 @@ a dependency update in step 1 and the step 1 report was never corrected to
 match — that's the inaccuracy this item flags). This report's command
 output above is pasted directly from the commands it describes.
 
+## Part A follow-ups
+
+**A11** [HIGH] fixed the quadratic fold-collision check in
+`internal/strictjson.validateKeys`: replaced the O(n) per-key scan
+(`strings.EqualFold` against every previously seen key, O(n^2) per object)
+with an O(1)-amortized map lookup keyed by `foldKey`, a canonical form where
+each rune is mapped to the smallest rune in its `unicode.SimpleFold` orbit.
+A property test (`TestFoldKey_PropertyAgreesWithEqualFold`) checks 20,000
+random pairs, including Kelvin sign, Unicode long s, Turkish dotted/dotless
+i, and Greek sigma variants, confirming `foldKey` agreement is exactly the
+`strings.EqualFold` relation. Added `limits.MaxKeysPerObject = 4096`
+(`ErrTooManyKeys`). Benchmark: a ~1 MiB object at exactly 4096 keys
+validates in **4.7ms** best-of-5 (budget 50ms;
+`TestDecodeStrict_WorstCaseKeysPerformance` /
+`BenchmarkDecodeStrict_WorstCaseKeys`, excluded under `-race`). The same
+1 MiB input seeds `FuzzStrictJSON`.
+
+**A12** wired `buf breaking` into `make ci` and `.github/workflows/ci.yml`
+(`make breaking`, run after proto regeneration; checkout now uses
+`fetch-depth: 0` so the `PROTO_BASELINE` commit is reachable). Proven
+working on a scratch branch (`scratch-breaking-demo`, created and deleted
+in this session) by renumbering `Hello.host_uuid` from field 1 to 99:
+
+```
+$ make breaking
+buf breaking --against ".git#ref=54e450a68b786971ba20ff15d1febc15113a5921"
+api/relay/control/v1/control.proto:49:1:Previously present field "1" with name "host_uuid" on message "Hello" was deleted.
+make: *** [breaking] Error 100
+```
+
+The change was reverted (`git checkout -- api/...`) and the scratch branch
+deleted before committing.
+
+**A13** added `.github/workflows/nightly-fuzz.yml`: a `schedule`-triggered
+(daily, 03:17 UTC) plus `workflow_dispatch` workflow that runs each of the
+three fuzz targets for 15 minutes on its own matrix job, uploading any
+failing-input corpus files as a build artifact on failure
+(`actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9` #
+v7.0.2) and failing the job (a fuzz target failure already causes
+non-zero exit from `go test`). Same `contents: read` permissions and
+full-SHA action pinning as `ci.yml`.
+
 ## Known limitations / follow-ups
 
 - `make breaking` is set up (`PROTO_BASELINE` = `54e450a68b786971ba20ff15d1febc15113a5921`,
