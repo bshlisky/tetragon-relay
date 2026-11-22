@@ -1,0 +1,20 @@
+version: v2
+modules:
+  - path: api
+lint:
+  use:
+    - STANDARD
+  except:
+    # These naming-convention rules conflict with the wire shape
+    # transcribed verbatim from architecture doc section 6.2
+    # (message/field/enum names there are deliberately preserved exactly).
+    # See docs/decisions/0006-proto-lint-exceptions.md.
+    - SERVICE_SUFFIX
+    - RPC_REQUEST_RESPONSE_UNIQUE
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+    - ENUM_VALUE_PREFIX
+    - ENUM_ZERO_VALUE_SUFFIX
+breaking:
+  use:
+    - FILE

@@ -1,0 +1,127 @@
+// Control protocol between the relay agent and the controller stream
+// gateway, architecture doc section 6.2, transcribed exactly (field numbers
+// included). This step only generates the message/service stubs; no
+// client or server code is implemented yet (that is a later step).
+syntax = "proto3";
+package relay.control.v1;
+
+option go_package = "github.com/bshlisky/tetragon-relay/api/relay/control/v1;controlv1";
+
+service AgentControl {
+  // Exactly one active stream per host identity. A second open from the same
+  // SVID terminates the older stream and raises a duplicate-identity alert.
+  rpc Connect(stream AgentMessage) returns (stream ControllerMessage);
+}
+
+message AgentMessage {
+  uint64 seq = 1;                    // strictly increasing per stream
+  oneof body {
+    Hello        hello        = 10;
+    Heartbeat    heartbeat    = 11;
+    ApplyResult  apply_result = 12;
+    StateReport  state_report = 13;
+    Alert        alert        = 14;
+  }
+}
+
+message ControllerMessage {
+  uint64 seq = 1;
+  oneof body {
+    HelloAck       hello_ack       = 10;
+    PolicyBundle   bundle          = 11;  // opaque signed envelope (Section 7)
+    StateRequest   state_request   = 12;  // ask for full StateReport
+    RotateIdentity rotate_identity = 13;  // trigger early key rotation
+    TrustUpdate    trust_update    = 14;  // signed root metadata (Section 7.6)
+    Terminate      terminate       = 15;  // reason code; agent backs off
+  }
+  // No exec, file write, shell, config-set, or debug messages exist by design.
+}
+
+message Hello {
+  string host_uuid          = 1;
+  string agent_version      = 2;
+  string agent_build_digest = 3;  // sha256 of running binary (/proc/self/exe)
+  string tetragon_version   = 4;  // from Tetragon GetVersion
+  string kernel_release     = 5;
+  string boot_id            = 6;  // /proc/sys/kernel/random/boot_id
+  uint64 current_epoch      = 7;
+  bytes  loaded_digest      = 8;  // see Section 6.4
+  bytes  lkg_bundle_digest  = 9;
+  bytes  trust_root_digest  = 10;
+  uint64 trust_root_version = 11;
+  bytes  pcr_quote          = 12; // optional TPM quote over nonce from HelloAck
+}
+
+message Heartbeat {
+  uint64 current_epoch = 1;
+  bytes  loaded_digest = 2;
+  TetragonHealth health = 3;        // from GetHealth + process liveness
+  uint64 telemetry_last_seq = 4;    // last telemetry batch seq shipped
+  uint32 telemetry_backlog = 5;     // batches spooled, not acked
+}
+
+message ApplyResult {
+  bytes  bundle_digest = 1;
+  uint64 epoch         = 2;
+  enum Status { APPLIED = 0; REJECTED_SIGNATURE = 1; REJECTED_TARGET = 2;
+                REJECTED_EPOCH = 3; REJECTED_EXPIRED = 4; REJECTED_SCHEMA = 5;
+                REJECTED_GUARDRAIL = 6; APPLY_FAILED = 7; ROLLED_BACK = 8; }
+  Status status = 3;
+  string detail = 4;               // bounded 4 KiB, no secrets
+  bytes  loaded_digest_after = 5;
+}
+
+// --------------------------------------------------------------------------
+// The messages below (TetragonHealth, StateReport, Alert, HelloAck,
+// PolicyBundle, StateRequest, RotateIdentity, TrustUpdate, Terminate) are
+// referenced by the oneofs above in architecture doc section 6.2 but are not
+// themselves defined there. Minimal definitions are added here so the
+// protocol compiles; they are deliberately conservative placeholders, not a
+// claim about final shape. See docs/reports/step-01.md ("Deviations") and
+// docs/decisions/0005-undefined-proto-messages.md.
+// --------------------------------------------------------------------------
+
+message TetragonHealth {
+  bool   serving              = 1;
+  string detail               = 2;
+}
+
+message StateReport {
+  uint64 current_epoch  = 1;
+  bytes  loaded_digest  = 2;
+}
+
+message Alert {
+  string code    = 1;
+  string detail  = 2; // bounded 4 KiB, no secrets
+}
+
+message HelloAck {
+  bytes nonce = 1; // 32-byte nonce the agent may quote over (section 5.2 step 3)
+}
+
+message PolicyBundle {
+  // Section 7.3: "opaque signed envelope". The DSSE JSON bytes are carried
+  // unmodified; the control protocol does not need to understand their
+  // internal structure, only internal/verify and internal/trust do.
+  bytes envelope_json = 1;
+}
+
+message StateRequest {}
+
+message RotateIdentity {}
+
+message TrustUpdate {
+  bytes envelope_json = 1; // signed root metadata, same DSSE envelope shape
+}
+
+message Terminate {
+  enum Reason {
+    UNKNOWN             = 0;
+    REVOKED             = 1;
+    DUPLICATE_IDENTITY  = 2;
+    RATE_LIMITED        = 3;
+    PROTOCOL_ERROR      = 4;
+  }
+  Reason reason = 1;
+}
