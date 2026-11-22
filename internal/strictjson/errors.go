@@ -22,4 +22,12 @@ var (
 	// ErrNotSingleValue is returned when the input contains no JSON value
 	// at all.
 	ErrNotSingleValue = errors.New("strictjson: input does not contain exactly one JSON value")
+
+	// ErrUnknownField is returned when an object key does not exactly
+	// (case-sensitively) match any JSON field name of the target struct
+	// type at that position. Unlike encoding/json's own unknown-field
+	// detection, this check is case-sensitive and happens before decoding,
+	// so an unexpected but differently-cased spelling of a real field name
+	// (e.g. "SCOPE" for "scope") is rejected rather than silently matched.
+	ErrUnknownField = errors.New("strictjson: unknown field")
 )
