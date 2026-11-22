@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 
+	"github.com/bshlisky/tetragon-relay/internal/limits"
 	"github.com/bshlisky/tetragon-relay/internal/strictjson"
 )
 
@@ -50,6 +51,14 @@ func decodeBase64Strict(s string) ([]byte, error) {
 //   - strict JSON (internal/strictjson): no unknown fields, no duplicate
 //     keys, bounded nesting depth, valid UTF-8, no trailing data
 //   - strict, canonical base64 for the payload and every signature
+//   - at most limits.MaxSignaturesPerEnvelope signatures (step 1 review A4:
+//     without a cap, an attacker could pad an envelope with signatures to
+//     force unbounded ECDSA verification work per check)
+//   - no two signatures share the same keyid (step 1 review A4): a
+//     duplicate keyid is never legitimate (a signer has one key) and is
+//     rejected outright rather than silently deduplicated, so a confused
+//     caller can never be tricked about how many distinct keys actually
+//     signed
 //
 // It does not verify any signature; that requires a public key and is the
 // caller's (internal/trust's) responsibility.
@@ -68,6 +77,9 @@ func ParseEnvelope(data []byte, maxBytes, maxDepth int) (*Envelope, error) {
 	if len(w.Signatures) == 0 {
 		return nil, ErrNoSignatures
 	}
+	if len(w.Signatures) > limits.MaxSignaturesPerEnvelope {
+		return nil, ErrTooManySignatures
+	}
 
 	payload, err := decodeBase64Strict(w.Payload)
 	if err != nil {
@@ -75,10 +87,15 @@ func ParseEnvelope(data []byte, maxBytes, maxDepth int) (*Envelope, error) {
 	}
 
 	sigs := make([]Signature, 0, len(w.Signatures))
+	seenKeyIDs := make(map[string]struct{}, len(w.Signatures))
 	for _, ws := range w.Signatures {
 		if ws.KeyID == "" {
 			return nil, fmt.Errorf("%w: signature missing keyid", ErrInvalidEnvelope)
 		}
+		if _, dup := seenKeyIDs[ws.KeyID]; dup {
+			return nil, fmt.Errorf("%w: %q", ErrDuplicateSignatureKeyID, ws.KeyID)
+		}
+		seenKeyIDs[ws.KeyID] = struct{}{}
 		sigBytes, err := decodeBase64Strict(ws.Sig)
 		if err != nil {
 			return nil, err

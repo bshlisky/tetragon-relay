@@ -3,7 +3,11 @@ package dsse
 import (
 	"encoding/base64"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
+
+	"github.com/bshlisky/tetragon-relay/internal/limits"
 )
 
 func TestParseEnvelope_TooLarge(t *testing.T) {
@@ -77,6 +81,56 @@ func TestParseEnvelope_Valid(t *testing.T) {
 	}
 	if len(env.Signatures) != 1 || env.Signatures[0].KeyID != "k1" {
 		t.Errorf("Signatures = %+v", env.Signatures)
+	}
+}
+
+func makeSigEntries(n int, distinctKeys bool) string {
+	parts := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		kid := "k1"
+		if distinctKeys {
+			kid = fmt.Sprintf("k%d", i)
+		}
+		parts = append(parts, fmt.Sprintf(`{"keyid":%q,"sig":"AA=="}`, kid))
+	}
+	return strings.Join(parts, ",")
+}
+
+// TestParseEnvelope_TooManySignatures is the step 1 review's A4 hardening:
+// an envelope may carry at most limits.MaxSignaturesPerEnvelope signatures.
+func TestParseEnvelope_TooManySignatures(t *testing.T) {
+	payload := base64.StdEncoding.EncodeToString([]byte(`{"a":1}`))
+	sigs := makeSigEntries(limits.MaxSignaturesPerEnvelope+1, true)
+	data := []byte(`{"payloadType":"t","payload":"` + payload + `","signatures":[` + sigs + `]}`)
+	_, err := ParseEnvelope(data, 1<<20, 32)
+	if !errors.Is(err, ErrTooManySignatures) {
+		t.Fatalf("err = %v, want ErrTooManySignatures", err)
+	}
+}
+
+func TestParseEnvelope_ExactlyMaxSignaturesAccepted(t *testing.T) {
+	payload := base64.StdEncoding.EncodeToString([]byte(`{"a":1}`))
+	sigs := makeSigEntries(limits.MaxSignaturesPerEnvelope, true)
+	data := []byte(`{"payloadType":"t","payload":"` + payload + `","signatures":[` + sigs + `]}`)
+	env, err := ParseEnvelope(data, 1<<20, 32)
+	if err != nil {
+		t.Fatalf("unexpected error at the exact limit: %v", err)
+	}
+	if len(env.Signatures) != limits.MaxSignaturesPerEnvelope {
+		t.Fatalf("len(Signatures) = %d, want %d", len(env.Signatures), limits.MaxSignaturesPerEnvelope)
+	}
+}
+
+// TestParseEnvelope_DuplicateSignatureKeyID is the step 1 review's A4
+// hardening: two signatures sharing the same keyid are never legitimate and
+// must reject the whole envelope, not be silently deduplicated.
+func TestParseEnvelope_DuplicateSignatureKeyID(t *testing.T) {
+	payload := base64.StdEncoding.EncodeToString([]byte(`{"a":1}`))
+	sigs := makeSigEntries(2, false) // both keyid "k1"
+	data := []byte(`{"payloadType":"t","payload":"` + payload + `","signatures":[` + sigs + `]}`)
+	_, err := ParseEnvelope(data, 1<<20, 32)
+	if !errors.Is(err, ErrDuplicateSignatureKeyID) {
+		t.Fatalf("err = %v, want ErrDuplicateSignatureKeyID", err)
 	}
 }
 

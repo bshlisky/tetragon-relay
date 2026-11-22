@@ -18,4 +18,12 @@ var (
 	// ErrNoSignatures is returned when an envelope carries zero
 	// signatures.
 	ErrNoSignatures = errors.New("dsse: envelope has no signatures")
+
+	// ErrTooManySignatures is returned when an envelope carries more than
+	// limits.MaxSignaturesPerEnvelope signatures.
+	ErrTooManySignatures = errors.New("dsse: too many signatures")
+
+	// ErrDuplicateSignatureKeyID is returned when two signatures in the
+	// same envelope share the same keyid.
+	ErrDuplicateSignatureKeyID = errors.New("dsse: duplicate signature keyid")
 )
