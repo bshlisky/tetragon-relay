@@ -7,6 +7,10 @@ generated from the repository and from a pinned clone of
 2026-10-30 — the latest stable Tetragon release at the time this step was
 done), not written from memory.
 
+Final commit for this step: `83dab97`. GitHub Actions `ci` run for that
+commit: **run #6** (https://github.com/bshlisky/tetragon-relay/actions/runs/45072811244),
+conclusion `success`.
+
 ## 1. Summary
 
 - New package `internal/policydoc` (Part B): turns one policy's YAML text
