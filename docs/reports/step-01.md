@@ -8,7 +8,8 @@ confirmed with the requester; the repo was renamed from
 
 - Scaffolded the repo (`cmd/relayd`, `cmd/bundlesign-test`, `internal/*`,
   `api/relay/control/v1`, `testdata/vectors`, `docs/decisions`), Go module
-  pinned to `go 1.23.0` / `toolchain go1.27.4`, dependencies vendored.
+  pinned to `go 1.26.0` / `toolchain go1.27.4` (corrected per step 1 review
+  item A10; this originally misreported `go 1.23.0`), dependencies vendored.
 - Transcribed `control.proto` from architecture doc section 6.2 (field
   numbers preserved) via `buf`; generated and committed Go/gRPC stubs. No
   client/server logic implemented (out of scope).
