@@ -13,7 +13,7 @@ env:
 
 jobs:
   ci:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -53,10 +53,16 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
           govulncheck ./...
 
+      - name: go mod verify
+        run: make modverify
+
+      - name: Vendor drift check
+        run: make vendor-check
+
       - name: Test with race detector and coverage
         run: go test -race -count=1 -cover ./...
 
-      - name: Per-package coverage gate (internal/trust, internal/verify >= 95%)
+      - name: Per-package coverage gate (internal/dsse, internal/strictjson, internal/trust, internal/verify >= 95%)
         run: make coverage
 
       - name: Fuzz smoke (60s per target)
