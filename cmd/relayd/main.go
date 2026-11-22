@@ -1,19 +1,28 @@
-// Command relayd is the on-host relay agent described in Section 8 of
-// docs/security-architecture.md. It is the sole permitted caller of the
-// local Tetragon gRPC socket and the only bridge between a host and the
-// management plane.
-//
-// This is a placeholder entry point; the agent's responsibilities
-// (identity/enrollment, control stream, bundle verification, apply/rollback,
-// telemetry forwarding) have not been implemented yet.
+// Command relayd is the on-host relay agent described in architecture doc
+// section 8. This step only builds the repository scaffold and the
+// signature-verification core (internal/trust, internal/verify); relayd
+// itself has no functionality yet beyond reporting its own version.
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 )
 
+// version is set at build time via -ldflags "-X main.version=...". It
+// defaults to "dev" for local builds.
+var version = "dev"
+
 func main() {
-	fmt.Fprintln(os.Stderr, "relayd: not yet implemented; see docs/security-architecture.md")
+	showVersion := flag.Bool("version", false, "print version and exit")
+	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
+
+	fmt.Fprintln(os.Stderr, "relayd: not yet implemented beyond --version; see docs/architecture.md")
 	os.Exit(1)
 }

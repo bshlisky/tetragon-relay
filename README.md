@@ -7,7 +7,7 @@ hosts and receives their security telemetry, with a Cisco N9300 Smart Switch
 ## Status
 
 Early stage. The architecture is specified in
-[`docs/security-architecture.md`](docs/security-architecture.md); implementation
+[`docs/architecture.md`](docs/architecture.md); implementation
 has not started yet. The first component to be built is the on-host **relay
 agent** (`relayd`), the single, unprivileged Go binary that is the only
 permitted caller of the local Tetragon gRPC socket (see Section 8 of the
@@ -32,7 +32,7 @@ Go:
   parses data from the network.
 - **FIPS has a path.** Go now has a native FIPS 140-3 crypto module, and Red
   Hat ships a Go toolset that uses RHEL's validated OpenSSL. See
-  [Section 8.12](docs/security-architecture.md#812-build-and-supply-chain)
+  [Section 8.12](docs/architecture.md#812-build-and-supply-chain)
   of the architecture doc.
 
 ## Repository layout
@@ -59,7 +59,7 @@ internal/              Relay agent implementation packages (to be built out)
   enforces segmentation per switch port and quarantines hosts on controller
   command.
 
-See the full specification in [`docs/security-architecture.md`](docs/security-architecture.md)
+See the full specification in [`docs/architecture.md`](docs/architecture.md)
 for the threat model, trust boundaries, protocol definitions, and operational
 procedures.
 
