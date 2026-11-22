@@ -25,6 +25,10 @@ jobs:
             package: ./internal/verify/...
           - target: FuzzRootUpdate
             package: ./internal/trust/...
+          - target: FuzzPolicyParse
+            package: ./internal/policydoc/...
+          - target: FuzzGuard
+            package: ./internal/guard/...
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -49,5 +53,7 @@ jobs:
             internal/strictjson/testdata/fuzz/**
             internal/verify/testdata/fuzz/**
             internal/trust/testdata/fuzz/**
+            internal/policydoc/testdata/fuzz/**
+            internal/guard/testdata/fuzz/**
           if-no-files-found: ignore
           retention-days: 30
