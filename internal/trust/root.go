@@ -105,6 +105,15 @@ func parseAndValidatePayload(payload []byte) (*parsedPayload, error) {
 		return nil, fmt.Errorf("log role: %w", err)
 	}
 
+	// The root, targets, and log roles must use pairwise disjoint key
+	// sets (step 1 review A6). A key that could act in more than one
+	// role would let, for example, a single stolen targets key also
+	// rotate the root — collapsing the separation of authority the
+	// three-role model exists to provide.
+	if err := requireDisjointRoles(rootRole, targetsRole, logRole); err != nil {
+		return nil, err
+	}
+
 	return &parsedPayload{
 		version: rp.Version,
 		expires: rp.Expires,
@@ -174,10 +183,38 @@ func LoadInitialRoot(signedBytes []byte) (*Root, error) {
 	return &Root{
 		Version:         pp.version,
 		Expires:         pp.expires,
-		Keys:            pp.keys,
-		Roles:           pp.roles,
+		keys:            pp.keys,
+		roles:           pp.roles,
 		RequireLogProof: pp.logReq,
 	}, nil
+}
+
+// requireDisjointRoles returns ErrInvalidRoleDefinition if any key ID
+// appears in more than one of root, targets, log (step 1 review A6): a key
+// that could act in more than one role would collapse the separation of
+// authority the three-role model exists to provide (e.g. a stolen targets
+// key could then also rotate the root).
+func requireDisjointRoles(root, targets, log Role) error {
+	seen := make(map[KeyID]string, len(root.KeyIDs)+len(targets.KeyIDs)+len(log.KeyIDs))
+	check := func(roleName string, role Role) error {
+		for _, k := range role.KeyIDs {
+			if owner, ok := seen[k]; ok {
+				return fmt.Errorf("%w: key %q is in both %s and %s roles", ErrInvalidRoleDefinition, k, owner, roleName)
+			}
+			seen[k] = roleName
+		}
+		return nil
+	}
+	if err := check("root", root); err != nil {
+		return err
+	}
+	if err := check("targets", targets); err != nil {
+		return err
+	}
+	if err := check("log", log); err != nil {
+		return err
+	}
+	return nil
 }
 
 // Update validates a candidate new version of root metadata against the
@@ -216,8 +253,17 @@ func (r *Root) Update(newSignedBytes []byte, now time.Time) (*Root, error) {
 	if !now.Before(pp.expires) {
 		return nil, ErrExpiredMetadata
 	}
+	// The *initial* root (loaded via LoadInitialRoot, shipped in the
+	// agent RPM) is exempt from this bound: there is no "now" available
+	// at build time to compare against, and architecture doc section
+	// 7.6 fixes its expiry at 365 days from issuance by convention, not
+	// by this package. Update is where a validity ceiling can actually
+	// be enforced, since it always has a "now". Step 1 review A6.
+	if pp.expires.Sub(now) > limits.MaxRootValidity {
+		return nil, ErrRootValidityTooLong
+	}
 
-	if !verifyRoleThreshold(env, r.Keys, r.Roles.Root) {
+	if !verifyRoleThreshold(env, r.keys, r.roles.Root) {
 		return nil, ErrOldThresholdNotMet
 	}
 	if !verifyRoleThreshold(env, pp.keys, pp.roles.Root) {
@@ -227,8 +273,8 @@ func (r *Root) Update(newSignedBytes []byte, now time.Time) (*Root, error) {
 	return &Root{
 		Version:         pp.version,
 		Expires:         pp.expires,
-		Keys:            pp.keys,
-		Roles:           pp.roles,
+		keys:            pp.keys,
+		roles:           pp.roles,
 		RequireLogProof: pp.logReq,
 	}, nil
 }
@@ -257,5 +303,5 @@ func (r *Root) TargetsVerifier(now time.Time) (Verifier, error) {
 	if !now.Before(r.Expires) {
 		return nil, ErrRootMetadataExpired
 	}
-	return &targetsVerifier{keys: r.Keys, role: r.Roles.Targets, requireLogProof: r.RequireLogProof}, nil
+	return &targetsVerifier{keys: r.keys, role: r.roles.Targets, requireLogProof: r.RequireLogProof}, nil
 }

@@ -27,19 +27,24 @@ type Roles struct {
 }
 
 // Root is one validated, self-consistent version of trust-root metadata:
-// every key referenced by a role is present in Keys, every key's declared ID
+// every key referenced by a role is present in keys, every key's declared ID
 // matches its derived ID, and (for a version produced by LoadInitialRoot or
 // Update) the metadata's own signature requirements were satisfied at the
 // time it was accepted.
 //
 // A *Root is immutable; Update returns a new *Root rather than mutating the
 // receiver, so callers holding a reference to an old version are never
-// surprised by it changing underneath them.
+// surprised by it changing underneath them. keys and roles are unexported
+// (step 1 review A6): both contain reference types (a map, and slices
+// inside Role), so exporting them would let any caller holding a *Root
+// mutate the trust store directly — e.g. inject an attacker-chosen key into
+// the map — without going through any of this package's validation. Use
+// KeyCount, RootRole, TargetsRole, and LogRole, which return copies.
 type Root struct {
 	Version uint64
 	Expires time.Time
-	Keys    map[KeyID]*ecdsa.PublicKey
-	Roles   Roles
+	keys    map[KeyID]*ecdsa.PublicKey
+	roles   Roles
 
 	// RequireLogProof mirrors architecture doc section 7.4 step 4
 	// ("trust.require_log_proof"). Transparency-log inclusion proofs are
@@ -47,6 +52,26 @@ type Root struct {
 	// questions); if this is true, internal/verify must reject bundles
 	// with REJECTED_SIGNATURE rather than silently skip the check.
 	RequireLogProof bool
+}
+
+// KeyCount returns the number of keys known to this root metadata version.
+func (r *Root) KeyCount() int { return len(r.keys) }
+
+// RootRole returns a defensive copy of the root role: a fresh Role value
+// with its own KeyIDs slice, so mutating the result can never affect this
+// Root.
+func (r *Root) RootRole() Role { return copyRole(r.roles.Root) }
+
+// TargetsRole returns a defensive copy of the targets role; see RootRole.
+func (r *Root) TargetsRole() Role { return copyRole(r.roles.Targets) }
+
+// LogRole returns a defensive copy of the log role; see RootRole.
+func (r *Root) LogRole() Role { return copyRole(r.roles.Log) }
+
+func copyRole(role Role) Role {
+	ids := make([]KeyID, len(role.KeyIDs))
+	copy(ids, role.KeyIDs)
+	return Role{KeyIDs: ids, Threshold: role.Threshold}
 }
 
 // Verifier checks whether an envelope's signatures meet a specific role's

@@ -11,9 +11,13 @@ import (
 
 // FuzzRootUpdate seeds from the real committed root-metadata vectors (both
 // trust_load and trust_update kinds, which between them cover valid and
-// several kinds of invalid root metadata) and asserts that neither
-// LoadInitialRoot nor Update ever panics, on any mutation of either the
-// initial or candidate root bytes.
+// several kinds of invalid root metadata) plus a set of small, synthetic
+// roots with varying key counts, role shapes and thresholds (step 1 review
+// A9: the committed vectors alone are all several-KB, multi-key documents,
+// which the mutation-based fuzzer explores far more slowly than small ones;
+// mixing in minimal 1-key and 2-key roots raises throughput substantially).
+// It asserts that neither LoadInitialRoot nor Update ever panics, on any
+// mutation of either the initial or candidate root bytes.
 func FuzzRootUpdate(f *testing.F) {
 	vectors, err := testvectors.LoadDir(vectorsDir)
 	if err != nil {
@@ -31,6 +35,12 @@ func FuzzRootUpdate(f *testing.F) {
 			seeded++
 		}
 	}
+
+	for _, synth := range syntheticRootSeeds(f) {
+		f.Add(synth.initial, synth.candidate)
+		seeded++
+	}
+
 	if seeded == 0 {
 		f.Fatalf("no seed corpus found in %s", vectorsDir)
 	}

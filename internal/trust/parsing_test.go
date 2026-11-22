@@ -107,16 +107,46 @@ func TestLoadInitialRoot_KeyBadBase64(t *testing.T) {
 	}
 }
 
+// TestLoadInitialRoot_DuplicateSignatureSameKey covers the step 1 review's
+// A4 hardening: dsse.ParseEnvelope itself now rejects an envelope with two
+// signatures sharing the same keyid (never legitimate), so this fails at
+// envelope parsing (ErrMalformedMetadata wrapping dsse's duplicate-keyid
+// error) rather than reaching threshold counting at all. The
+// "two distinct keys required for threshold 2" property is covered
+// separately by TestLoadInitialRoot_ThresholdNotMet and the
+// threshold_not_met / duplicate_signature_same_key_threshold2 vectors.
 func TestLoadInitialRoot_DuplicateSignatureSameKey(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	r1, r2 := mustKey(t), mustKey(t)
 	tk := mustKey(t)
 	payload := buildRootPayload(1, now.Add(24*time.Hour), []*genKey{r1, r2, tk},
 		roleOf([]*genKey{r1, r2}, 2), roleOf([]*genKey{tk}, 1), roleOf([]*genKey{tk}, 1))
-	// Signed twice by the SAME key (r1); threshold 2 requires two DISTINCT keys.
+	// Signed twice by the SAME key (r1).
 	env := signEnvelope(trust.RootPayloadType, payload, r1, r1)
-	if _, err := trust.LoadInitialRoot(env); !errors.Is(err, trust.ErrThresholdNotMet) {
-		t.Fatalf("err = %v, want ErrThresholdNotMet", err)
+	if _, err := trust.LoadInitialRoot(env); !errors.Is(err, trust.ErrMalformedMetadata) {
+		t.Fatalf("err = %v, want ErrMalformedMetadata (envelope-level duplicate keyid)", err)
+	}
+}
+
+// TestRoot_Update_CandidatePayloadInvalid covers Update's own
+// parseAndValidatePayload error path (distinct from a malformed envelope or
+// wrong payloadType, which have their own tests): the envelope parses fine,
+// but the payload inside fails validation (here: invalid role definition).
+func TestRoot_Update_CandidatePayloadInvalid(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	env, rootKeys, _, _ := standardRoot(t, 1, now.Add(24*time.Hour))
+	root, err := trust.LoadInitialRoot(env)
+	if err != nil {
+		t.Fatalf("LoadInitialRoot: %v", err)
+	}
+
+	newTk := mustKey(t)
+	payload := buildRootPayload(2, now.Add(48*time.Hour), []*genKey{rootKeys[0], rootKeys[1], rootKeys[2], newTk},
+		roleOf(rootKeys, 2), roleOf([]*genKey{newTk}, 0) /* invalid: threshold 0 */, roleOf([]*genKey{newTk}, 1))
+	newEnv := signEnvelope(trust.RootPayloadType, payload, rootKeys[0], rootKeys[1])
+
+	if _, err := root.Update(newEnv, now); !errors.Is(err, trust.ErrInvalidRoleDefinition) {
+		t.Fatalf("err = %v, want ErrInvalidRoleDefinition", err)
 	}
 }
 

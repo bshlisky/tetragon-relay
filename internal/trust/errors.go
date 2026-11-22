@@ -54,4 +54,10 @@ var (
 	// ErrMalformedMetadata is returned for any structurally invalid root
 	// metadata payload (missing fields, invalid JSON shape).
 	ErrMalformedMetadata = errors.New("trust: malformed root metadata payload")
+
+	// ErrRootValidityTooLong is returned by Update when a candidate root
+	// metadata's expiry is further than limits.MaxRootValidity from the
+	// time Update is called. The initial root loaded by LoadInitialRoot
+	// is exempt (there is no "now" to compare against at build time).
+	ErrRootValidityTooLong = errors.New("trust: root metadata validity window exceeds maximum")
 )

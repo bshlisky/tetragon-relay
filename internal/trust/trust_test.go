@@ -20,14 +20,17 @@ func TestLoadInitialRoot_Valid(t *testing.T) {
 	if root.Version != 1 {
 		t.Errorf("Version = %d, want 1", root.Version)
 	}
-	if len(root.Keys) != 5 {
-		t.Errorf("len(Keys) = %d, want 5", len(root.Keys))
+	if root.KeyCount() != 5 {
+		t.Errorf("KeyCount() = %d, want 5", root.KeyCount())
 	}
-	if root.Roles.Root.Threshold != 2 || len(root.Roles.Root.KeyIDs) != 3 {
-		t.Errorf("Roles.Root = %+v", root.Roles.Root)
+	if rr := root.RootRole(); rr.Threshold != 2 || len(rr.KeyIDs) != 3 {
+		t.Errorf("RootRole() = %+v", rr)
 	}
-	if root.Roles.Targets.Threshold != 1 || len(root.Roles.Targets.KeyIDs) != 1 {
-		t.Errorf("Roles.Targets = %+v", root.Roles.Targets)
+	if tr := root.TargetsRole(); tr.Threshold != 1 || len(tr.KeyIDs) != 1 {
+		t.Errorf("TargetsRole() = %+v", tr)
+	}
+	if lr := root.LogRole(); lr.Threshold != 1 || len(lr.KeyIDs) != 1 {
+		t.Errorf("LogRole() = %+v", lr)
 	}
 	_ = rootKeys
 	_ = targetsKey
@@ -147,8 +150,11 @@ func TestRoot_Update_ExpiredNewMetadata(t *testing.T) {
 		t.Fatalf("LoadInitialRoot: %v", err)
 	}
 
-	newPayload := buildRootPayload(2, now.Add(-time.Hour), rootKeys,
-		roleOf(rootKeys, 2), roleOf(rootKeys[:1], 1), roleOf(rootKeys[:1], 1))
+	newTk := mustKey(t)
+	newLk := mustKey(t)
+	all := append(append([]*genKey{}, rootKeys...), newTk, newLk)
+	newPayload := buildRootPayload(2, now.Add(-time.Hour), all,
+		roleOf(rootKeys, 2), roleOf([]*genKey{newTk}, 1), roleOf([]*genKey{newLk}, 1))
 	newEnv := signEnvelope(trust.RootPayloadType, newPayload, rootKeys[0], rootKeys[1])
 
 	if _, err := root.Update(newEnv, now); !errors.Is(err, trust.ErrExpiredMetadata) {
