@@ -558,7 +558,15 @@ Tetragon has no transactional multi-policy update, and replacing a policy is a r
 
 The relay agent is a single statically linked Go binary (`/usr/libexec/tetragon-relay/relayd`) that runs unprivileged, holds no Linux capabilities, and is the only bridge between the host's Tetragon socket and the management plane. It is a verifier and courier, not a general-purpose management agent: it has no shell, exec, file-transfer or arbitrary-config primitive.
 
-### 8.1 Responsibilities
+### 8.1 Why Go
+
+- **Tetragon is Go.** Its gRPC API definitions and generated Go client come from the same project, so the agent can talk to the Tetragon socket with the official code.
+- **The rest of the stack is Go.** SPIRE is written in Go and has Go libraries for X.509-SVIDs. Google's `go-tpm` library is the standard way to use TPM keys as a signer for TLS. gRPC and OpenTelemetry both have first-class Go support.
+- **Deployment is simple.** A single static binary has no runtime dependencies on RHEL 9, makes reproducible builds straightforward, and is easy to package as an RPM.
+- **Memory safety.** That removes a whole class of bugs from code that parses data from the network.
+- **FIPS has a path.** Go now has a native FIPS 140-3 crypto module, and Red Hat ships a Go toolset that uses RHEL's validated OpenSSL. Section 8.12 covers this.
+
+### 8.2 Responsibilities
 
 1. Establish and maintain host identity (TPM keys, SVID enrollment and renewal)
 2. Maintain the single outbound control stream to the controller
@@ -569,7 +577,7 @@ The relay agent is a single statically linked Go binary (`/usr/libexec/tetragon-
 7. Collect Tetragon events, redact, sequence, hash-chain, spool and ship them to the collector
 8. Emit a tamper-evident local audit trail
 
-### 8.2 Internal modules
+### 8.3 Internal modules
 
 | Module | Function | Inputs | Outputs | Security notes |
 | --- | --- | --- | --- | --- |
@@ -586,7 +594,7 @@ The relay agent is a single statically linked Go binary (`/usr/libexec/tetragon-
 | `audit` | Local append-only log of every security-relevant action | All modules | journald entries (Forward Secure Sealing enabled) plus central copy via telemetry | Structured, no secrets |
 | `health` | Self-checks, watchdog, resource accounting | systemd, modules | `sd_notify` WATCHDOG, Heartbeat fields | Watchdog timeout 30 s |
 
-### 8.3 State machine
+### 8.4 State machine
 
 *Figure: relay agent state machine · 10 states*
 
@@ -628,7 +636,7 @@ No state removes enforcement: losing the controller, identity or trust metadata 
 | `DEGRADED` | No controller for > 5 min, or cert < 15 min, or trust metadata expired | LKG enforced, telemetry spooled, reconnect continues | `CONNECTING` when conditions clear |
 | `REVOKED` | `Terminate{REVOKED}` or cert rejected as revoked | Stop reconnecting; LKG enforced; local alert | `UNENROLLED` after operator re-enrollment |
 
-### 8.4 Filesystem layout and permissions
+### 8.5 Filesystem layout and permissions
 
 | Path | Owner:group | Mode | SELinux type | Purpose |
 | --- | --- | --- | --- | --- |
@@ -641,7 +649,7 @@ No state removes enforcement: losing the controller, identity or trust metadata 
 | `/var/run/tetragon/tetragon.sock` | root:tetragon-relay | 0660 | `tetragon_var_run_t` | Tetragon gRPC socket |
 | `/dev/tpmrm0` | tss:tss | 0660 | `tpm_device_t` | TPM resource manager (agent is in group `tss`) |
 
-### 8.5 Configuration (example)
+### 8.6 Configuration (example)
 
 ```yaml
 # /etc/tetragon-relay/relay.yaml
@@ -676,7 +684,7 @@ redaction:
 
 The config contains no secrets. Changing it requires root and is detected: its SHA-256 is part of the `Hello` facts and of the audit trail.
 
-### 8.6 systemd unit
+### 8.7 systemd unit
 
 ```ini
 # /usr/lib/systemd/system/tetragon-relay.service
@@ -747,7 +755,7 @@ WantedBy=multi-user.target
 
 `systemd-analyze security tetragon-relay` should score at or below 2.0 ("OK"); this is a CI gate.
 
-### 8.7 SELinux policy module (outline)
+### 8.8 SELinux policy module (outline)
 
 The agent runs in its own confined domain `relay_t`. Key rules (CIL/TE outline, not a complete module):
 
@@ -784,13 +792,13 @@ neverallow ~{ relay_t } relay_policy_t:file { write append create unlink };
 
 The `neverallow` is a build-time assertion; at runtime, root in `unconfined_t` can still bypass it unless the host runs with confined admin users (`staff_u`/`sysadm_u`) — recommended for this fleet.
 
-### 8.8 Tetragon socket access
+### 8.9 Tetragon socket access
 
 - Tetragon creates the socket as root. Group ownership and mode are set by a drop-in `ExecStartPost=/usr/bin/chgrp tetragon-relay /var/run/tetragon/tetragon.sock` and `chmod 0660` (or Tetragon's own socket permission option if present in the deployed version)
 - Before every connection the agent `lstat`s the path and refuses unless it is a socket owned by root with group `tetragon-relay`, mode ≤ 0660, and SELinux context `tetragon_var_run_t` (guards against a socket swap by a lesser-privileged attacker)
 - The agent uses a typed allowlist of Tetragon RPCs: `AddTracingPolicy`, `DeleteTracingPolicy`, `ListTracingPolicies`, `EnableTracingPolicy`, `DisableTracingPolicy`, `GetHealth`, `GetVersion`, `GetEvents`. Sensor-level and debug RPCs are not compiled in
 
-### 8.9 Telemetry pipeline inside the agent
+### 8.10 Telemetry pipeline inside the agent
 
 1. `GetEvents` stream over the socket with an allowlist filter (event types configured by scope)
 2. Redaction: argv regexes, environment dropped, file paths under `/home/*/.ssh/` hashed
@@ -800,7 +808,7 @@ The `neverallow` is a build-time assertion; at runtime, root in `unconfined_t` c
 6. Spool to disk before send; delete only after collector ack of `seq`
 7. Overflow: when the spool is full, the oldest non-security batches are dropped first; a `telemetry_dropped{count, seq_range}` record is always emitted so loss is visible
 
-### 8.10 Self-protection and tamper evidence
+### 8.11 Self-protection and tamper evidence
 
 - `agent_build_digest` of `/proc/self/exe` reported in every Hello; the controller allowlists known release digests
 - IMA appraisal (`ima_appraise=enforce` with RPM signatures) recommended for `/usr/libexec/tetragon-relay/` and Tetragon binaries
@@ -808,14 +816,14 @@ The `neverallow` is a build-time assertion; at runtime, root in `unconfined_t` c
 - Store files are HMAC'd with a key sealed to the TPM under PCR 7 policy, so offline edits (e.g. from rescue media) are detected at next start
 - journald Forward Secure Sealing makes local log truncation or edits detectable
 
-### 8.11 Build and supply chain
+### 8.12 Build and supply chain
 
 - Reproducible builds (Go `-trimpath`, pinned toolchain), SBOM (SPDX) and SLSA Level 3 provenance attestation per release
 - Dependencies vendored; `govulncheck` and SBOM-based CVE scan gate releases
 - Release artifacts: RPM signed with the customer's Satellite GPG key after verifying the upstream SLSA attestation
 - FIPS: built with Go's FIPS 140-3 module mode (`GOFIPS140`) or Red Hat's Go toolset with OpenSSL-backed crypto when running on RHEL in FIPS mode; validated by CI on a FIPS-enabled RHEL 9 runner
 
-### 8.12 Resource and performance targets
+### 8.13 Resource and performance targets
 
 | Metric | Target |
 | --- | --- |
@@ -907,7 +915,7 @@ Telemetry travels host to collector only, on a separate mTLS connection, in hash
 
 ### 10.5 Data protection
 
-- Redaction happens on the host before data leaves it (Section 8.9). Patterns are delivered as part of signed trust metadata so a compromised controller cannot disable redaction
+- Redaction happens on the host before data leaves it (Section 8.10). Patterns are delivered as part of signed trust metadata so a compromised controller cannot disable redaction
 - Encryption at rest in Kafka and the store; retention per data class (raw events 30 days, security alerts 1 year)
 - Access to raw telemetry requires a separate role from policy authoring
 
@@ -1041,7 +1049,7 @@ Of 26 threats analyzed, none leaves a high residual risk once the controls are i
 | T-19 | Sensitive data leakage in telemetry | I | ADV6 | AS7 | Secrets in argv/env | Host-side redaction with signed patterns, env dropped, access separation (10.5) | M | M | Low–Medium |
 | T-20 | DoS on controller from many hosts or a rogue host | D | ADV2, ADV3 | Controller | Connection floods, oversized messages | Per-identity limits, frame caps, one stream per SVID, switch allowlist (EP-5, EP-13) | M | M | Low |
 | T-21 | Lateral movement from compromised host to mgmt core | E | ADV2 | Mgmt core | Exploit controller/collector services | Only 3 ports reachable; services hardened; quarantine on detection (EP-13) | L | H | Low |
-| T-22 | Supply-chain tampering of agent or Tetragon | T, E | ADV7 | All hosts | Malicious build | Reproducible builds, SLSA provenance, RPM signing, IMA appraisal, build-digest allowlist (8.11, EP-10, EP-11) | L | H | Low |
+| T-22 | Supply-chain tampering of agent or Tetragon | T, E | ADV7 | All hosts | Malicious build | Reproducible builds, SLSA provenance, RPM signing, IMA appraisal, build-digest allowlist (8.12, EP-10, EP-11) | L | H | Low |
 | T-23 | Time manipulation to accept expired bundle or cert | T | ADV2, ADV3 | AS2 | Spoof NTP | NTS, ProtectClock on agent, skew limit, controller compares host-reported time (A6) | L | M | Low |
 | T-24 | Trust-root rollback or freeze | T | ADV3, ADV4 | AS2 | Withhold or replay old root metadata | TUF version monotonicity, root expiry (365 d), stale-root alert | L | H | Low |
 | T-25 | HSC outage prevents new quarantine | D | Environment | AS9 | HSC unavailable | Last policy enforced fail-closed; identity denylist as compensating control; HA HSC (11.5) | L | H | Medium |
@@ -1131,7 +1139,7 @@ Three questions gate the design: whether `Override` and LSM BPF work on the flee
 | V11 Stolen credential | Use exported test key (lab only, non-TPM) from another port | Dropped at switch / refused by gateway | INV-7 |
 | V12 HSC outage | Disable HSC; verify switch fail-closed and identity denylist path | Existing segmentation intact | T-25 |
 | V13 Kernel actions | Section 9.3 matrix on each kernel build | Documented capability per build | T-14 |
-| V14 Performance | 5k events/s synthetic load; 20-policy bundle | Section 8.12 targets met | n/a |
+| V14 Performance | 5k events/s synthetic load; 20-policy bundle | Section 8.13 targets met | n/a |
 
 ### 15.3 Phasing
 
