@@ -2,6 +2,7 @@ package verify_test
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,6 +53,7 @@ func buildEdgeInput(t *testing.T, payload string, now time.Time) (verify.Input, 
 		TetragonVersion: "1.4.0",
 		Trust:           tv,
 		Epochs:          fakeEpochSource{current: 5},
+		Guardrails:      allowAllGuardrails{},
 	}, env
 }
 
@@ -192,13 +194,140 @@ func TestVerify_ZeroPolicies(t *testing.T) {
 	}
 }
 
-func TestVerify_NilGuardrailsSkipsCheck(t *testing.T) {
+// TestVerify_NilGuardrailsRejectsClosed is the step 1 review's A2
+// regression: a nil Guardrails must never be treated as "no restrictions."
+// An otherwise fully valid, signed, in-window, correctly-targeted bundle
+// must still be rejected if no guardrail implementation is configured.
+func TestVerify_NilGuardrailsRejectsClosed(t *testing.T) {
 	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
 	in, _ := buildEdgeInput(t, validBundleJSON(""), now)
 	in.Guardrails = nil
 	result := verify.Verify(in)
-	if result.Code != verify.CodeAccept {
-		t.Fatalf("Code = %s, want ACCEPT (reason: %s)", result.Code, result.Reason)
+	if result.Code != verify.CodeRejectedGuardrail {
+		t.Fatalf("Code = %s, want REJECTED_GUARDRAIL (reason: %s)", result.Code, result.Reason)
+	}
+}
+
+// edgeBundleJSON builds a valid bundle payload with one field overridden to
+// a raw JSON fragment (e.g. `"not-an-id!"` or `9999999999`), for targeted
+// step 1 review A3/A5/A7 regression tests.
+func edgeBundleJSON(field, rawValue string) string {
+	base := map[string]string{
+		"bundle_id":            `"pb-edge-0001"`,
+		"epoch":                `10`,
+		"scope":                fmt.Sprintf("%q", edgeScope),
+		"targets":              fmt.Sprintf(`{"host_uuids":[%q],"selector_digest":""}`, edgeHost),
+		"not_before":           `"2026-11-22T11:00:00Z"`,
+		"expires":              `"2026-11-23T11:00:00Z"`,
+		"tetragon_min_version": `"1.3.0"`,
+		"mode":                 `"enforce"`,
+		"policies":             fmt.Sprintf(`[{"name":"edge-policy","version":1,"sha256":%q,"yaml":"edge-yaml"}]`, hashHex("edge-yaml")),
+		"provenance":           `{}`,
+	}
+	base[field] = rawValue
+	return mapToJSON(base)
+}
+
+func TestVerify_InvalidBundleID(t *testing.T) {
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	cases := []string{`"has a space"`, `"has/slash"`, fmt.Sprintf("%q", strings.Repeat("a", 129))}
+	for _, c := range cases {
+		in, _ := buildEdgeInput(t, edgeBundleJSON("bundle_id", c), now)
+		result := verify.Verify(in)
+		if result.Code != verify.CodeRejectedSchema {
+			t.Errorf("bundle_id %s: Code = %s, want REJECTED_SCHEMA", c, result.Code)
+		}
+	}
+}
+
+func TestVerify_EpochJumpExceedsMaximum(t *testing.T) {
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	// current epoch is 5 (fakeEpochSource default); jump far beyond it.
+	in, _ := buildEdgeInput(t, edgeBundleJSON("epoch", "100000000"), now)
+	result := verify.Verify(in)
+	if result.Code != verify.CodeRejectedEpoch {
+		t.Fatalf("Code = %s, want REJECTED_EPOCH (reason: %s)", result.Code, result.Reason)
+	}
+}
+
+func TestVerify_ExpiresNotAfterNotBefore(t *testing.T) {
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	in, _ := buildEdgeInput(t, edgeBundleJSON("expires", `"2026-11-22T11:00:00Z"`), now) // == not_before
+	result := verify.Verify(in)
+	if result.Code != verify.CodeRejectedSchema {
+		t.Fatalf("Code = %s, want REJECTED_SCHEMA (reason: %s)", result.Code, result.Reason)
+	}
+}
+
+func TestVerify_ValidityWindowExceedsMaximum(t *testing.T) {
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	in, _ := buildEdgeInput(t, edgeBundleJSON("expires", `"2027-03-01T11:00:00Z"`), now) // > 90 days after not_before
+	result := verify.Verify(in)
+	if result.Code != verify.CodeRejectedSchema {
+		t.Fatalf("Code = %s, want REJECTED_SCHEMA (reason: %s)", result.Code, result.Reason)
+	}
+}
+
+func TestVerify_MissingTetragonMinVersion(t *testing.T) {
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	in, _ := buildEdgeInput(t, edgeBundleJSON("tetragon_min_version", `""`), now)
+	result := verify.Verify(in)
+	if result.Code != verify.CodeRejectedSchema {
+		t.Fatalf("Code = %s, want REJECTED_SCHEMA (reason: %s)", result.Code, result.Reason)
+	}
+}
+
+func TestVerify_InvalidTetragonMinVersion(t *testing.T) {
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	in, _ := buildEdgeInput(t, edgeBundleJSON("tetragon_min_version", `"not-a-version"`), now)
+	result := verify.Verify(in)
+	if result.Code != verify.CodeRejectedSchema {
+		t.Fatalf("Code = %s, want REJECTED_SCHEMA (reason: %s)", result.Code, result.Reason)
+	}
+}
+
+func TestVerify_InvalidRunningTetragonVersion(t *testing.T) {
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	in, _ := buildEdgeInput(t, validBundleJSON(""), now)
+	in.TetragonVersion = "not-a-version"
+	result := verify.Verify(in)
+	if result.Code != verify.CodeRejectedSchema {
+		t.Fatalf("Code = %s, want REJECTED_SCHEMA (reason: %s)", result.Code, result.Reason)
+	}
+}
+
+func TestVerify_PolicyYAMLExceedsSizeLimit(t *testing.T) {
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	big := strings.Repeat("a", 256*1024+1)
+	policy := fmt.Sprintf(`[{"name":"edge-policy","version":1,"sha256":%q,"yaml":%q}]`, hashHex(big), big)
+	in, _ := buildEdgeInput(t, edgeBundleJSON("policies", policy), now)
+	result := verify.Verify(in)
+	if result.Code != verify.CodeRejectedSchema {
+		t.Fatalf("Code = %s, want REJECTED_SCHEMA (reason: %s)", result.Code, result.Reason)
+	}
+}
+
+func TestVerify_PolicyVersionOutOfBounds(t *testing.T) {
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	cases := []int{0, -1}
+	for _, v := range cases {
+		policy := fmt.Sprintf(`[{"name":"edge-policy","version":%d,"sha256":%q,"yaml":"edge-yaml"}]`, v, hashHex("edge-yaml"))
+		in, _ := buildEdgeInput(t, edgeBundleJSON("policies", policy), now)
+		result := verify.Verify(in)
+		if result.Code != verify.CodeRejectedSchema {
+			t.Errorf("version %d: Code = %s, want REJECTED_SCHEMA", v, result.Code)
+		}
+	}
+}
+
+func TestVerify_PolicySHA256NotCanonical(t *testing.T) {
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	upper := strings.ToUpper(hashHex("edge-yaml"))
+	policy := fmt.Sprintf(`[{"name":"edge-policy","version":1,"sha256":%q,"yaml":"edge-yaml"}]`, upper)
+	in, _ := buildEdgeInput(t, edgeBundleJSON("policies", policy), now)
+	result := verify.Verify(in)
+	if result.Code != verify.CodeRejectedSchema {
+		t.Fatalf("Code = %s, want REJECTED_SCHEMA (reason: %s)", result.Code, result.Reason)
 	}
 }
 

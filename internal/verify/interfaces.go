@@ -14,6 +14,13 @@ type EpochSource interface {
 // last, only after every other check has passed, and only with policies
 // that have already been schema- and hash-validated.
 //
+// Input.Guardrails must never be nil in a real caller: Verify treats a nil
+// Guardrails as a configuration failure and rejects with
+// CodeRejectedGuardrail (step 1 review A2) rather than silently accepting a
+// bundle no guardrail ever evaluated. Tests that want "no guardrail
+// restrictions" must supply an explicit allow-all fake, declared only in
+// _test.go files, never a nil value.
+//
 // The real implementation is step 2 of this project. Tests in this step use
 // a fake that records its calls.
 type Guardrails interface {

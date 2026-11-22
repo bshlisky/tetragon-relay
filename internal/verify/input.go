@@ -39,8 +39,8 @@ type Input struct {
 	Epochs EpochSource
 
 	// Guardrails is called last, only on an otherwise-acceptable bundle.
-	// It may be nil, in which case the guardrail step is skipped; the
-	// real agent must never run with a nil Guardrails (that is enforced
-	// by the caller in a later step, not by this package).
+	// A nil Guardrails is treated as a configuration failure and causes
+	// Verify to reject with CodeRejectedGuardrail (step 1 review A2); it
+	// is never treated as "no restrictions."
 	Guardrails Guardrails
 }

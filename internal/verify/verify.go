@@ -3,7 +3,6 @@ package verify
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"strings"
 
 	"github.com/bshlisky/tetragon-relay/internal/dsse"
 	"github.com/bshlisky/tetragon-relay/internal/limits"
@@ -68,6 +67,12 @@ func Verify(in Input) Result {
 	if bp.BundleID == "" || bp.Scope == "" {
 		return reject(CodeRejectedSchema, "missing bundle_id or scope")
 	}
+	if len(bp.BundleID) > limits.MaxBundleIDBytes || !limits.BundleIDPattern.MatchString(bp.BundleID) {
+		return reject(CodeRejectedSchema, "invalid bundle_id")
+	}
+	if bp.Mode != "monitor" && bp.Mode != "enforce" {
+		return reject(CodeRejectedSchema, "invalid mode")
+	}
 	for _, u := range bp.Targets.HostUUIDs {
 		if !validUUID(u) {
 			return reject(CodeRejectedSchema, "malformed target host UUID")
@@ -113,13 +118,28 @@ func Verify(in Input) Result {
 	if bp.Epoch <= currentEpoch {
 		return reject(CodeRejectedEpoch, "epoch not greater than current")
 	}
+	// A single signed bundle with an epoch far beyond the current one
+	// would permanently brick the scope (every future bundle would need
+	// an epoch higher still); bound how far ahead one bundle may jump.
+	// Step 1 review A7.
+	if bp.Epoch-currentEpoch > limits.MaxEpochJump {
+		return reject(CodeRejectedEpoch, "epoch jump exceeds maximum")
+	}
 
 	// Step 9: now >= not_before - skew and now < expires + skew. Missing
 	// timestamps are schema failures, not expiry failures: a zero-value
 	// time.Time cannot have been a deliberate, meaningful not_before or
-	// expires.
+	// expires. expires must be strictly after not_before, and the window
+	// between them must be bounded (step 1 review A5): an unbounded
+	// validity window defeats the purpose of having one at all.
 	if bp.NotBefore.IsZero() || bp.Expires.IsZero() {
 		return reject(CodeRejectedSchema, "missing not_before or expires")
+	}
+	if !bp.Expires.After(bp.NotBefore) {
+		return reject(CodeRejectedSchema, "expires must be after not_before")
+	}
+	if bp.Expires.Sub(bp.NotBefore) > limits.MaxBundleValidity {
+		return reject(CodeRejectedSchema, "validity window exceeds maximum")
 	}
 	skew := limits.ClockSkew
 	if in.Now.Before(bp.NotBefore.Add(-skew)) {
@@ -163,27 +183,37 @@ func Verify(in Input) Result {
 		}
 		seenNames[p.Name] = struct{}{}
 
+		if p.Version < limits.MinPolicyVersion || p.Version > limits.MaxPolicyVersion {
+			return reject(CodeRejectedSchema, "policy version out of bounds")
+		}
+
+		// The declared digest must already be canonical: exactly 64
+		// lowercase hex characters. Normalizing case ourselves (e.g.
+		// strings.ToLower) would accept a non-canonical declaration as
+		// if it were equivalent, which is exactly the kind of
+		// canonicalization gap step 1 review A7 closes.
+		if !limits.PolicySHA256Pattern.MatchString(p.SHA256) {
+			return reject(CodeRejectedSchema, "policy sha256 is not canonical lowercase hex")
+		}
 		sum := sha256.Sum256([]byte(p.YAML))
 		got := hex.EncodeToString(sum[:])
-		want := strings.ToLower(p.SHA256)
-		if got != want {
+		if got != p.SHA256 {
 			return reject(CodeRejectedSchema, "policy YAML hash mismatch")
 		}
 
-		policies = append(policies, Policy{
-			Name:    p.Name,
-			Version: p.Version,
-			SHA256:  want,
-			YAML:    p.YAML,
-		})
+		policies = append(policies, Policy(p))
 	}
 
 	// Step 12: guardrails, called last and only on an otherwise-valid
-	// bundle.
-	if in.Guardrails != nil {
-		if err := in.Guardrails.Check(policies); err != nil {
-			return reject(CodeRejectedGuardrail, "guardrail check failed")
-		}
+	// bundle. A nil Guardrails is a configuration failure, not "no
+	// guardrails required": it must fail closed (step 1 review A2),
+	// never silently accept. Callers that genuinely want no guardrail
+	// restrictions must supply an explicit allow-all implementation.
+	if in.Guardrails == nil {
+		return reject(CodeRejectedGuardrail, "no guardrails configured")
+	}
+	if err := in.Guardrails.Check(policies); err != nil {
+		return reject(CodeRejectedGuardrail, "guardrail check failed")
 	}
 
 	return Result{

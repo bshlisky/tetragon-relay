@@ -33,6 +33,14 @@ func (g *recordingGuardrails) Check(policies []verify.Policy) error {
 	return g.rejectWith
 }
 
+// allowAllGuardrails is the explicit "no restrictions" fake required by the
+// step 1 review (A2): since Verify now fails closed on a nil Guardrails,
+// tests that want the guardrail step to simply pass must say so explicitly
+// rather than relying on nil meaning "skipped."
+type allowAllGuardrails struct{}
+
+func (allowAllGuardrails) Check([]verify.Policy) error { return nil }
+
 func mustDecode(t *testing.T, s string) []byte {
 	t.Helper()
 	b, err := base64.StdEncoding.DecodeString(s)
@@ -68,6 +76,7 @@ func buildInput(t *testing.T, v testvectors.Vector) verify.Input {
 		TetragonVersion: v.TetragonVersion,
 		Trust:           tv,
 		Epochs:          fakeEpochSource{current: v.CurrentEpoch},
+		Guardrails:      allowAllGuardrails{},
 	}
 }
 
