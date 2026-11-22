@@ -1,0 +1,51 @@
+version: "2"
+
+run:
+  timeout: 5m
+  build-tags:
+    - testtools
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - ineffassign
+    - unused
+    - revive
+    - errorlint
+    - exhaustive
+    - forcetypeassert
+    - gocritic
+    - bodyclose
+    - nilerr
+    - gosec
+  settings:
+    exhaustive:
+      default-signifies-exhaustive: false
+    gosec:
+      excludes:
+        # G115: int/uint conversions. policy.Version (protobuf, 7.3) is a
+        # JSON-decoded int in a size-bounded, schema-validated bundle; not an
+        # attacker-controlled width overflow vector in this step.
+        - G115
+  exclusions:
+    rules:
+      # Test and generator code intentionally uses weak/deterministic
+      # constructs (e.g. math-free test key generation, panics on
+      # unexpected generation failure) that would be inappropriate in
+      # production code.
+      - path: _test\.go
+        linters:
+          - gosec
+          - forcetypeassert
+      - path: cmd/bundlesign-test/
+        linters:
+          - gosec
+          - forcetypeassert
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
