@@ -7,7 +7,7 @@ import (
 )
 
 // specialFoldRunes are runes with notable simple-case-folding behavior,
-// used to stress-test foldKey against strings.EqualFold (step 1 review
+// used to stress-test FoldKey against strings.EqualFold (step 1 review
 // A11).
 var specialFoldRunes = []rune{
 	'a', 'A', 'z', 'Z', '0', '9', '-', '_', '.',
@@ -37,17 +37,17 @@ func TestFoldKey_AgreesWithEqualFold_KnownPairs(t *testing.T) {
 	}
 	for _, p := range pairs {
 		want := strings.EqualFold(p.a, p.b)
-		got := foldKey(p.a) == foldKey(p.b)
+		got := FoldKey(p.a) == FoldKey(p.b)
 		if got != want {
-			t.Errorf("foldKey agreement mismatch for (%q, %q): foldKey-equal=%v EqualFold=%v", p.a, p.b, got, want)
+			t.Errorf("FoldKey agreement mismatch for (%q, %q): FoldKey-equal=%v EqualFold=%v", p.a, p.b, got, want)
 		}
 	}
 }
 
 // TestFoldKey_PropertyAgreesWithEqualFold generates random strings built
 // from specialFoldRunes (and a few ASCII fillers) and asserts that
-// foldKey(a) == foldKey(b) if and only if strings.EqualFold(a, b), for many
-// random pairs. This is the property required by step 1 review A11: foldKey
+// FoldKey(a) == FoldKey(b) if and only if strings.EqualFold(a, b), for many
+// random pairs. This is the property required by step 1 review A11: FoldKey
 // must exactly capture the EqualFold relation, not merely approximate it.
 func TestFoldKey_PropertyAgreesWithEqualFold(t *testing.T) {
 	rng := rand.New(rand.NewSource(1)) //nolint:gosec // deterministic test data, not security-sensitive
@@ -66,28 +66,28 @@ func TestFoldKey_PropertyAgreesWithEqualFold(t *testing.T) {
 		a := randString(n)
 		b := randString(n)
 		want := strings.EqualFold(a, b)
-		got := foldKey(a) == foldKey(b)
+		got := FoldKey(a) == FoldKey(b)
 		if got != want {
 			mismatches++
 			if mismatches <= 10 {
-				t.Errorf("mismatch for (%q, %q): foldKey-equal=%v EqualFold=%v", a, b, got, want)
+				t.Errorf("mismatch for (%q, %q): FoldKey-equal=%v EqualFold=%v", a, b, got, want)
 			}
 		}
 	}
 	if mismatches > 0 {
-		t.Fatalf("%d/%d random pairs disagreed between foldKey and strings.EqualFold", mismatches, trials)
+		t.Fatalf("%d/%d random pairs disagreed between FoldKey and strings.EqualFold", mismatches, trials)
 	}
 }
 
 func TestFoldKey_DeterministicAndSelfEqual(t *testing.T) {
-	// foldKey must be a pure function (same input, same output across
+	// FoldKey must be a pure function (same input, same output across
 	// calls), and every string must fold-equal itself under EqualFold.
 	for _, r := range specialFoldRunes {
 		s := string(r)
-		first := foldKey(s)
-		second := foldKey(string(append([]rune{}, r))) // same content, distinct string value
+		first := FoldKey(s)
+		second := FoldKey(string(append([]rune{}, r))) // same content, distinct string value
 		if first != second {
-			t.Fatalf("foldKey(%q) is not deterministic: %q vs %q", s, first, second)
+			t.Fatalf("FoldKey(%q) is not deterministic: %q vs %q", s, first, second)
 		}
 		if !strings.EqualFold(s, string(r)) {
 			t.Fatalf("EqualFold(%q, %q) = false, want true", s, string(r))
@@ -101,10 +101,10 @@ func TestFoldKey_NeverPanics(t *testing.T) {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					t.Fatalf("foldKey(%q) panicked: %v", in, r)
+					t.Fatalf("FoldKey(%q) panicked: %v", in, r)
 				}
 			}()
-			_ = foldKey(in)
+			_ = FoldKey(in)
 		}()
 	}
 }

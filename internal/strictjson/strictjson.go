@@ -130,7 +130,7 @@ type frame struct {
 	elemType reflect.Type
 }
 
-// foldKey returns a canonical form of s such that foldKey(a) == foldKey(b)
+// FoldKey returns a canonical form of s such that FoldKey(a) == FoldKey(b)
 // if and only if strings.EqualFold(a, b) (step 1 review A11). It maps each
 // rune to the smallest rune in its unicode.SimpleFold orbit: SimpleFold
 // cycles through exactly the runes simple case folding treats as
@@ -141,9 +141,14 @@ type frame struct {
 //
 // This turns the duplicate-key check from an O(n) comparison against every
 // previously seen key in the same object (O(n^2) per object) into an O(1)
-// amortized map lookup, since foldKey values can be compared and hashed
+// amortized map lookup, since FoldKey values can be compared and hashed
 // directly instead of requiring a pairwise strings.EqualFold call.
-func foldKey(s string) string {
+//
+// Exported so internal/policydoc's YAML hardening pass (step 2 prompt Part
+// B1) can detect Unicode-fold key collisions in YAML mapping keys using the
+// exact same rule as this package's JSON duplicate-key check, rather than
+// duplicating the logic.
+func FoldKey(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
@@ -249,7 +254,7 @@ func validateKeys(data []byte, maxDepth int, rootType reflect.Type) error {
 				if f.seenFoldKeys == nil {
 					f.seenFoldKeys = make(map[string]struct{})
 				}
-				fk := foldKey(t)
+				fk := FoldKey(t)
 				if _, dup := f.seenFoldKeys[fk]; dup {
 					return fmt.Errorf("%w: %q", ErrDuplicateKey, t)
 				}
