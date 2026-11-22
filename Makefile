@@ -7,7 +7,7 @@ MODULE := github.com/bshlisky/tetragon-relay
 VERSION ?= $(shell git -C $(CURDIR) describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -X 'main.version=$(VERSION)'
 
-COVER_PKGS := ./internal/dsse/... ./internal/strictjson/... ./internal/trust/... ./internal/verify/...
+COVER_PKGS := ./internal/dsse/... ./internal/strictjson/... ./internal/trust/... ./internal/verify/... ./internal/policydoc/... ./internal/guard/...
 
 .PHONY: all
 all: ci
@@ -27,7 +27,7 @@ test-race:
 .PHONY: coverage
 coverage:
 	@fail=0; \
-	for pkg in internal/dsse internal/strictjson internal/trust internal/verify; do \
+	for pkg in internal/dsse internal/strictjson internal/trust internal/verify internal/policydoc internal/guard; do \
 		echo "== $$pkg =="; \
 		$(GO) test -count=1 -covermode=count -coverprofile=/tmp/tetragon-relay-$$(basename $$pkg).out ./$$pkg/... >/dev/null; \
 		line=$$($(GO) tool cover -func=/tmp/tetragon-relay-$$(basename $$pkg).out | tail -1); \
@@ -42,6 +42,8 @@ fuzz-short:
 	$(GO) test -run=NONE -fuzz=FuzzStrictJSON -fuzztime=60s ./internal/strictjson/...
 	$(GO) test -run=NONE -fuzz=FuzzVerifyEnvelope -fuzztime=60s ./internal/verify/...
 	$(GO) test -run=NONE -fuzz=FuzzRootUpdate -fuzztime=60s ./internal/trust/...
+	$(GO) test -run=NONE -fuzz=FuzzPolicyParse -fuzztime=60s ./internal/policydoc/...
+	$(GO) test -run=NONE -fuzz=FuzzGuard -fuzztime=60s ./internal/guard/...
 
 .PHONY: lint
 lint:
@@ -101,5 +103,17 @@ vendor-check:
 	$(GO) mod vendor
 	git diff --exit-code -- vendor/ go.mod go.sum || (echo "vendor/ is not up to date with go.mod/go.sum; run 'go mod vendor' and commit the result" && exit 1)
 
+CRD_PATH := third_party/tetragon/v1.8.0/cilium.io_tracingpolicies.yaml
+CRD_SHA256 := d99daa68c99faeab6a32ea843ab9a381ea2f63666b26e265bf048ac0ab617869
+
+.PHONY: verify-crd
+verify-crd:
+	@got=$$(shasum -a 256 $(CRD_PATH) | cut -d' ' -f1); \
+	if [ "$$got" != "$(CRD_SHA256)" ]; then \
+		echo "$(CRD_PATH) sha256 mismatch: got $$got, want $(CRD_SHA256)"; \
+		exit 1; \
+	fi; \
+	echo "verify-crd OK: $$got"
+
 .PHONY: ci
-ci: lint vuln modverify vendor-check test-race coverage fuzz-short proto breaking verify-repro sbom
+ci: lint vuln modverify vendor-check verify-crd test-race coverage fuzz-short proto breaking verify-repro sbom

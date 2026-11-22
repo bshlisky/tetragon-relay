@@ -87,6 +87,35 @@ const (
 	// memory) a single object can force regardless of how efficiently
 	// it's checked.
 	MaxKeysPerObject = 4096
+
+	// MaxYAMLNodeCount bounds the total number of yaml.Node values a
+	// single policy document's YAML tree may contain, counted while
+	// walking it in internal/policydoc (step 2 prompt Part B1). This
+	// bounds memory and CPU for the hardening pass itself, before any
+	// JSON conversion happens.
+	MaxYAMLNodeCount = 20_000
+
+	// MaxYAMLScalarBytes bounds the length of any single YAML scalar
+	// (the node's raw `Value` string). Step 2 prompt Part B1.
+	MaxYAMLScalarBytes = 4 << 10 // 4 KiB
+
+	// MaxYAMLDepth bounds YAML mapping/sequence nesting depth, applied
+	// during the hardening pass in internal/policydoc, before the
+	// strict-JSON depth check (MaxJSONDepth) is applied again to the
+	// converted canonical JSON. Step 2 prompt Part B1 specifies the same
+	// numeric bound (32) as MaxJSONDepth.
+	MaxYAMLDepth = MaxJSONDepth
+
+	// MaxHooksPerBundle bounds the total number of hook specs (kprobes +
+	// tracepoints + uprobes + lsmhooks, summed across every policy in a
+	// bundle) internal/guard will analyze. Step 2 prompt Part C, G4.
+	MaxHooksPerBundle = 256
+
+	// MaxSelectorValuesPerBundle bounds the total number of selector
+	// values (every string/uint value inside every MatchBinaries,
+	// MatchArgs, MatchPIDs, etc. value list, summed across a bundle)
+	// internal/guard will analyze. Step 2 prompt Part C, G4.
+	MaxSelectorValuesPerBundle = 4096
 )
 
 // PolicyNamePattern is the required shape of a policy name, taken verbatim
