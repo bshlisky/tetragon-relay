@@ -17,30 +17,46 @@ func buildHooks(d *rawDoc) ([]Hook, error) {
 		if err != nil {
 			return nil, err
 		}
-		hooks = append(hooks, Hook{Kind: HookKindKProbe, Identifier: k.Call, Selectors: sels})
+		hooks = append(hooks, Hook{Kind: HookKindKProbe, Identifier: k.Call, Selectors: sels, PathArgIndices: pathArgIndices(k.Args)})
 	}
 	for _, t := range d.Spec.Tracepoints {
 		sels, err := resolveSelectors(t.Selectors, d.Spec.SelectorsMacros)
 		if err != nil {
 			return nil, err
 		}
-		hooks = append(hooks, Hook{Kind: HookKindTracepoint, Identifier: t.Subsystem + "/" + t.Event, Selectors: sels})
+		hooks = append(hooks, Hook{Kind: HookKindTracepoint, Identifier: t.Subsystem + "/" + t.Event, Selectors: sels, PathArgIndices: pathArgIndices(t.Args)})
 	}
 	for _, u := range d.Spec.UProbes {
 		sels, err := resolveSelectors(u.Selectors, d.Spec.SelectorsMacros)
 		if err != nil {
 			return nil, err
 		}
-		hooks = append(hooks, Hook{Kind: HookKindUProbe, Identifier: u.Path, Selectors: sels})
+		hooks = append(hooks, Hook{Kind: HookKindUProbe, Identifier: u.Path, Selectors: sels, PathArgIndices: pathArgIndices(u.Args)})
 	}
 	for _, l := range d.Spec.LsmHooks {
 		sels, err := resolveSelectors(l.Selectors, d.Spec.SelectorsMacros)
 		if err != nil {
 			return nil, err
 		}
-		hooks = append(hooks, Hook{Kind: HookKindLsmHook, Identifier: l.Hook, Selectors: sels})
+		hooks = append(hooks, Hook{Kind: HookKindLsmHook, Identifier: l.Hook, Selectors: sels, PathArgIndices: pathArgIndices(l.Args)})
 	}
 	return hooks, nil
+}
+
+// pathArgTypes are the KProbeArg.Type values (types.go:79's Type enum)
+// that denote an argument resolving to a filesystem path.
+var pathArgTypes = map[string]bool{"file": true, "filename": true, "path": true}
+
+// pathArgIndices returns the set of Index values among args whose Type is
+// path-typed.
+func pathArgIndices(args []rawKProbeArg) map[uint32]bool {
+	out := make(map[uint32]bool)
+	for _, a := range args {
+		if pathArgTypes[a.Type] {
+			out[a.Index] = true
+		}
+	}
+	return out
 }
 
 // resolveSelectors converts a slice of raw selectors, resolving each one's

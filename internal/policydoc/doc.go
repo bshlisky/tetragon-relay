@@ -55,6 +55,12 @@ type Hook struct {
 	// for a uprobe.
 	Identifier string
 	Selectors  []Selector
+	// PathArgIndices is the set of this hook's own Args[].Index values
+	// whose Args[].Type is one of the path-typed KProbeArg types (file,
+	// filename, path; types.go:79's Type enum). internal/guard's G2 uses
+	// this to know which matchArgs entries are path-typed without
+	// re-deriving it from raw JSON.
+	PathArgIndices map[uint32]bool
 }
 
 // Selector is a resolved KProbeSelector: any selectorsMacros reference
