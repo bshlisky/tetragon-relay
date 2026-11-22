@@ -102,4 +102,4 @@ vendor-check:
 	git diff --exit-code -- vendor/ go.mod go.sum || (echo "vendor/ is not up to date with go.mod/go.sum; run 'go mod vendor' and commit the result" && exit 1)
 
 .PHONY: ci
-ci: lint vuln modverify vendor-check test-race coverage fuzz-short proto verify-repro sbom
+ci: lint vuln modverify vendor-check test-race coverage fuzz-short proto breaking verify-repro sbom
