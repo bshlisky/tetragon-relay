@@ -1,7 +1,16 @@
 // Control protocol between the relay agent and the controller stream
-// gateway, architecture doc section 6.2, transcribed exactly (field numbers
-// included). This step only generates the message/service stubs; no
-// client or server code is implemented yet (that is a later step).
+// gateway, architecture doc section 6.2, transcribed as exactly as section
+// 6.2 specifies, amended per the step 1 architect review (see ADR 0010:
+// ADR 0005, which covered the messages section 6.2 references but never
+// defines, is superseded by this revision). This step only generates the
+// message/service stubs; no client or server code is implemented yet (that
+// is a later step).
+//
+// This proto is unreleased: no consumer outside this repository depends on
+// it yet, so the step 1 review authorized freely changing field types and
+// shapes now. From this commit forward, buf's breaking-change baseline is
+// this file; see docs/decisions/0010-proto-breaking-change-baseline.md for
+// the baseline commit SHA.
 syntax = "proto3";
 package relay.control.v1;
 
@@ -44,16 +53,21 @@ message Hello {
   string tetragon_version   = 4;  // from Tetragon GetVersion
   string kernel_release     = 5;
   string boot_id            = 6;  // /proc/sys/kernel/random/boot_id
-  uint64 current_epoch      = 7;
+  // scope -> current epoch. A host may be in more than one scope
+  // (architecture doc section 8.6, host.allowed_scopes); a single
+  // current_epoch field cannot represent that. Step 1 review A8.
+  map<string, uint64> epochs = 7;
   bytes  loaded_digest      = 8;  // see Section 6.4
   bytes  lkg_bundle_digest  = 9;
   bytes  trust_root_digest  = 10;
   uint64 trust_root_version = 11;
   bytes  pcr_quote          = 12; // optional TPM quote over nonce from HelloAck
+  bytes  config_digest      = 13; // sha256 of relay.yaml (section 8.5); step 1 review A8
 }
 
 message Heartbeat {
-  uint64 current_epoch = 1;
+  // scope -> current epoch; see Hello.epochs. Step 1 review A8.
+  map<string, uint64> epochs = 1;
   bytes  loaded_digest = 2;
   TetragonHealth health = 3;        // from GetHealth + process liveness
   uint64 telemetry_last_seq = 4;    // last telemetry batch seq shipped
@@ -65,63 +79,101 @@ message ApplyResult {
   uint64 epoch         = 2;
   enum Status { APPLIED = 0; REJECTED_SIGNATURE = 1; REJECTED_TARGET = 2;
                 REJECTED_EPOCH = 3; REJECTED_EXPIRED = 4; REJECTED_SCHEMA = 5;
-                REJECTED_GUARDRAIL = 6; APPLY_FAILED = 7; ROLLED_BACK = 8; }
+                REJECTED_GUARDRAIL = 6; APPLY_FAILED = 7; ROLLED_BACK = 8;
+                REJECTED_CAPABILITY = 9; }
   Status status = 3;
   string detail = 4;               // bounded 4 KiB, no secrets
   bytes  loaded_digest_after = 5;
 }
 
 // --------------------------------------------------------------------------
-// The messages below (TetragonHealth, StateReport, Alert, HelloAck,
-// PolicyBundle, StateRequest, RotateIdentity, TrustUpdate, Terminate) are
-// referenced by the oneofs above in architecture doc section 6.2 but are not
-// themselves defined there. Minimal definitions are added here so the
-// protocol compiles; they are deliberately conservative placeholders, not a
-// claim about final shape. See docs/reports/step-01.md ("Deviations") and
-// docs/decisions/0005-undefined-proto-messages.md.
+// The messages below were originally added as minimal placeholders (ADR
+// 0005, step 1) because architecture doc section 6.2 references them in the
+// oneofs above but never defines their fields. The step 1 architect review
+// (Part A, item A8) supersedes ADR 0005 with the concrete shapes below; see
+// ADR 0010.
 // --------------------------------------------------------------------------
 
 message TetragonHealth {
-  bool   serving              = 1;
-  string detail               = 2;
+  bool   serving                    = 1;
+  string version                    = 2;
+  uint64 process_start_time_unix    = 3;
+  uint32 restarts_since_boot        = 4;
+  string detail                     = 5;
 }
 
 message StateReport {
-  uint64 current_epoch  = 1;
-  bytes  loaded_digest  = 2;
+  bytes nonce = 1;
+  // scope -> current epoch; see Hello.epochs.
+  map<string, uint64> epochs = 2;
+  bytes loaded_digest     = 3;
+  bytes lkg_bundle_digest = 4;
+  repeated LoadedPolicy policies = 5;
+  TetragonHealth health = 6;
+}
+
+message LoadedPolicy {
+  string name   = 1;
+  string state  = 2;
+  bool   enabled = 3;
+  bytes  canonical_sha256 = 4;
 }
 
 message Alert {
-  string code    = 1;
-  string detail  = 2; // bounded 4 KiB, no secrets
+  enum Kind {
+    KIND_UNSPECIFIED    = 0;
+    DRIFT               = 1;
+    TETRAGON_UNHEALTHY  = 2;
+    TRUST_EXPIRED       = 3;
+    TAMPER              = 4;
+    GUARDRAIL_REJECT    = 5;
+  }
+  Kind   kind      = 1;
+  string detail    = 2; // bounded 4 KiB, no secrets
+  int64  unix_time = 3;
 }
 
 message HelloAck {
-  bytes nonce = 1; // 32-byte nonce the agent may quote over (section 5.2 step 3)
+  bytes  nonce                       = 1; // exactly 32 bytes
+  uint32 heartbeat_interval_seconds  = 2;
 }
 
 message PolicyBundle {
-  // Section 7.3: "opaque signed envelope". The DSSE JSON bytes are carried
-  // unmodified; the control protocol does not need to understand their
-  // internal structure, only internal/verify and internal/trust do.
-  bytes envelope_json = 1;
+  // Section 7.3: "opaque signed envelope". The raw DSSE bytes are carried
+  // unmodified and must never be re-encoded in transit: the agent verifies
+  // the signature over exactly these bytes, so even a semantically-neutral
+  // re-serialization (e.g. re-marshaling the JSON) could change the bytes
+  // being signed over without changing their meaning. envelope must be
+  // <= 1 MiB (architecture doc section 7.4 step 1; internal/limits.MaxEnvelopeBytes).
+  bytes envelope = 1;
 }
 
-message StateRequest {}
+message StateRequest {
+  bytes nonce = 1;
+}
 
-message RotateIdentity {}
+message RotateIdentity {
+  string reason = 1;
+}
 
 message TrustUpdate {
-  bytes envelope_json = 1; // signed root metadata, same DSSE envelope shape
+  // Ordered root metadata versions N+1..M, each to be verified against its
+  // immediate predecessor via (*trust.Root).Update before being accepted
+  // (architecture doc section 7.6). Carrying the whole chain, not just the
+  // latest version, lets an agent that missed several rotations catch up
+  // without the controller needing to know which version the agent is
+  // currently on. Step 1 review A8.
+  repeated bytes signed_roots = 1;
 }
 
 message Terminate {
   enum Reason {
-    UNKNOWN             = 0;
-    REVOKED             = 1;
-    DUPLICATE_IDENTITY  = 2;
-    RATE_LIMITED        = 3;
-    PROTOCOL_ERROR      = 4;
+    REASON_UNSPECIFIED = 0;
+    REVOKED            = 1;
+    DUPLICATE_SESSION  = 2;
+    PROTOCOL_ERROR     = 3;
+    SHUTDOWN           = 4;
   }
   Reason reason = 1;
+  string detail = 2;
 }

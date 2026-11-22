@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted; flagged as a deviation/open question for the architect.
+Superseded by [ADR 0010](0010-proto-messages-and-breaking-change-baseline.md),
+which replaces these placeholders with the concrete shapes specified in the
+step 1 architect review (item A8). Kept for history.
 
 ## Context
 
