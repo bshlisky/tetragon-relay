@@ -30,4 +30,8 @@ var (
 	// so an unexpected but differently-cased spelling of a real field name
 	// (e.g. "SCOPE" for "scope") is rejected rather than silently matched.
 	ErrUnknownField = errors.New("strictjson: unknown field")
+
+	// ErrTooManyKeys is returned when a single JSON object exceeds
+	// limits.MaxKeysPerObject keys.
+	ErrTooManyKeys = errors.New("strictjson: too many keys in one object")
 )

@@ -8,7 +8,10 @@ import (
 	"reflect"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
+
+	"github.com/bshlisky/tetragon-relay/internal/limits"
 )
 
 // --- schema resolution: map a Go type governing a JSON value to the rules
@@ -117,13 +120,42 @@ type frame struct {
 	array bool
 
 	// object frames
-	schema      schemaCtx
-	seenKeys    []string
-	awaitingKey bool
-	pendingType reflect.Type // Go type of the value for the most recently read key
+	schema       schemaCtx
+	seenFoldKeys map[string]struct{} // see foldKey; nil until the first key
+	numKeys      int
+	awaitingKey  bool
+	pendingType  reflect.Type // Go type of the value for the most recently read key
 
 	// array frames
 	elemType reflect.Type
+}
+
+// foldKey returns a canonical form of s such that foldKey(a) == foldKey(b)
+// if and only if strings.EqualFold(a, b) (step 1 review A11). It maps each
+// rune to the smallest rune in its unicode.SimpleFold orbit: SimpleFold
+// cycles through exactly the runes simple case folding treats as
+// equivalent (this includes, among others, the Kelvin sign <-> 'k', the
+// Unicode long s <-> 's', Turkish dotless/dotted i variants, and the Greek
+// final/medial sigma forms), so two runes fold equal iff they share an
+// orbit, iff they share a minimal representative.
+//
+// This turns the duplicate-key check from an O(n) comparison against every
+// previously seen key in the same object (O(n^2) per object) into an O(1)
+// amortized map lookup, since foldKey values can be compared and hashed
+// directly instead of requiring a pairwise strings.EqualFold call.
+func foldKey(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		minRune := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			if f < minRune {
+				minRune = f
+			}
+		}
+		b.WriteRune(minRune)
+	}
+	return b.String()
 }
 
 func consumeValue(stack []*frame) {
@@ -214,12 +246,18 @@ func validateKeys(data []byte, maxDepth int, rootType reflect.Type) error {
 		case string:
 			f := top()
 			if f != nil && !f.array && f.awaitingKey {
-				for _, seen := range f.seenKeys {
-					if strings.EqualFold(seen, t) {
-						return fmt.Errorf("%w: %q", ErrDuplicateKey, t)
-					}
+				if f.seenFoldKeys == nil {
+					f.seenFoldKeys = make(map[string]struct{})
 				}
-				f.seenKeys = append(f.seenKeys, t)
+				fk := foldKey(t)
+				if _, dup := f.seenFoldKeys[fk]; dup {
+					return fmt.Errorf("%w: %q", ErrDuplicateKey, t)
+				}
+				if f.numKeys >= limits.MaxKeysPerObject {
+					return ErrTooManyKeys
+				}
+				f.seenFoldKeys[fk] = struct{}{}
+				f.numKeys++
 				f.awaitingKey = false
 				switch f.schema.kind { //nolint:exhaustive // schemaUnknown is the intentional default (no field enforcement)
 				case schemaStruct:

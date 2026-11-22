@@ -2,8 +2,12 @@ package strictjson
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/bshlisky/tetragon-relay/internal/limits"
 )
 
 type sample struct {
@@ -279,6 +283,26 @@ func TestTrimJSONSpace(t *testing.T) {
 		if got := string(trimJSONSpace([]byte(c.in))); got != c.want {
 			t.Errorf("trimJSONSpace(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// manyKeysObject builds a JSON object with n unique keys (k0000, k0001, ...)
+// each mapping to a small integer value.
+func manyKeysObject(n int) string {
+	parts := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		parts = append(parts, fmt.Sprintf(`"k%06d":%d`, i, i))
+	}
+	return "{" + strings.Join(parts, ",") + "}"
+}
+
+func TestDecodeStrict_MaxKeysPerObject(t *testing.T) {
+	var v interface{}
+	if err := DecodeStrict([]byte(manyKeysObject(limits.MaxKeysPerObject)), 32, &v); err != nil {
+		t.Fatalf("unexpected error at the exact limit: %v", err)
+	}
+	if err := DecodeStrict([]byte(manyKeysObject(limits.MaxKeysPerObject+1)), 32, &v); !errors.Is(err, ErrTooManyKeys) {
+		t.Fatalf("err = %v, want ErrTooManyKeys", err)
 	}
 }
 

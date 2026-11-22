@@ -78,6 +78,15 @@ const (
 	// MaxPolicyVersion bounds a policy's version field from above
 	// (2^31-1, i.e. any positive int32). Step 1 review A7.
 	MaxPolicyVersion = 1<<31 - 1
+
+	// MaxKeysPerObject bounds the number of keys any single JSON object
+	// may carry while being validated by internal/strictjson. Even after
+	// fixing the duplicate-key check's algorithmic complexity (step 1
+	// review A11), an unbounded key count is still unnecessary exposure:
+	// this caps the amount of per-object bookkeeping (and, transitively,
+	// memory) a single object can force regardless of how efficiently
+	// it's checked.
+	MaxKeysPerObject = 4096
 )
 
 // PolicyNamePattern is the required shape of a policy name, taken verbatim

@@ -3,9 +3,33 @@ package strictjson
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
+	"strings"
 	"testing"
+
+	"github.com/bshlisky/tetragon-relay/internal/limits"
 )
+
+// seedManyKeysObject builds a ~1 MiB JSON object at exactly
+// limits.MaxKeysPerObject keys, the same shape
+// bench_test.go's worstCaseKeysObject exercises for timing, added here too
+// (independent of that !race-tagged file) so it is part of the fuzz seed
+// corpus under every build (step 1 review A11).
+func seedManyKeysObject() string {
+	const target = 1 << 20
+	n := limits.MaxKeysPerObject
+	perEntry := target/n - 20
+	if perEntry < 0 {
+		perEntry = 0
+	}
+	pad := strings.Repeat("x", perEntry)
+	parts := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		parts = append(parts, fmt.Sprintf(`"k%06d":%q`, i, pad))
+	}
+	return "{" + strings.Join(parts, ",") + "}"
+}
 
 // FuzzStrictJSON asserts that DecodeStrict never panics on any input, for
 // any maxDepth in a small realistic range, regardless of how malformed the
@@ -23,6 +47,7 @@ func FuzzStrictJSON(f *testing.F) {
 		`{"a": 1,} trailing`,
 		"\xff\xfe\x00invalid utf8",
 		`{"a":"unterminated`,
+		seedManyKeysObject(),
 	}
 	for _, s := range seeds {
 		f.Add([]byte(s))
