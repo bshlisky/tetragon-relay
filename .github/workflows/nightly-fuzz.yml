@@ -1,0 +1,53 @@
+name: nightly-fuzz
+
+on:
+  schedule:
+    # 03:17 UTC daily (off the hour, per common cron hygiene advice).
+    - cron: "17 3 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.27.4"
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: FuzzStrictJSON
+            package: ./internal/strictjson/...
+          - target: FuzzVerifyEnvelope
+            package: ./internal/verify/...
+          - target: FuzzRootUpdate
+            package: ./internal/trust/...
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Fuzz ${{ matrix.target }} for 15 minutes
+        run: go test -run=NONE -fuzz=${{ matrix.target }} -fuzztime=15m ${{ matrix.package }}
+
+      - name: Upload new crashers
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-crashers-${{ matrix.target }}-${{ github.run_id }}
+          # go test writes failing inputs under testdata/fuzz/<FuzzName>/
+          # inside the package directory that declares the fuzz target.
+          path: |
+            internal/strictjson/testdata/fuzz/**
+            internal/verify/testdata/fuzz/**
+            internal/trust/testdata/fuzz/**
+          if-no-files-found: ignore
+          retention-days: 30
