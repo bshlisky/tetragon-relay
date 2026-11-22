@@ -67,7 +67,7 @@ jobs:
       - name: Test with race detector and coverage
         run: go test -race -count=1 -cover ./...
 
-      - name: Per-package coverage gate (internal/dsse, internal/strictjson, internal/trust, internal/verify >= 95%)
+      - name: Per-package coverage gate (internal/dsse, internal/strictjson, internal/trust, internal/verify, internal/policydoc, internal/guard >= 95%)
         run: make coverage
 
       - name: Fuzz smoke (60s per target)
