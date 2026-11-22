@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bshlisky/tetragon-relay/internal/guard"
+	"github.com/bshlisky/tetragon-relay/internal/policydoc"
 	"github.com/bshlisky/tetragon-relay/internal/testvectors"
 	"github.com/bshlisky/tetragon-relay/internal/trust"
 	"github.com/bshlisky/tetragon-relay/internal/verify"
@@ -37,15 +39,62 @@ func (f fakeEpochSource) Current(string) (uint64, error) { return f.current, nil
 // allowAllGuardrails is the explicit "no restrictions" fake used so that
 // generation-time self-checks of ACCEPT vectors exercise the real
 // verify.Verify guardrail step (step 1 review A2: a nil Guardrails now
-// fails closed) without this tool needing the real guardrail engine.
+// fails closed) without unconditionally running the real internal/guard
+// engine (some vectors want a deliberate, controllable guard outcome
+// instead; see realGuardrails below for those).
 type allowAllGuardrails struct{}
 
-func (allowAllGuardrails) Check([]verify.Policy) error { return nil }
+func (allowAllGuardrails) Check(guard.GuardContext, []*policydoc.Doc) error { return nil }
+
+// realPolicyParser delegates to the real internal/policydoc.Parse, so
+// generated vectors are self-checked against the actual step 2 Part B
+// pipeline, not a stand-in.
+type realPolicyParser struct{}
+
+func (realPolicyParser) Parse(name, yamlDoc string) (*policydoc.Doc, error) {
+	return policydoc.Parse(name, yamlDoc)
+}
+
+// realGuardrails delegates to the real internal/guard engine with
+// caller-controlled fakes, for vectors that need a genuine guard
+// acceptance/rejection rather than the allow-all stub.
+type realGuardrails struct {
+	caps    guard.HostCapabilities
+	history guard.PolicyHistory
+}
+
+func (g realGuardrails) Check(ctx guard.GuardContext, docs []*policydoc.Doc) error {
+	gr := &guard.Guardrails{Capabilities: g.caps, History: g.history}
+	return gr.Check(ctx, docs)
+}
+
+type allowAllCapabilities struct{}
+
+func (allowAllCapabilities) KprobeOverride() bool { return true }
+func (allowAllCapabilities) LSMBPF() bool         { return true }
+
+type denyOverrideCapabilities struct{}
+
+func (denyOverrideCapabilities) KprobeOverride() bool { return false }
+func (denyOverrideCapabilities) LSMBPF() bool         { return false }
+
+type allowAllHistory struct{}
+
+func (allowAllHistory) SeenInMonitor(string, string) (bool, error) { return true, nil }
 
 // validPolicyYAML returns deterministic, padded YAML content of at least
-// minBytes, so size-limit vectors can be built precisely.
+// minBytes: a real, schema-valid, guard-safe TracingPolicy (step 2 Parts
+// B/C) with name as its metadata.name, so generated vectors round-trip
+// through the real internal/policydoc.Parse + internal/guard pipeline
+// (not just internal/verify's own bundle-level checks). The single kprobe
+// uses only the observe action Post with no matchBinaries, which needs no
+// guardrail scoping at all (G1 only requires matchBinaries for selectors
+// carrying an enforcement action), so it passes every guard rule
+// trivially; vectors that need to exercise guard rejections build their
+// own policy body instead of using this helper (see guardrailRejectYAML /
+// capabilityRejectYAML below).
 func validPolicyYAML(name string, minBytes int) string {
-	base := fmt.Sprintf("apiVersion: cilium.io/v1alpha1\nkind: TracingPolicy\nmetadata:\n  name: %s\n", name)
+	base := fmt.Sprintf("apiVersion: cilium.io/v1alpha1\nkind: TracingPolicy\nmetadata:\n  name: %s\nspec:\n  kprobes:\n  - call: \"do_something\"\n    selectors:\n    - matchActions:\n      - action: \"Post\"\n", name)
 	if len(base) >= minBytes {
 		return base
 	}
@@ -151,12 +200,29 @@ func checkVerify(v testvectors.Vector) error {
 		TetragonVersion: v.TetragonVersion,
 		Trust:           tv,
 		Epochs:          fakeEpochSource{current: v.CurrentEpoch},
-		Guardrails:      allowAllGuardrails{},
+		PolicyParser:    realPolicyParser{},
+		Guardrails:      guardrailsForVector(v),
 	})
 	if result.Code.String() != v.ExpectedResult {
 		return fmt.Errorf("%s: got %s want %s (reason: %s)", v.Name, result.Code, v.ExpectedResult, result.Reason)
 	}
 	return nil
+}
+
+// guardrailsForVector selects which Guardrails fake a vector is
+// self-checked (and re-checked by the test suite) against: allow-all for
+// every ordinary vector, and the real internal/guard engine (with
+// deliberately-configured fakes) for the handful of vectors that exist
+// specifically to exercise a guard-level rejection.
+func guardrailsForVector(v testvectors.Vector) verify.Guardrails {
+	switch v.Name {
+	case "guardrail_rejection_unscoped_sigkill":
+		return realGuardrails{caps: allowAllCapabilities{}, history: allowAllHistory{}}
+	case "capability_rejection_override":
+		return realGuardrails{caps: denyOverrideCapabilities{}, history: allowAllHistory{}}
+	default:
+		return allowAllGuardrails{}
+	}
 }
 
 var trustErrorsByName = map[string]error{
@@ -795,8 +861,8 @@ func generateAll(dir string) error {
 	{
 		spec := stdBundleSpec()
 		spec.policies = []policyPayload{
-			newPolicy("dup-policy", 1, validPolicyYAML("dup-policy-a", 32), ""),
-			newPolicy("dup-policy", 2, validPolicyYAML("dup-policy-b", 32), ""),
+			newPolicy("dup-policy", 1, validPolicyYAML("dup-policy", 32), ""),
+			newPolicy("dup-policy", 2, validPolicyYAML("dup-policy", 32), ""),
 		}
 		payload, err := buildBundlePayload(spec)
 		if err != nil {
@@ -1086,6 +1152,102 @@ func generateAll(dir string) error {
 		"Root update to version 2 is signed only by the incoming (version 2) root keys, not by a threshold of the outgoing root keys.",
 		1, 2, "ErrOldThresholdNotMet", signNewKeys); err != nil {
 		return err
+	}
+
+	// policy_schema_failure: a policy using a Kubernetes-only selector
+	// (podSelector), rejected by internal/policydoc's B4 allowlist. Step
+	// 2 prompt Part D's "schema failure" vector.
+	{
+		spec := stdBundleSpec()
+		badYAML := "apiVersion: cilium.io/v1alpha1\nkind: TracingPolicy\nmetadata:\n  name: schema-failure\nspec:\n  podSelector: {}\n"
+		spec.policies = []policyPayload{newPolicy("schema-failure", 1, badYAML, "")}
+		payload, err := buildBundlePayload(spec)
+		if err != nil {
+			return err
+		}
+		env, err := signEnvelope(bundlePayloadType, payload, t1)
+		if err != nil {
+			return err
+		}
+		v := vector("policy_schema_failure", "Policy uses a Kubernetes-only selector (podSelector), rejected by internal/policydoc's B4 allowlist (step 2 prompt Part B).", testvectors.KindVerify)
+		v.RootMetadataB64 = b64(stdRoot.envelope)
+		v.EnvelopeB64 = b64(env)
+		v.ExpectedResult = verify.CodeRejectedSchema.String()
+		if err := saveChecked(dir, v); err != nil {
+			return err
+		}
+	}
+
+	// policy_name_mismatch: the policy YAML's metadata.name differs from
+	// the bundle's declared policies[].name. Step 2 prompt Part B8.
+	{
+		spec := stdBundleSpec()
+		spec.policies = []policyPayload{newPolicy("declared-name", 1, validPolicyYAML("different-metadata-name", 32), "")}
+		payload, err := buildBundlePayload(spec)
+		if err != nil {
+			return err
+		}
+		env, err := signEnvelope(bundlePayloadType, payload, t1)
+		if err != nil {
+			return err
+		}
+		v := vector("policy_name_mismatch", "Policy YAML's metadata.name does not match the bundle's declared policy name (step 2 prompt Part B8).", testvectors.KindVerify)
+		v.RootMetadataB64 = b64(stdRoot.envelope)
+		v.EnvelopeB64 = b64(env)
+		v.ExpectedResult = verify.CodeRejectedSchema.String()
+		if err := saveChecked(dir, v); err != nil {
+			return err
+		}
+	}
+
+	// guardrail_rejection_unscoped_sigkill: a Sigkill selector with no
+	// matchBinaries at all, rejected by internal/guard's G1 (step 2
+	// prompt Part C). Self-checked against the real guard engine via
+	// guardrailsForVector, keyed by this vector's name.
+	{
+		spec := stdBundleSpec()
+		yaml := "apiVersion: cilium.io/v1alpha1\nkind: TracingPolicy\nmetadata:\n  name: unscoped-sigkill\nspec:\n  kprobes:\n  - call: \"do_something\"\n    selectors:\n    - matchActions:\n      - action: \"Sigkill\"\n"
+		spec.policies = []policyPayload{newPolicy("unscoped-sigkill", 1, yaml, "")}
+		payload, err := buildBundlePayload(spec)
+		if err != nil {
+			return err
+		}
+		env, err := signEnvelope(bundlePayloadType, payload, t1)
+		if err != nil {
+			return err
+		}
+		v := vector("guardrail_rejection_unscoped_sigkill", "A Sigkill action with no matchBinaries at all, rejected by internal/guard's G1 (protected processes: every enforcement selector must have matchBinaries).", testvectors.KindVerify)
+		v.RootMetadataB64 = b64(stdRoot.envelope)
+		v.EnvelopeB64 = b64(env)
+		v.ExpectedResult = verify.CodeRejectedGuardrail.String()
+		if err := saveChecked(dir, v); err != nil {
+			return err
+		}
+	}
+
+	// capability_rejection_override: Override on a kprobe, but the host
+	// (per the fake HostCapabilities this vector is self-checked
+	// against) does not support kprobe Override. internal/guard's G8,
+	// mapped by internal/verify to REJECTED_CAPABILITY.
+	{
+		spec := stdBundleSpec()
+		yaml := "apiVersion: cilium.io/v1alpha1\nkind: TracingPolicy\nmetadata:\n  name: override-no-capability\nspec:\n  kprobes:\n  - call: \"security_bprm_check\"\n    selectors:\n    - matchBinaries:\n      - operator: \"In\"\n        values:\n        - \"/usr/bin/safe\"\n      matchActions:\n      - action: \"Override\"\n        argError: -1\n"
+		spec.policies = []policyPayload{newPolicy("override-no-capability", 1, yaml, "")}
+		payload, err := buildBundlePayload(spec)
+		if err != nil {
+			return err
+		}
+		env, err := signEnvelope(bundlePayloadType, payload, t1)
+		if err != nil {
+			return err
+		}
+		v := vector("capability_rejection_override", "Override on a kprobe where the host lacks the KprobeOverride capability, rejected by internal/guard's G8 and mapped to REJECTED_CAPABILITY.", testvectors.KindVerify)
+		v.RootMetadataB64 = b64(stdRoot.envelope)
+		v.EnvelopeB64 = b64(env)
+		v.ExpectedResult = verify.CodeRejectedCapability.String()
+		if err := saveChecked(dir, v); err != nil {
+			return err
+		}
 	}
 
 	return writeVectorsReadme(dir)

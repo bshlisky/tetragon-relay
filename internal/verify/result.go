@@ -34,8 +34,15 @@ const (
 	CodeRejectedSchema
 	// CodeRejectedGuardrail means the bundle passed every check above
 	// but was rejected by the Guardrails implementation (step 2 of this
-	// project; a fake is used in this step's tests).
+	// project) for any rule other than G8.
 	CodeRejectedGuardrail
+	// CodeRejectedCapability means Guardrails rejected the bundle
+	// specifically via rule G8: an action (e.g. Override) that the
+	// running host's kernel cannot actually enforce (architecture doc
+	// section 9.3; step 2 prompt Part C). Matches
+	// ApplyResult.Status.REJECTED_CAPABILITY = 9 in the proto (added by
+	// step 1 review A8, ahead of this step landing it).
+	CodeRejectedCapability
 )
 
 // String returns the stable, upper-snake-case name used in logs, tests, and
@@ -56,6 +63,8 @@ func (c Code) String() string {
 		return "REJECTED_SCHEMA"
 	case CodeRejectedGuardrail:
 		return "REJECTED_GUARDRAIL"
+	case CodeRejectedCapability:
+		return "REJECTED_CAPABILITY"
 	default:
 		return "UNKNOWN"
 	}

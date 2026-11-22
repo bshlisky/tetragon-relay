@@ -2,6 +2,7 @@
 /bin/
 /relayd
 /cmd/relayd/relayd
+/bundlesign-test
 *.test
 *.out
 

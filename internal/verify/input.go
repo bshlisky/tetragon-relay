@@ -38,6 +38,13 @@ type Input struct {
 	// Epochs supplies the current epoch for a scope.
 	Epochs EpochSource
 
+	// PolicyParser turns each policy's YAML into a typed, schema-valid
+	// *policydoc.Doc (step 2 prompt Part B) before Guardrails ever sees
+	// it. A nil PolicyParser is treated as a configuration failure and
+	// causes Verify to reject with CodeRejectedSchema; it is never
+	// treated as "schema validation not required."
+	PolicyParser PolicyParser
+
 	// Guardrails is called last, only on an otherwise-acceptable bundle.
 	// A nil Guardrails is treated as a configuration failure and causes
 	// Verify to reject with CodeRejectedGuardrail (step 1 review A2); it

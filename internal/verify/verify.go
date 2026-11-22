@@ -3,9 +3,12 @@ package verify
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 
 	"github.com/bshlisky/tetragon-relay/internal/dsse"
+	"github.com/bshlisky/tetragon-relay/internal/guard"
 	"github.com/bshlisky/tetragon-relay/internal/limits"
+	"github.com/bshlisky/tetragon-relay/internal/policydoc"
 	"github.com/bshlisky/tetragon-relay/internal/strictjson"
 )
 
@@ -169,8 +172,16 @@ func Verify(in Input) Result {
 	if len(bp.Policies) == 0 || len(bp.Policies) > limits.MaxPoliciesPerBundle {
 		return reject(CodeRejectedSchema, "policy count out of bounds")
 	}
+	// A nil PolicyParser is a configuration failure, not "schema
+	// validation not required": it must fail closed, exactly like a nil
+	// Guardrails (step 1 review A2) and a nil Epochs (step 8).
+	if in.PolicyParser == nil {
+		return reject(CodeRejectedSchema, "no policy parser configured")
+	}
+
 	seenNames := make(map[string]struct{}, len(bp.Policies))
 	policies := make([]Policy, 0, len(bp.Policies))
+	docs := make([]*policydoc.Doc, 0, len(bp.Policies))
 	for _, p := range bp.Policies {
 		if len(p.YAML) > limits.MaxPolicyYAMLBytes {
 			return reject(CodeRejectedSchema, "policy YAML exceeds size limit")
@@ -201,18 +212,38 @@ func Verify(in Input) Result {
 			return reject(CodeRejectedSchema, "policy YAML hash mismatch")
 		}
 
+		// Step 2 prompt Part B: safe policy ingestion (YAML hardening,
+		// CRD schema validation, policy-level allowlist, canonical
+		// form, typed model, completeness cross-check, name binding).
+		// Any error here is REJECTED_SCHEMA; the hash check above has
+		// already run, matching the prompt's "hash -> Parse" ordering.
+		doc, err := in.PolicyParser.Parse(p.Name, p.YAML)
+		if err != nil {
+			return reject(CodeRejectedSchema, "policy failed schema validation")
+		}
+		docs = append(docs, doc)
+
 		policies = append(policies, Policy(p))
 	}
 
-	// Step 12: guardrails, called last and only on an otherwise-valid
-	// bundle. A nil Guardrails is a configuration failure, not "no
-	// guardrails required": it must fail closed (step 1 review A2),
-	// never silently accept. Callers that genuinely want no guardrail
-	// restrictions must supply an explicit allow-all implementation.
+	// Step 12: guardrails (step 2 prompt Part C), called last and only on
+	// an otherwise-valid bundle. A nil Guardrails is a configuration
+	// failure, not "no guardrails required": it must fail closed (step 1
+	// review A2), never silently accept. Callers that genuinely want no
+	// guardrail restrictions must supply an explicit allow-all
+	// implementation.
 	if in.Guardrails == nil {
 		return reject(CodeRejectedGuardrail, "no guardrails configured")
 	}
-	if err := in.Guardrails.Check(policies); err != nil {
+	guardCtx := guard.GuardContext{Scope: bp.Scope, Mode: bp.Mode}
+	if err := in.Guardrails.Check(guardCtx, docs); err != nil {
+		var v *guard.Violation
+		if errors.As(err, &v) {
+			if v.Rule == guard.RuleG8 {
+				return reject(CodeRejectedCapability, "guardrail rejection: "+string(v.Rule))
+			}
+			return reject(CodeRejectedGuardrail, "guardrail rejection: "+string(v.Rule))
+		}
 		return reject(CodeRejectedGuardrail, "guardrail check failed")
 	}
 

@@ -60,6 +60,7 @@ func FuzzVerifyEnvelope(f *testing.F) {
 			TetragonVersion: "1.4.0",
 			Trust:           tv,
 			Epochs:          fakeEpochSource{current: 5},
+			PolicyParser:    realPolicyParser{},
 			Guardrails:      allowAllGuardrails{},
 		})
 	})

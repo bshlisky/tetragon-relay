@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bshlisky/tetragon-relay/internal/guard"
+	"github.com/bshlisky/tetragon-relay/internal/policydoc"
 	"github.com/bshlisky/tetragon-relay/internal/testvectors"
 	"github.com/bshlisky/tetragon-relay/internal/trust"
 	"github.com/bshlisky/tetragon-relay/internal/verify"
@@ -20,16 +22,18 @@ type fakeEpochSource struct {
 func (f fakeEpochSource) Current(string) (uint64, error) { return f.current, f.err }
 
 // recordingGuardrails is the fake Guardrails implementation used by this
-// step's tests, per the prompt: a real guardrail engine is step 2.
+// package's tests; the real guardrail engine (internal/guard) is exercised
+// against internal/verify via realPolicyParser/realGuardrailsAdapter below
+// for the step 2 vectors that need it.
 type recordingGuardrails struct {
 	calls      int
 	lastLen    int
 	rejectWith error
 }
 
-func (g *recordingGuardrails) Check(policies []verify.Policy) error {
+func (g *recordingGuardrails) Check(_ guard.GuardContext, docs []*policydoc.Doc) error {
 	g.calls++
-	g.lastLen = len(policies)
+	g.lastLen = len(docs)
 	return g.rejectWith
 }
 
@@ -39,7 +43,59 @@ func (g *recordingGuardrails) Check(policies []verify.Policy) error {
 // rather than relying on nil meaning "skipped."
 type allowAllGuardrails struct{}
 
-func (allowAllGuardrails) Check([]verify.Policy) error { return nil }
+func (allowAllGuardrails) Check(guard.GuardContext, []*policydoc.Doc) error { return nil }
+
+// realPolicyParser delegates to the real internal/policydoc.Parse: every
+// vector's policy YAML (testdata/vectors/) is now real, schema-valid
+// TracingPolicy content (cmd/bundlesign-test's validPolicyYAML), so using
+// the real parser here, rather than a lenient stub, is what actually
+// exercises step 2 Part B end to end through internal/verify.
+type realPolicyParser struct{}
+
+func (realPolicyParser) Parse(name, yamlDoc string) (*policydoc.Doc, error) {
+	return policydoc.Parse(name, yamlDoc)
+}
+
+// realGuardrailsAdapter delegates to the real internal/guard.Guardrails
+// engine with caller-supplied fakes, for the vectors that specifically
+// exercise a guard-level rejection (REJECTED_GUARDRAIL / REJECTED_CAPABILITY).
+type realGuardrailsAdapter struct {
+	caps    guard.HostCapabilities
+	history guard.PolicyHistory
+}
+
+func (g realGuardrailsAdapter) Check(ctx guard.GuardContext, docs []*policydoc.Doc) error {
+	gr := &guard.Guardrails{Capabilities: g.caps, History: g.history}
+	return gr.Check(ctx, docs)
+}
+
+type allowAllCapabilities struct{}
+
+func (allowAllCapabilities) KprobeOverride() bool { return true }
+func (allowAllCapabilities) LSMBPF() bool         { return true }
+
+type denyOverrideCapabilities struct{}
+
+func (denyOverrideCapabilities) KprobeOverride() bool { return false }
+func (denyOverrideCapabilities) LSMBPF() bool         { return false }
+
+type allowAllHistory struct{}
+
+func (allowAllHistory) SeenInMonitor(string, string) (bool, error) { return true, nil }
+
+// guardrailsForVector mirrors cmd/bundlesign-test's own selection logic,
+// so the test suite re-checks each vector against the exact Guardrails
+// implementation it was generated and self-checked against.
+func guardrailsForVector(v testvectors.Vector) verify.Guardrails {
+	switch v.Name {
+	case "guardrail_rejection_unscoped_sigkill":
+		return realGuardrailsAdapter{caps: allowAllCapabilities{}, history: allowAllHistory{}}
+	case "capability_rejection_override":
+		return realGuardrailsAdapter{caps: denyOverrideCapabilities{}, history: allowAllHistory{}}
+	default:
+		return allowAllGuardrails{}
+	}
+}
 
 func mustDecode(t *testing.T, s string) []byte {
 	t.Helper()
@@ -76,7 +132,8 @@ func buildInput(t *testing.T, v testvectors.Vector) verify.Input {
 		TetragonVersion: v.TetragonVersion,
 		Trust:           tv,
 		Epochs:          fakeEpochSource{current: v.CurrentEpoch},
-		Guardrails:      allowAllGuardrails{},
+		PolicyParser:    realPolicyParser{},
+		Guardrails:      guardrailsForVector(v),
 	}
 }
 

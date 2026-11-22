@@ -41,8 +41,9 @@ func worstCaseInput(t testing.TB) verify.Input {
 
 	policies := make([]string, 0, 64)
 	for i := 0; i < 64; i++ {
-		yaml := fmt.Sprintf("apiVersion: cilium.io/v1alpha1\nkind: TracingPolicy\nmetadata:\n  name: bench-%02d\n", i)
-		policies = append(policies, fmt.Sprintf(`{"name":"bench-policy-%02d","version":1,"sha256":%q,"yaml":%q}`, i, hashHex(yaml), yaml))
+		name := fmt.Sprintf("bench-policy-%02d", i)
+		yaml := fmt.Sprintf("{apiVersion: cilium.io/v1alpha1, kind: TracingPolicy, metadata: {name: %s}, spec: {kprobes: [{call: x, selectors: [{matchActions: [{action: Post}]}]}]}}", name)
+		policies = append(policies, fmt.Sprintf(`{"name":%q,"version":1,"sha256":%q,"yaml":%q}`, name, hashHex(yaml), yaml))
 	}
 	payload := `{"schema":"relay.policybundle.v1","bundle_id":"pb-bench-0001","epoch":10,"scope":"prod-db",` +
 		`"targets":{"host_uuids":["` + edgeHost + `"],"selector_digest":""},` +
@@ -60,6 +61,7 @@ func worstCaseInput(t testing.TB) verify.Input {
 		TetragonVersion: "1.4.0",
 		Trust:           tv,
 		Epochs:          fakeEpochSource{current: 5},
+		PolicyParser:    realPolicyParser{},
 		Guardrails:      allowAllGuardrails{},
 	}
 }
