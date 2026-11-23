@@ -218,7 +218,10 @@ func TestClient_ListTracingPolicies_Error(t *testing.T) {
 	}
 }
 
-func TestClient_GetEvents_StreamStartError(t *testing.T) {
+// TestClient_GetEvents_PreCanceledContext covers step-03a-review.md R3-4:
+// GetEvents must not report ctx's own cancellation as a typed error —
+// both channels close without errc ever receiving a value.
+func TestClient_GetEvents_PreCanceledContext(t *testing.T) {
 	f := newFakeServer()
 	c, cleanup := startFakeServer(t, f)
 	defer cleanup()
@@ -227,8 +230,33 @@ func TestClient_GetEvents_StreamStartError(t *testing.T) {
 	events, errc := c.GetEvents(ctx, nil)
 	for range events {
 	}
-	if err := <-errc; err == nil {
-		t.Fatal("GetEvents with a pre-canceled context produced no error")
+	if err, ok := <-errc; ok {
+		t.Fatalf("GetEvents with a pre-canceled context sent an error instead of closing errc silently: %v", err)
+	}
+}
+
+// TestClient_GetEvents_StreamErrorWithLiveContext covers the case R3-4
+// distinguishes from TestClient_GetEvents_PreCanceledContext above: a
+// genuine, real stream failure (the fake server returning an error after
+// its events, rather than blocking) while ctx is still live must still be
+// reported normally, not silently dropped.
+func TestClient_GetEvents_StreamErrorWithLiveContext(t *testing.T) {
+	f := newFakeServer()
+	f.getEventsErr = status.Error(codes.Internal, "fake: stream broke")
+	c, cleanup := startFakeServer(t, f)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	events, errc := c.GetEvents(ctx, nil)
+	for range events {
+	}
+	err, ok := <-errc
+	if !ok || err == nil {
+		t.Fatal("GetEvents with a live context and a real stream error produced no error")
+	}
+	if !errors.Is(err, ErrRejectedByTetragon) {
+		t.Fatalf("GetEvents error = %v, want ErrRejectedByTetragon", err)
 	}
 }
 

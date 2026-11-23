@@ -2,6 +2,7 @@ package apply
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/bshlisky/tetragon-relay/internal/limits"
@@ -80,6 +81,11 @@ const (
 	reasonControlPlaneDown  healthFailureReason = "control_plane_unreachable_entire_window"
 	reasonAdminPathEnforced healthFailureReason = "admin_path_enforcement_event"
 	reasonEnforcementSurge  healthFailureReason = "enforcement_event_surge"
+	// reasonEventStreamClosed means GetEvents' events channel closed
+	// (cleanly, with no error) before windowCtx's own deadline — i.e.
+	// Tetragon ended the event stream early, not as a side effect of the
+	// window itself ending (step-03a-review.md R3-4).
+	reasonEventStreamClosed healthFailureReason = "event_stream_closed_early"
 )
 
 // runHealthWindow implements step 3 prompt Part D5. policyNames bounds the
@@ -151,8 +157,27 @@ func runHealthWindow(
 
 		case ev, ok := <-events:
 			if !ok {
-				events = nil // channel closed; keep watching errc/ticker
-				continue
+				// Every path below returns: events closing always ends
+				// the window one way or another, so there is no
+				// "disable this case and keep looping" branch left to
+				// reach (unlike errc below, which tolerates a closed
+				// channel by itself).
+				if windowCtx.Err() != nil {
+					// step-03a-review.md R3-4: events closing races
+					// windowCtx.Done() at the window's own deadline
+					// (internal/tetra.GetEvents closes it, without
+					// sending, exactly when ctx ends) — handle it
+					// identically to that branch rather than looping
+					// back around only to pick Done() up next time.
+					if !everReachable {
+						return reasonControlPlaneDown, false
+					}
+					return "", true
+				}
+				// The window has not ended: Tetragon closed the event
+				// stream of its own accord, which is itself a health
+				// failure, not something to silently ignore.
+				return reasonEventStreamClosed, false
 			}
 			if reason, failed := evaluateEvent(ev); failed {
 				return reason, false
@@ -170,6 +195,30 @@ func runHealthWindow(
 				continue
 			}
 			if err != nil {
+				if windowCtx.Err() != nil || errors.Is(err, tetra.ErrTimeout) {
+					// step-03a-review.md R3-4: a timeout racing
+					// windowCtx.Done() at the exact deadline must not
+					// fail a window that actually completed healthily.
+					// windowCtx.Err() != nil is the common case;
+					// errors.Is(err, tetra.ErrTimeout) additionally
+					// covers a real timing gap observed under load
+					// (-count=200 -race stress): internal/tetra.GetEvents
+					// never applies a shorter timeout of its own to this
+					// call (unlike every other RPC method, it uses
+					// windowCtx directly, Part B3), so a DeadlineExceeded
+					// gRPC status for it can only ever mean windowCtx's
+					// own deadline — including when it arrives from the
+					// server's grpc-timeout-propagated deadline slightly
+					// before this goroutine's local windowCtx.Err() has
+					// been set (a scheduling race, not a real Tetragon
+					// problem). internal/tetra.GetEvents no longer sends
+					// this once ctx.Err() is locally observed non-nil
+					// either, but this closes the remaining gap.
+					if !everReachable {
+						return reasonControlPlaneDown, false
+					}
+					return "", true
+				}
 				return reasonHealthNotServing, false
 			}
 

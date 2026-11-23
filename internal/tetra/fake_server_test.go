@@ -46,6 +46,11 @@ type fakeServer struct {
 
 	events     []*tetragonpb.GetEventsResponse
 	eventDelay time.Duration
+	// getEventsErr, if set, makes GetEvents return it immediately after
+	// sending every entry in events, instead of blocking on
+	// stream.Context().Done() — a genuine, live-context stream failure,
+	// as opposed to one caused by ctx itself ending.
+	getEventsErr error
 }
 
 func newFakeServer() *fakeServer {
@@ -123,6 +128,7 @@ func (f *fakeServer) GetEvents(_ *tetragonpb.GetEventsRequest, stream grpc.Serve
 	f.mu.Lock()
 	events := append([]*tetragonpb.GetEventsResponse(nil), f.events...)
 	delay := f.eventDelay
+	getEventsErr := f.getEventsErr
 	f.mu.Unlock()
 	for _, e := range events {
 		if delay > 0 {
@@ -131,6 +137,9 @@ func (f *fakeServer) GetEvents(_ *tetragonpb.GetEventsRequest, stream grpc.Serve
 		if err := stream.Send(e); err != nil {
 			return err
 		}
+	}
+	if getEventsErr != nil {
+		return getEventsErr
 	}
 	<-stream.Context().Done()
 	return stream.Context().Err()

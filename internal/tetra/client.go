@@ -243,6 +243,18 @@ func (c *Client) GetEvents(ctx context.Context, policyNames []string) (<-chan Ev
 			}},
 		})
 		if err != nil {
+			// step-03a-review.md R3-4: do not report ctx's own
+			// cancellation/deadline as a typed error. A caller racing
+			// ctx's own expiry against this goroutine (internal/apply's
+			// health window does exactly this) would otherwise see a
+			// spurious error that fired only because ctx ended, not
+			// because anything about Tetragon or the stream failed;
+			// closing errc without sending lets such a caller treat
+			// "ctx ended" and "GetEvents reported nothing more" as the
+			// same, unambiguous signal.
+			if ctx.Err() != nil {
+				return
+			}
 			errc <- classifyErr(ctx, "GetEvents", err)
 			return
 		}
@@ -252,6 +264,9 @@ func (c *Client) GetEvents(ctx context.Context, policyNames []string) (<-chan Ev
 				return
 			}
 			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				errc <- classifyErr(ctx, "GetEvents", err)
 				return
 			}
