@@ -42,21 +42,7 @@ func Dial(_ context.Context, cfg Config) (*Client, error) {
 		if err := verifySocketFile(cfg, gid); err != nil {
 			return nil, err
 		}
-		d := net.Dialer{}
-		conn, err := d.DialContext(dialCtx, "unix", cfg.SocketPath)
-		if err != nil {
-			return nil, fmt.Errorf("%w: dial %s: %w", ErrUnavailable, cfg.SocketPath, err)
-		}
-		uc, ok := conn.(*net.UnixConn)
-		if !ok {
-			_ = conn.Close()
-			return nil, fmt.Errorf("%w: unexpected connection type %T", ErrSocketVerification, conn)
-		}
-		if err := verifyPeerCredAndExe(uc, cfg.TetragonBinaryPath); err != nil {
-			_ = conn.Close()
-			return nil, err
-		}
-		return conn, nil
+		return connectAndVerifyPeer(dialCtx, cfg.SocketPath, cfg.TetragonBinaryPath)
 	}
 
 	conn, err := grpc.NewClient("passthrough:///"+cfg.SocketPath,
@@ -68,6 +54,34 @@ func Dial(_ context.Context, cfg Config) (*Client, error) {
 		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
 	return NewUnverified(conn, cfg), nil
+}
+
+// connectAndVerifyPeer is the post-lstat half of Dial's dialer closure:
+// the actual unix-socket connect, followed by Part B2's post-connect
+// SO_PEERCRED/exe checks. Split out from Dial itself (rather than left as
+// an inline closure) specifically so it can be unit-tested directly
+// against a real socket this test process owns, bypassing only the
+// owner-uid-0 check verifySocketFile performs beforehand (which
+// inherently requires root and is already exhaustively tested in
+// isolation via evaluateSocketStat's synthetic-FileInfo cases) — Dial
+// itself is unchanged and still calls verifySocketFile first, in
+// production, every time.
+func connectAndVerifyPeer(dialCtx context.Context, socketPath, tetragonBinaryPath string) (net.Conn, error) {
+	d := net.Dialer{}
+	conn, err := d.DialContext(dialCtx, "unix", socketPath)
+	if err != nil {
+		return nil, fmt.Errorf("%w: dial %s: %w", ErrUnavailable, socketPath, err)
+	}
+	uc, ok := conn.(*net.UnixConn)
+	if !ok {
+		_ = conn.Close()
+		return nil, fmt.Errorf("%w: unexpected connection type %T", ErrSocketVerification, conn)
+	}
+	if err := verifyPeerCredAndExe(uc, tetragonBinaryPath); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return conn, nil
 }
 
 // verifySocketFile implements Part B2's pre-connect checks: lstat (never

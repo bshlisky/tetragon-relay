@@ -387,6 +387,69 @@ func TestPeerCredFunc_ClosedConn(t *testing.T) {
 	}
 }
 
+// TestConnectAndVerifyPeer covers Dial's post-lstat connect logic
+// (connectAndVerifyPeer) directly against a real socket this non-root
+// test process owns, with peerCredFunc/peerExeFunc stubbed to simulate a
+// uid-0 peer — exercising the real net.Dialer.DialContext call, the
+// *net.UnixConn type assertion, and the success return path, none of
+// which any other test reaches (Dial's own dialer closure can never get
+// past verifySocketFile's real owner-uid-0 check without root).
+func TestConnectAndVerifyPeer(t *testing.T) {
+	restoreCred, restoreExe := peerCredFunc, peerExeFunc
+	defer func() { peerCredFunc, peerExeFunc = restoreCred, restoreExe }()
+
+	dir, err := os.MkdirTemp("", "tetraconnect")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	sock := filepath.Join(dir, "s")
+	lis, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lis.Close() }()
+	go func() {
+		for {
+			c, err := lis.Accept()
+			if err != nil {
+				return // listener closed (test cleanup): exit cleanly
+			}
+			_ = c // keep the accepted side open for the connecting client's lifetime; GC/process exit reclaims it at test end
+		}
+	}()
+
+	t.Run("success", func(t *testing.T) {
+		peerCredFunc = func(*net.UnixConn) (uint32, int32, error) { return 0, 42, nil }
+		peerExeFunc = func(int32) (string, error) { return "/usr/sbin/tetragon", nil }
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		conn, err := connectAndVerifyPeer(ctx, sock, "/usr/sbin/tetragon")
+		if err != nil {
+			t.Fatalf("connectAndVerifyPeer: %v", err)
+		}
+		_ = conn.Close()
+	})
+
+	t.Run("peer_verification_fails", func(t *testing.T) {
+		peerCredFunc = func(*net.UnixConn) (uint32, int32, error) { return 1000, 42, nil }
+		peerExeFunc = func(int32) (string, error) { return "/usr/sbin/tetragon", nil }
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if _, err := connectAndVerifyPeer(ctx, sock, "/usr/sbin/tetragon"); err == nil {
+			t.Fatal("connectAndVerifyPeer accepted a non-root peer")
+		}
+	})
+
+	t.Run("dial_fails_nonexistent_socket", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if _, err := connectAndVerifyPeer(ctx, filepath.Join(dir, "nope"), "/usr/sbin/tetragon"); err == nil {
+			t.Fatal("connectAndVerifyPeer accepted a nonexistent socket")
+		}
+	})
+}
+
 func TestVerifyPeerCredAndExe(t *testing.T) {
 	restoreCred, restoreExe := peerCredFunc, peerExeFunc
 	defer func() { peerCredFunc, peerExeFunc = restoreCred, restoreExe }()
