@@ -9,9 +9,10 @@ import (
 )
 
 // Dial is only implemented on linux: step 3 prompt Part B2's socket
-// verification (SO_PEERCRED, /proc/<pid>/exe, SELinux xattrs) is
-// inherently Linux-specific, and architecture doc section 1.1 scopes this
-// project to RHEL 9. This stub exists only so the package (and anything
+// verification (SO_PEERCRED, SO_PEERSEC, cgroup v2 membership, SELinux
+// xattrs) is inherently Linux-specific, and architecture doc section 1.1
+// scopes this project to RHEL 9. This stub exists only so the package
+// (and anything
 // that imports it) builds and vets on a non-Linux development machine;
 // internal/tetra's RPC-behavior tests use NewUnverified directly against a
 // fake gRPC server instead of calling Dial, so they are unaffected and run

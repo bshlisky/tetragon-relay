@@ -187,8 +187,16 @@ jobs:
           GOOS=linux go build -o relay-probe ./cmd/relay-probe
           sudo ./relay-probe --report --tetragon-binary "${TETRAGON_BIN}" || true
 
-      - name: Start Tetragon (root) on the unix socket
+      - name: Start Tetragon (root, transient unit) on the unix socket
         run: |
+          # step-03a-review.md R3-1: Tetragon must run as a real systemd
+          # unit (not a bare backgrounded process) so internal/tetra's
+          # cgroup v2 membership check (peercgroup_linux.go) has a real
+          # "system.slice/tetragon.service" cgroup to verify against —
+          # the same unified-hierarchy path Config.UnitCgroupPath defaults
+          # to, matching packaging/systemd/tetragon-relay.service's own
+          # production unit's expected peer.
+          #
           # The release tarball mirrors an FHS tree
           # (tetragon-v1.8.0-amd64/usr/local/{bin,lib}/...); its own
           # install.sh would copy usr/local/lib/tetragon's contents
@@ -197,19 +205,19 @@ jobs:
           # tarball rather than running install.sh, point --bpf-lib at the
           # extracted usr/local/lib/tetragon directory directly instead.
           bpf_lib_dir="$(dirname "${TETRAGON_BIN}")/../lib/tetragon/bpf"
-          sudo "${TETRAGON_BIN}" \
+          sudo systemd-run --unit=tetragon --collect \
+            --property=Type=simple \
+            "${TETRAGON_BIN}" \
             --server-address unix:///var/run/tetragon/tetragon.sock \
             --tracing-policy-dir /etc/tetragon/tetragon.tp.d \
-            --bpf-lib "${bpf_lib_dir}" \
-            > /tmp/tetragon.log 2>&1 &
-          echo $! > /tmp/tetragon.pid
+            --bpf-lib "${bpf_lib_dir}"
           sleep 3
           # Fail fast and loudly if Tetragon did not actually start,
           # rather than letting the integration test suite fail later
           # with a confusing "connection refused".
-          if ! sudo kill -0 "$(cat /tmp/tetragon.pid)" 2>/dev/null; then
+          if ! sudo systemctl is-active --quiet tetragon.service; then
             echo "Tetragon did not start; log:" >&2
-            cat /tmp/tetragon.log >&2
+            sudo journalctl -u tetragon.service --no-pager >&2
             exit 1
           fi
           sudo chmod 660 /var/run/tetragon/tetragon.sock
@@ -218,24 +226,25 @@ jobs:
       - name: Run integration test suite (unprivileged, build tag "integration")
         run: |
           set -euo pipefail
-          # go test compiles a fresh temp binary per invocation, so a
-          # capability granted via setcap would not survive a plain
-          # `go test ...`. Build real test binaries first, grant each
-          # CAP_SYS_PTRACE (needed for internal/tetra's real
-          # /proc/<pid>/exe check against Tetragon's root-owned process;
-          # see packaging/systemd/tetragon-relay.service's own comment on
-          # why), then run them directly as the unprivileged
-          # tetragon-relay group member.
+          # go test compiles a fresh temp binary per invocation; build
+          # real test binaries first (no setcap needed since R3-1: the
+          # peer checks need no capability) and run them as the
+          # unprivileged tetragon-relay group member.
           go test -tags integration -race -count=1 -c -o /tmp/tetra.itest ./internal/tetra
           go test -tags integration -race -count=1 -c -o /tmp/apply.itest ./internal/apply
-          sudo setcap cap_sys_ptrace+ep /tmp/tetra.itest
-          sudo setcap cap_sys_ptrace+ep /tmp/apply.itest
           # TestAllowlist_NoOtherRPCsReferenced (internal/tetra) reads its
           # own package's .go files via a relative path, so each compiled
           # test binary must run with its source package directory as the
           # working directory, not wherever it happens to be invoked from.
+          #
+          # SO_PEERSEC (peer SELinux domain) cannot be exercised for real
+          # here: GitHub-hosted ubuntu-24.04 runners have SELinux
+          # disabled, so internal/tetra's SELinuxRequired=false path (the
+          # default these tests use) is what runs; that check is only
+          # exercised against a real SELinux-enabled peer by
+          # scripts/e2e-rhel9.sh on a real RHEL 9 host.
           sg tetragon-relay -c 'cd internal/tetra && /tmp/tetra.itest -test.v && cd ../apply && /tmp/apply.itest -test.v'
 
       - name: Stop Tetragon
         if: always()
-        run: sudo kill "$(cat /tmp/tetragon.pid)" || true
+        run: sudo systemctl stop tetragon.service || true

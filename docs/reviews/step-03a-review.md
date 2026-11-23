@@ -93,6 +93,46 @@ Required:
 - Audit every other select in internal/ that mixes a context's Done with a channel fed by
   work under the same context, and report each one with its verdict.
 
+## R3-1 amendment (2026-11-23)
+
+Devin found, and the architect confirmed, that the original R3-1 design above does not
+work on the production unit: once `CAP_SYS_PTRACE` is removed, `ProtectProc=invisible`
+(already set on `packaging/systemd/tetragon-relay.service`) hides Tetragon's root-owned
+`/proc/<pid>` from relayd entirely (`systemd.exec(5)`, `ProtectProc=`: "the root user is
+unaffected by this option, so to be effective it has to be used together with `User=`...
+and also without the `CAP_SYS_PTRACE` capability"), so `/proc/<peer pid>/cgroup` would
+always return `ENOENT` in production regardless of that file's own permissions.
+
+R3-1 is amended as follows; everything else in R3-1 through R3-4 is unchanged:
+
+- Replace the `/proc/<peer pid>/cgroup` check with: read
+  `/sys/fs/cgroup/<configured unit path>/cgroup.procs` (default
+  `system.slice/tetragon.service`) and require that the SO_PEERCRED pid appears in it.
+  Reason: `ProtectProc=invisible` hides root-owned `/proc/<pid>` from relayd once
+  `CAP_SYS_PTRACE` is removed; `cgroup.procs` is outside `/proc` and readable without
+  capabilities.
+- cgroup v2 only. Detect v2 via the filesystem type of `/sys/fs/cgroup` (cgroup2fs). On
+  cgroup v1 or a hybrid layout, the check fails closed (typed error) unless the
+  SO_PEERSEC check is active and passed; record which checks ran in the dial audit
+  record.
+- Read with lstat-then-open semantics: no symlink following, bounded read size (1 MiB),
+  strict parsing (one decimal pid per line); any parse error fails closed.
+- Cited sources: `cgroup.procs`'s read semantics and default readability —
+  Documentation/admin-guide/cgroup-v2.rst, "Organizing Processes and Threads"; that
+  `ProtectControlGroups=yes` leaves `/sys/fs/cgroup` globally readable (only mounted
+  read-only, not hidden/namespaced) — `systemd.exec(5)` and
+  `systemd/src/core/namespace.c`'s `protect_control_groups_yes_table`; the
+  `ProtectProc=invisible`/`CAP_SYS_PTRACE` interaction — `systemd.exec(5)`'s own
+  `ProtectProc=` documentation and systemd PR #19001.
+- Integration job: Tetragon runs as a transient unit (`systemd-run --unit=tetragon`) and
+  is verified against a real `system.slice/tetragon.service` cgroup; SO_PEERSEC is only
+  exercised against a real, enabled SELinux policy by `scripts/e2e-rhel9.sh` on an actual
+  RHEL 9 host (GitHub-hosted `ubuntu-24.04` runners have SELinux disabled).
+- Unit tests with injected readers: pid present, pid absent, empty file, malformed line,
+  cgroup v1/hybrid (unavailable, not failed), unreadable file, symlink in place of the
+  file, statfs failure.
+- Recorded in `docs/decisions/0018-peer-identity-check-no-capability.md` (Proposed).
+
 ## Definition of done for step 3
 
 - R3-1 to R3-4 fixed, each with regression tests, one commit per item.

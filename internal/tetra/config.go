@@ -14,9 +14,20 @@ import (
 	"log/slog"
 	"os/user"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/bshlisky/tetragon-relay/internal/limits"
+)
+
+// defaultPeerSELinuxType and defaultUnitCgroupPath are Config's defaults
+// for the post-connect peer checks added by the step 3a architect review's
+// R3-1 amendment (docs/reviews/step-03a-review.md): the SELinux domain
+// Tetragon is expected to run in, and the cgroup v2 unified-hierarchy path
+// (relative to /sys/fs/cgroup) of the systemd unit Tetragon runs under.
+const (
+	defaultPeerSELinuxType = "tetragon_t"
+	defaultUnitCgroupPath  = "system.slice/tetragon.service"
 )
 
 // Config carries everything a Client needs to dial and verify Tetragon's
@@ -29,9 +40,12 @@ type Config struct {
 	// section 8.9, e.g. "/var/run/tetragon/tetragon.sock").
 	SocketPath string
 	// TetragonBinaryPath is the configured, trusted path to the Tetragon
-	// daemon binary (e.g. "/usr/local/bin/tetragon"). Part B2's final
-	// check resolves the connected peer's pid's /proc/<pid>/exe and
-	// compares it against this path.
+	// daemon binary (e.g. "/usr/local/bin/tetragon"). No longer used by
+	// Part B2's post-connect peer check (step-03a-review.md R3-1: the
+	// /proc/<pid>/exe check it drove required CAP_SYS_PTRACE, which
+	// architecture doc section 8.7 forbids); kept on Config because
+	// cmd/relay-probe and internal/hostprobe still use it to verify the
+	// Tetragon binary's own hash/path at host-fact collection time.
 	TetragonBinaryPath string
 	// RelayGroupName is the POSIX group the socket's group ownership
 	// must match (Part B2). Resolved to a gid at verification time (not
@@ -39,13 +53,23 @@ type Config struct {
 	// without an agent restart.
 	RelayGroupName string
 	// SELinuxRequired, when false, allows Part B2's SELinux label check
-	// to be skipped (logged once) on a host where SELinux is disabled.
-	// When true (the default), a disabled SELinux is itself a
-	// verification failure. Architecture doc section 9.2 expects
-	// SELinux enforcing on RHEL 9, so the zero value is the safer
-	// (fail-closed) choice; a config that wants to opt out must say so
-	// explicitly.
+	// (and the R3-1 amendment's SO_PEERSEC peer check) to be skipped
+	// (logged once) on a host where SELinux is disabled. When true (the
+	// default), a disabled SELinux is itself a verification failure.
+	// Architecture doc section 9.2 expects SELinux enforcing on RHEL 9,
+	// so the zero value is the safer (fail-closed) choice; a config that
+	// wants to opt out must say so explicitly.
 	SELinuxRequired bool
+	// PeerSELinuxType is the expected SELinux type component of the
+	// connected peer's own SO_PEERSEC security context (step-03a-review.md
+	// R3-1 amendment, replacing the reverted /proc/<pid>/exe check).
+	// Defaults to "tetragon_t" if empty.
+	PeerSELinuxType string
+	// UnitCgroupPath is the expected cgroup v2 unified-hierarchy path,
+	// relative to /sys/fs/cgroup, of the systemd unit Tetragon runs under
+	// (R3-1 amendment). Defaults to "system.slice/tetragon.service" if
+	// empty. A leading "/" is tolerated and stripped.
+	UnitCgroupPath string
 	// Timeout bounds every RPC (Part B3). Zero means
 	// limits.DefaultTetragonRPCTimeout.
 	Timeout time.Duration
@@ -66,6 +90,20 @@ func (c Config) timeout() time.Duration {
 		return limits.DefaultTetragonRPCTimeout
 	}
 	return c.Timeout
+}
+
+func (c Config) peerSELinuxType() string {
+	if c.PeerSELinuxType == "" {
+		return defaultPeerSELinuxType
+	}
+	return c.PeerSELinuxType
+}
+
+func (c Config) unitCgroupPath() string {
+	if c.UnitCgroupPath == "" {
+		return defaultUnitCgroupPath
+	}
+	return strings.TrimPrefix(c.UnitCgroupPath, "/")
 }
 
 // relayGID resolves Config.RelayGroupName to a numeric gid. Kept as a

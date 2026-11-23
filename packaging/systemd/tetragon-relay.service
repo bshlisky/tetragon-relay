@@ -34,16 +34,20 @@ RestartSec=2s
 
 # Privilege
 NoNewPrivileges=yes
-# CAP_SYS_PTRACE is required for internal/tetra's Part B2 post-connect
-# check: resolving the Tetragon socket peer's /proc/<pid>/exe. Tetragon
-# runs as root and relayd does not (User=tetragon-relay above); reading
-# another uid's /proc/<pid>/exe is gated by the kernel's ptrace permission
-# check (Yama/commoncap), not by the symlink's file mode, so without this
-# capability every Dial() would fail verifyPeerCredAndExe with EPERM, as
-# confirmed by step 3's real-Tetragon integration job (docs/reports/
-# step-03.md section 13). No other capability is granted.
-CapabilityBoundingSet=CAP_SYS_PTRACE
-AmbientCapabilities=CAP_SYS_PTRACE
+# No capabilities. step-03a-review.md R3-1: commit 6be5137 granted
+# CAP_SYS_PTRACE here to let internal/tetra read the Tetragon socket
+# peer's /proc/<pid>/exe, but that capability lets relayd inspect and
+# read the memory of any process on the host (sshd, systemd, Tetragon
+# itself) — a compromised agent would be root-equivalent, violating
+# architecture doc P9 and section 8.7 (no capabilities). The exe check
+# was replaced by internal/tetra's SO_PEERSEC (peer SELinux domain) and
+# cgroup v2 membership checks (dial_linux.go, peercgroup_linux.go), which
+# need no capability at all. CAP_SYS_PTRACE also would have defeated
+# ProtectProc=invisible below outright (systemd.exec(5): "the root user
+# is unaffected by this option... and also without the CAP_SYS_PTRACE
+# capability, which also allows a process to bypass this feature").
+CapabilityBoundingSet=
+AmbientCapabilities=
 SecureBits=noroot-locked
 
 # Filesystem

@@ -4,6 +4,7 @@ package tetra
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os"
 	"os/user"
@@ -65,10 +66,9 @@ func currentGroupName(t *testing.T) string {
 // and the failure surfaces on the first RPC.
 func TestDial_NonexistentSocket(t *testing.T) {
 	cfg := Config{
-		SocketPath:         filepath.Join(t.TempDir(), "does-not-exist"),
-		TetragonBinaryPath: "/usr/sbin/tetragon",
-		RelayGroupName:     currentGroupName(t),
-		Timeout:            2 * time.Second,
+		SocketPath:     filepath.Join(t.TempDir(), "does-not-exist"),
+		RelayGroupName: currentGroupName(t),
+		Timeout:        2 * time.Second,
 	}
 	c, err := Dial(context.Background(), cfg)
 	if err != nil {
@@ -105,10 +105,9 @@ func TestDial_RealSocketWrongOwner(t *testing.T) {
 	}
 
 	cfg := Config{
-		SocketPath:         sock,
-		TetragonBinaryPath: "/usr/sbin/tetragon",
-		RelayGroupName:     currentGroupName(t),
-		Timeout:            2 * time.Second,
+		SocketPath:     sock,
+		RelayGroupName: currentGroupName(t),
+		Timeout:        2 * time.Second,
 	}
 	c, err := Dial(context.Background(), cfg)
 	if err != nil {
@@ -357,21 +356,20 @@ func TestPeerCredFunc_Real(t *testing.T) {
 	}
 }
 
-// TestPeerExeFunc_Real exercises the real (non-stubbed) default
-// peerExeFunc implementation (os.Readlink of /proc/<pid>/exe) against this
-// test process's own pid, which it can always resolve regardless of
-// privilege.
-func TestPeerExeFunc_Real(t *testing.T) {
-	exe, err := peerExeFunc(int32(os.Getpid()))
-	if err != nil {
-		t.Fatalf("peerExeFunc: %v", err)
+// TestGetsockoptPeerSecFunc_Real exercises the real (non-stubbed) default
+// getsockoptPeerSecFunc implementation (SO_PEERSEC via raw.Control +
+// unix.GetsockoptString) against a real unix socket pair this test
+// process owns on both ends. On a host with SELinux disabled (every
+// GitHub-hosted ubuntu-24.04 runner), this returns ENOPROTOOPT, exercising
+// isPeerSELinuxUnavailableErr's real caller path end to end.
+func TestGetsockoptPeerSecFunc_Real(t *testing.T) {
+	conn := realUnixConnPair(t)
+	_, err := getsockoptPeerSecFunc(conn)
+	if err == nil {
+		t.Skip("SELinux peer security context available on this host; nothing to assert")
 	}
-	self, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if exe != self {
-		t.Errorf("peerExeFunc(self) = %q, want %q", exe, self)
+	if !isPeerSELinuxUnavailableErr(err) {
+		t.Fatalf("getsockoptPeerSecFunc on a host with no SELinux returned an unexpected error: %v", err)
 	}
 }
 
@@ -387,16 +385,27 @@ func TestPeerCredFunc_ClosedConn(t *testing.T) {
 	}
 }
 
+// stubPeerChecks overrides getsockoptPeerSecFunc and verifyPeerCgroupFunc
+// for the duration of the calling test, returning a restore func.
+func stubPeerChecks(t *testing.T, sec string, secErr error, cgroup cgroupCheckResult, cgroupErr error) {
+	t.Helper()
+	restoreSec, restoreCgroup := getsockoptPeerSecFunc, verifyPeerCgroupFunc
+	t.Cleanup(func() { getsockoptPeerSecFunc, verifyPeerCgroupFunc = restoreSec, restoreCgroup })
+	getsockoptPeerSecFunc = func(*net.UnixConn) (string, error) { return sec, secErr }
+	verifyPeerCgroupFunc = func(Config, int32) (cgroupCheckResult, error) { return cgroup, cgroupErr }
+}
+
 // TestConnectAndVerifyPeer covers Dial's post-lstat connect logic
 // (connectAndVerifyPeer) directly against a real socket this non-root
-// test process owns, with peerCredFunc/peerExeFunc stubbed to simulate a
-// uid-0 peer — exercising the real net.Dialer.DialContext call, the
+// test process owns, with peerCredFunc/getsockoptPeerSecFunc/
+// verifyPeerCgroupFunc stubbed to simulate a uid-0 peer that passes the
+// cgroup check — exercising the real net.Dialer.DialContext call, the
 // *net.UnixConn type assertion, and the success return path, none of
 // which any other test reaches (Dial's own dialer closure can never get
 // past verifySocketFile's real owner-uid-0 check without root).
 func TestConnectAndVerifyPeer(t *testing.T) {
-	restoreCred, restoreExe := peerCredFunc, peerExeFunc
-	defer func() { peerCredFunc, peerExeFunc = restoreCred, restoreExe }()
+	restoreCred := peerCredFunc
+	defer func() { peerCredFunc = restoreCred }()
 
 	dir, err := os.MkdirTemp("", "tetraconnect")
 	if err != nil {
@@ -419,12 +428,14 @@ func TestConnectAndVerifyPeer(t *testing.T) {
 		}
 	}()
 
+	cfg := Config{SocketPath: sock}
+
 	t.Run("success", func(t *testing.T) {
 		peerCredFunc = func(*net.UnixConn) (uint32, int32, error) { return 0, 42, nil }
-		peerExeFunc = func(int32) (string, error) { return "/usr/sbin/tetragon", nil }
+		stubPeerChecks(t, "", unix.ENOPROTOOPT, cgroupCheckResult{Available: true, Passed: true}, nil)
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		conn, err := connectAndVerifyPeer(ctx, sock, "/usr/sbin/tetragon")
+		conn, err := connectAndVerifyPeer(ctx, cfg)
 		if err != nil {
 			t.Fatalf("connectAndVerifyPeer: %v", err)
 		}
@@ -433,10 +444,10 @@ func TestConnectAndVerifyPeer(t *testing.T) {
 
 	t.Run("peer_verification_fails", func(t *testing.T) {
 		peerCredFunc = func(*net.UnixConn) (uint32, int32, error) { return 1000, 42, nil }
-		peerExeFunc = func(int32) (string, error) { return "/usr/sbin/tetragon", nil }
+		stubPeerChecks(t, "", unix.ENOPROTOOPT, cgroupCheckResult{Available: true, Passed: true}, nil)
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		if _, err := connectAndVerifyPeer(ctx, sock, "/usr/sbin/tetragon"); err == nil {
+		if _, err := connectAndVerifyPeer(ctx, cfg); err == nil {
 			t.Fatal("connectAndVerifyPeer accepted a non-root peer")
 		}
 	})
@@ -444,46 +455,140 @@ func TestConnectAndVerifyPeer(t *testing.T) {
 	t.Run("dial_fails_nonexistent_socket", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		if _, err := connectAndVerifyPeer(ctx, filepath.Join(dir, "nope"), "/usr/sbin/tetragon"); err == nil {
+		if _, err := connectAndVerifyPeer(ctx, Config{SocketPath: filepath.Join(dir, "nope")}); err == nil {
 			t.Fatal("connectAndVerifyPeer accepted a nonexistent socket")
 		}
 	})
 }
 
-func TestVerifyPeerCredAndExe(t *testing.T) {
-	restoreCred, restoreExe := peerCredFunc, peerExeFunc
-	defer func() { peerCredFunc, peerExeFunc = restoreCred, restoreExe }()
+func TestIsPeerSELinuxUnavailableErr(t *testing.T) {
+	if !isPeerSELinuxUnavailableErr(unix.ENOPROTOOPT) {
+		t.Error("ENOPROTOOPT not treated as SELinux-unavailable")
+	}
+	if !isPeerSELinuxUnavailableErr(unix.EOPNOTSUPP) {
+		t.Error("EOPNOTSUPP not treated as SELinux-unavailable")
+	}
+	if isPeerSELinuxUnavailableErr(unix.EACCES) {
+		t.Error("an unrelated errno was treated as SELinux-unavailable")
+	}
+}
 
+func TestVerifyPeerSELinux(t *testing.T) {
+	conn := realUnixConnPair(t)
+	restore := getsockoptPeerSecFunc
+	defer func() { getsockoptPeerSecFunc = restore }()
+
+	t.Run("correct_type", func(t *testing.T) {
+		getsockoptPeerSecFunc = func(*net.UnixConn) (string, error) { return "system_u:system_r:tetragon_t:s0", nil }
+		active, err := verifyPeerSELinux(Config{}, conn)
+		if err != nil || !active {
+			t.Fatalf("active=%v err=%v, want true/nil", active, err)
+		}
+	})
+
+	t.Run("wrong_type", func(t *testing.T) {
+		getsockoptPeerSecFunc = func(*net.UnixConn) (string, error) { return "system_u:system_r:unconfined_t:s0", nil }
+		if _, err := verifyPeerSELinux(Config{}, conn); err == nil {
+			t.Fatal("wrong peer SELinux type accepted")
+		}
+	})
+
+	t.Run("custom_configured_type", func(t *testing.T) {
+		getsockoptPeerSecFunc = func(*net.UnixConn) (string, error) { return "system_u:system_r:custom_t:s0", nil }
+		active, err := verifyPeerSELinux(Config{PeerSELinuxType: "custom_t"}, conn)
+		if err != nil || !active {
+			t.Fatalf("active=%v err=%v, want true/nil", active, err)
+		}
+	})
+
+	t.Run("disabled_selinux_required_false", func(t *testing.T) {
+		getsockoptPeerSecFunc = func(*net.UnixConn) (string, error) { return "", unix.ENOPROTOOPT }
+		active, err := verifyPeerSELinux(Config{SELinuxRequired: false}, conn)
+		if err != nil || active {
+			t.Fatalf("active=%v err=%v, want false/nil", active, err)
+		}
+	})
+
+	t.Run("disabled_selinux_required_true", func(t *testing.T) {
+		getsockoptPeerSecFunc = func(*net.UnixConn) (string, error) { return "", unix.ENOPROTOOPT }
+		if _, err := verifyPeerSELinux(Config{SELinuxRequired: true}, conn); err == nil {
+			t.Fatal("disabled SELinux with selinux_required=true accepted")
+		}
+	})
+
+	t.Run("other_getsockopt_error", func(t *testing.T) {
+		getsockoptPeerSecFunc = func(*net.UnixConn) (string, error) { return "", unix.EACCES }
+		if _, err := verifyPeerSELinux(Config{}, conn); err == nil {
+			t.Fatal("an unrelated SO_PEERSEC error was treated as disabled SELinux")
+		}
+	})
+}
+
+func TestVerifyPeerCredAndTetragon(t *testing.T) {
+	restoreCred := peerCredFunc
+	defer func() { peerCredFunc = restoreCred }()
 	conn := realUnixConnPair(t)
 
 	t.Run("wrong_uid", func(t *testing.T) {
 		peerCredFunc = func(*net.UnixConn) (uint32, int32, error) { return 1000, 42, nil }
-		peerExeFunc = func(int32) (string, error) { return "/usr/sbin/tetragon", nil }
-		if err := verifyPeerCredAndExe(conn, "/usr/sbin/tetragon"); err == nil {
+		stubPeerChecks(t, "", unix.ENOPROTOOPT, cgroupCheckResult{Available: true, Passed: true}, nil)
+		if err := verifyPeerCredAndTetragon(Config{}, conn); err == nil {
 			t.Fatal("non-root peer uid accepted")
-		}
-	})
-
-	t.Run("wrong_exe", func(t *testing.T) {
-		peerCredFunc = func(*net.UnixConn) (uint32, int32, error) { return 0, 42, nil }
-		peerExeFunc = func(int32) (string, error) { return "/tmp/evil/tetragon", nil }
-		if err := verifyPeerCredAndExe(conn, "/usr/sbin/tetragon"); err == nil {
-			t.Fatal("mismatched peer exe path accepted")
-		}
-	})
-
-	t.Run("correct", func(t *testing.T) {
-		peerCredFunc = func(*net.UnixConn) (uint32, int32, error) { return 0, 42, nil }
-		peerExeFunc = func(int32) (string, error) { return "/usr/sbin/tetragon", nil }
-		if err := verifyPeerCredAndExe(conn, "/usr/sbin/tetragon"); err != nil {
-			t.Fatalf("correct peer rejected: %v", err)
 		}
 	})
 
 	t.Run("peercred_error", func(t *testing.T) {
 		peerCredFunc = func(*net.UnixConn) (uint32, int32, error) { return 0, 0, os.ErrPermission }
-		if err := verifyPeerCredAndExe(conn, "/usr/sbin/tetragon"); err == nil {
+		if err := verifyPeerCredAndTetragon(Config{}, conn); err == nil {
 			t.Fatal("SO_PEERCRED error was not propagated")
+		}
+	})
+
+	t.Run("selinux_fails_short_circuits_cgroup", func(t *testing.T) {
+		peerCredFunc = func(*net.UnixConn) (uint32, int32, error) { return 0, 42, nil }
+		stubPeerChecks(t, "system_u:system_r:unconfined_t:s0", nil, cgroupCheckResult{Available: true, Passed: true}, nil)
+		if err := verifyPeerCredAndTetragon(Config{}, conn); err == nil {
+			t.Fatal("wrong peer SELinux type accepted")
+		}
+	})
+
+	t.Run("cgroup_available_and_passes", func(t *testing.T) {
+		peerCredFunc = func(*net.UnixConn) (uint32, int32, error) { return 0, 42, nil }
+		stubPeerChecks(t, "", unix.ENOPROTOOPT, cgroupCheckResult{Available: true, Passed: true}, nil)
+		if err := verifyPeerCredAndTetragon(Config{}, conn); err != nil {
+			t.Fatalf("correct peer rejected: %v", err)
+		}
+	})
+
+	t.Run("cgroup_available_and_fails", func(t *testing.T) {
+		peerCredFunc = func(*net.UnixConn) (uint32, int32, error) { return 0, 42, nil }
+		stubPeerChecks(t, "", unix.ENOPROTOOPT, cgroupCheckResult{Available: true, Passed: false}, nil)
+		if err := verifyPeerCredAndTetragon(Config{}, conn); err == nil {
+			t.Fatal("peer not in the expected cgroup was accepted")
+		}
+	})
+
+	t.Run("cgroup_check_error", func(t *testing.T) {
+		peerCredFunc = func(*net.UnixConn) (uint32, int32, error) { return 0, 42, nil }
+		stubPeerChecks(t, "", unix.ENOPROTOOPT, cgroupCheckResult{}, errors.New("statfs failed"))
+		if err := verifyPeerCredAndTetragon(Config{}, conn); err == nil {
+			t.Fatal("a cgroup check error was not propagated")
+		}
+	})
+
+	t.Run("cgroup_unavailable_selinux_active_passes", func(t *testing.T) {
+		peerCredFunc = func(*net.UnixConn) (uint32, int32, error) { return 0, 42, nil }
+		stubPeerChecks(t, "system_u:system_r:tetragon_t:s0", nil, cgroupCheckResult{Available: false}, nil)
+		if err := verifyPeerCredAndTetragon(Config{}, conn); err != nil {
+			t.Fatalf("cgroup-v1 host with a passing SELinux check rejected: %v", err)
+		}
+	})
+
+	t.Run("cgroup_unavailable_selinux_inactive_fails_closed", func(t *testing.T) {
+		peerCredFunc = func(*net.UnixConn) (uint32, int32, error) { return 0, 42, nil }
+		stubPeerChecks(t, "", unix.ENOPROTOOPT, cgroupCheckResult{Available: false}, nil)
+		if err := verifyPeerCredAndTetragon(Config{}, conn); err == nil {
+			t.Fatal("a peer with neither cgroup nor SELinux verification available was accepted")
 		}
 	})
 }
@@ -492,15 +597,16 @@ func TestDial_RealSocketEndToEnd(t *testing.T) {
 	// Exercises Dial itself (not just its sub-checks) against a fake gRPC
 	// server listening on a real unix socket this test owns and chmods,
 	// confirming the whole pre-dial + post-connect pipeline wires
-	// together. It stubs out getxattr/peercred/exe (this test process is
-	// not root and cannot own the socket as uid 0, and evaluateSocketStat
-	// itself is already covered in isolation above) but exercises a real
-	// lstat and a real unix socket connection end to end.
-	restoreXattr, restoreCred, restoreExe := getxattrFunc, peerCredFunc, peerExeFunc
-	defer func() { getxattrFunc, peerCredFunc, peerExeFunc = restoreXattr, restoreCred, restoreExe }()
+	// together. It stubs out getxattr/peercred/SO_PEERSEC/cgroup (this
+	// test process is not root and cannot own the socket as uid 0, and
+	// evaluateSocketStat itself is already covered in isolation above)
+	// but exercises a real lstat and a real unix socket connection end to
+	// end.
+	restoreXattr, restoreCred := getxattrFunc, peerCredFunc
+	defer func() { getxattrFunc, peerCredFunc = restoreXattr, restoreCred }()
 	getxattrFunc = func(string, string, []byte) (int, error) { return 0, unix.ENODATA }
 	peerCredFunc = func(*net.UnixConn) (uint32, int32, error) { return 0, 42, nil }
-	peerExeFunc = func(int32) (string, error) { return "/usr/sbin/tetragon", nil }
+	stubPeerChecks(t, "", unix.ENOPROTOOPT, cgroupCheckResult{Available: true, Passed: true}, nil)
 
 	dir, err := os.MkdirTemp("", "tetradial")
 	if err != nil {
@@ -535,9 +641,8 @@ func TestDial_RealSocketEndToEnd(t *testing.T) {
 	}
 
 	cfg := Config{
-		SocketPath:         sock,
-		TetragonBinaryPath: "/usr/sbin/tetragon",
-		RelayGroupName:     g.Name,
+		SocketPath:     sock,
+		RelayGroupName: g.Name,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

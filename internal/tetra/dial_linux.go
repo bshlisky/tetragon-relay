@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -30,8 +29,8 @@ var warnSELinuxDisabledOnce sync.Once
 // socket's owner/group/mode/SELinux label via lstat (no symlink follow)
 // before every connection attempt — including every gRPC-internal
 // reconnect, since grpc invokes the dialer again on each one — and verifies
-// the connected peer's credentials and resolved binary path once the
-// connection is actually established.
+// the connected peer's credentials, SELinux domain and cgroup once the
+// connection is actually established (step-03a-review.md R3-1 amendment).
 func Dial(_ context.Context, cfg Config) (*Client, error) {
 	gid, err := cfg.relayGID()
 	if err != nil {
@@ -42,7 +41,7 @@ func Dial(_ context.Context, cfg Config) (*Client, error) {
 		if err := verifySocketFile(cfg, gid); err != nil {
 			return nil, err
 		}
-		return connectAndVerifyPeer(dialCtx, cfg.SocketPath, cfg.TetragonBinaryPath)
+		return connectAndVerifyPeer(dialCtx, cfg)
 	}
 
 	conn, err := grpc.NewClient("passthrough:///"+cfg.SocketPath,
@@ -58,26 +57,26 @@ func Dial(_ context.Context, cfg Config) (*Client, error) {
 
 // connectAndVerifyPeer is the post-lstat half of Dial's dialer closure:
 // the actual unix-socket connect, followed by Part B2's post-connect
-// SO_PEERCRED/exe checks. Split out from Dial itself (rather than left as
-// an inline closure) specifically so it can be unit-tested directly
-// against a real socket this test process owns, bypassing only the
-// owner-uid-0 check verifySocketFile performs beforehand (which
-// inherently requires root and is already exhaustively tested in
-// isolation via evaluateSocketStat's synthetic-FileInfo cases) — Dial
-// itself is unchanged and still calls verifySocketFile first, in
-// production, every time.
-func connectAndVerifyPeer(dialCtx context.Context, socketPath, tetragonBinaryPath string) (net.Conn, error) {
+// identity checks. Split out from Dial itself (rather than left as an
+// inline closure) specifically so it can be unit-tested directly against
+// a real socket this test process owns, bypassing only the owner-uid-0
+// check verifySocketFile performs beforehand (which inherently requires
+// root and is already exhaustively tested in isolation via
+// evaluateSocketStat's synthetic-FileInfo cases) — Dial itself is
+// unchanged and still calls verifySocketFile first, in production, every
+// time.
+func connectAndVerifyPeer(dialCtx context.Context, cfg Config) (net.Conn, error) {
 	d := net.Dialer{}
-	conn, err := d.DialContext(dialCtx, "unix", socketPath)
+	conn, err := d.DialContext(dialCtx, "unix", cfg.SocketPath)
 	if err != nil {
-		return nil, fmt.Errorf("%w: dial %s: %w", ErrUnavailable, socketPath, err)
+		return nil, fmt.Errorf("%w: dial %s: %w", ErrUnavailable, cfg.SocketPath, err)
 	}
 	uc, ok := conn.(*net.UnixConn)
 	if !ok {
 		_ = conn.Close()
 		return nil, fmt.Errorf("%w: unexpected connection type %T", ErrSocketVerification, conn)
 	}
-	if err := verifyPeerCredAndExe(uc, tetragonBinaryPath); err != nil {
+	if err := verifyPeerCredAndTetragon(cfg, uc); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
@@ -164,8 +163,8 @@ func isSELinuxDisabledErr(err error) bool {
 	return errors.Is(err, unix.ENODATA) || errors.Is(err, unix.ENOTSUP) || errors.Is(err, unix.EOPNOTSUPP)
 }
 
-// peerCredFunc and peerExeFunc are package variables so tests can stub
-// SO_PEERCRED and /proc/<pid>/exe resolution.
+// peerCredFunc and getsockoptPeerSecFunc are package variables so tests
+// can stub SO_PEERCRED and SO_PEERSEC resolution.
 var (
 	peerCredFunc = func(uc *net.UnixConn) (uid uint32, pid int32, err error) {
 		raw, err := uc.SyscallConn()
@@ -185,17 +184,83 @@ var (
 		}
 		return cred.Uid, cred.Pid, nil
 	}
-	peerExeFunc = func(pid int32) (string, error) {
-		return os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
+	// getsockoptPeerSecFunc implements SO_PEERSEC (SO_PEERSEC(2const)):
+	// "returns the security context of the peer socket connected to this
+	// socket", which for a Unix domain stream socket is the SELinux
+	// context of the process that created the peer end at connect time —
+	// available directly from the kernel's socket security struct, with
+	// no /proc access and no special capability.
+	getsockoptPeerSecFunc = func(uc *net.UnixConn) (string, error) {
+		raw, err := uc.SyscallConn()
+		if err != nil {
+			return "", err
+		}
+		var sec string
+		var sysErr error
+		err = raw.Control(func(fd uintptr) {
+			sec, sysErr = unix.GetsockoptString(int(fd), unix.SOL_SOCKET, unix.SO_PEERSEC)
+		})
+		if err != nil {
+			return "", err
+		}
+		return sec, sysErr
 	}
+	// verifyPeerCgroupFunc lets tests stub the cgroup v2 membership check
+	// (peercgroup_linux.go) without a real cgroupfs layout.
+	verifyPeerCgroupFunc = verifyPeerCgroup
 )
 
-// verifyPeerCredAndExe implements Part B2's post-connect checks: the
-// socket peer's SO_PEERCRED uid must be 0, and the peer pid's resolved
-// /proc/<pid>/exe must equal the configured Tetragon binary path exactly
-// (no prefix/suffix matching, so a binary at a look-alike path never
-// passes).
-func verifyPeerCredAndExe(uc *net.UnixConn, wantExe string) error {
+var warnPeerSELinuxDisabledOnce sync.Once
+
+// isPeerSELinuxUnavailableErr reports whether err indicates "no LSM
+// security module is providing a peer security context" (SELinux
+// disabled), as opposed to some other getsockopt failure. SO_PEERSEC
+// returns ENOPROTOOPT in this case, confirmed by both systemd
+// (src/basic/socket-util.c's getpeersec(), which treats exactly
+// ENOPROTOOPT this way) and the Linux AppArmor SO_PEERSEC implementation
+// (Ubuntu launchpad bug 1235478's strace: "getsockopt(... SO_PEERSEC
+// ...) = -1 ENOPROTOOPT"); EOPNOTSUPP is included defensively for the
+// same "not supported" class, mirroring verifySELinuxLabel's xattr
+// handling above.
+func isPeerSELinuxUnavailableErr(err error) bool {
+	return errors.Is(err, unix.ENOPROTOOPT) || errors.Is(err, unix.EOPNOTSUPP)
+}
+
+// verifyPeerSELinux implements the R3-1 amendment's SO_PEERSEC check: the
+// peer's own SELinux context type must equal cfg.peerSELinuxType()
+// (default "tetragon_t"). active is true only when a real comparison was
+// made (SELinux enabled); it is false when the check was skipped because
+// SELinux is disabled and cfg.SELinuxRequired is false — the only case
+// where err is also nil without active being true.
+func verifyPeerSELinux(cfg Config, uc *net.UnixConn) (active bool, err error) {
+	sec, gerr := getsockoptPeerSecFunc(uc)
+	if gerr != nil {
+		if isPeerSELinuxUnavailableErr(gerr) {
+			if cfg.SELinuxRequired {
+				return false, fmt.Errorf("%w: SELinux is disabled on this host but selinux_required is true", ErrSocketVerification)
+			}
+			warnPeerSELinuxDisabledOnce.Do(func() {
+				cfg.logger().Warn("SELinux is disabled on this host; continuing because selinux_required is false", "check", "peer_so_peersec")
+			})
+			return false, nil
+		}
+		return false, fmt.Errorf("%w: SO_PEERSEC: %w", ErrSocketVerification, gerr)
+	}
+	parts := strings.SplitN(sec, ":", 4)
+	if len(parts) < 3 || parts[2] != cfg.peerSELinuxType() {
+		return false, fmt.Errorf("%w: socket peer has SELinux context %q, want type %q", ErrSocketVerification, sec, cfg.peerSELinuxType())
+	}
+	return true, nil
+}
+
+// verifyPeerCredAndTetragon implements the R3-1 amendment's post-connect
+// checks, replacing the reverted /proc/<pid>/exe check: SO_PEERCRED uid
+// must be 0, and the peer must be verified as Tetragon by at least one of
+// two checks that need no capability — SO_PEERSEC (peer SELinux domain)
+// and cgroup v2 membership (peercgroup_linux.go) — run together when
+// both are available, with the cgroup check's absence (cgroup v1/hybrid)
+// tolerated only when the SELinux check actively passed.
+func verifyPeerCredAndTetragon(cfg Config, uc *net.UnixConn) error {
 	uid, pid, err := peerCredFunc(uc)
 	if err != nil {
 		return fmt.Errorf("%w: SO_PEERCRED: %w", ErrSocketVerification, err)
@@ -203,16 +268,28 @@ func verifyPeerCredAndExe(uc *net.UnixConn, wantExe string) error {
 	if uid != 0 {
 		return fmt.Errorf("%w: socket peer uid is %d, want 0", ErrSocketVerification, uid)
 	}
-	exe, err := peerExeFunc(pid)
+
+	selinuxActive, err := verifyPeerSELinux(cfg, uc)
 	if err != nil {
-		return fmt.Errorf("%w: resolve /proc/%d/exe: %w", ErrSocketVerification, pid, err)
+		return err
 	}
-	wantAbs, err := filepath.Abs(wantExe)
+
+	cgroupResult, err := verifyPeerCgroupFunc(cfg, pid)
 	if err != nil {
-		return fmt.Errorf("%w: configured Tetragon binary path %q: %w", ErrSocketVerification, wantExe, err)
+		return err
 	}
-	if exe != wantAbs {
-		return fmt.Errorf("%w: socket peer pid %d is %q, want %q", ErrSocketVerification, pid, exe, wantAbs)
+	if cgroupResult.Available {
+		if !cgroupResult.Passed {
+			return fmt.Errorf("%w: socket peer pid %d is not in cgroup %q", ErrSocketVerification, pid, cfg.unitCgroupPath())
+		}
+		return nil
+	}
+	// cgroup v2 unavailable (v1/hybrid layout): accepted only if the
+	// SELinux check actively ran and passed (step-03a-review.md R3-1
+	// amendment: "fails closed (typed error) unless the SO_PEERSEC check
+	// is active and passed").
+	if !selinuxActive {
+		return fmt.Errorf("%w: cgroup v2 is unavailable on this host and the SO_PEERSEC check did not actively pass; cannot verify socket peer %d", ErrSocketVerification, pid)
 	}
 	return nil
 }
