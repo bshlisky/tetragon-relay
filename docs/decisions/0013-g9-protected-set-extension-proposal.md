@@ -2,12 +2,15 @@
 
 ## Status
 
-Proposed. This step does NOT change the root metadata wire format (ADR
-0004); it only defines the `internal/guard.ProtectedSetSource` interface
-and a no-op fake, per the step 2 prompt's explicit instruction ("Do NOT
-change the root-metadata format... write ADR proposing where these fields
-would live, for architect review"). This ADR is that proposal, submitted
-for architect review before any implementation.
+Accepted for a future root-metadata format change (architect review of
+commit fe11a62, item C7): the placement proposed below is approved: the
+actual wire-format change to `internal/trust`'s root payload (ADR 0004)
+and a real `ProtectedSetSource` implementation remain out of scope for
+this step and are deferred to the step that implements it. This step
+still only defines the `internal/guard.ProtectedSetSource` interface and a
+no-op fake, per the original step 2 prompt's instruction ("Do NOT change
+the root-metadata format... write ADR proposing where these fields would
+live, for architect review").
 
 ## Context
 

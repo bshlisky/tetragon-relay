@@ -7,37 +7,20 @@ import (
 	"github.com/bshlisky/tetragon-relay/internal/policydoc"
 )
 
-// execHookIdentifiers are the exec-related hooks G3 applies to, from the
-// pinned source and the vendored example corpus:
-//   - kprobe "security_bprm_check": testdata/upstream/security_bprm_check.yaml:7
-//   - lsmhook "bprm_check_security": testdata/upstream/lsm_bprm_check.yaml:8
-//   - "security_bprm_creds_for_exec" / "bprm_creds_for_exec" are named by
-//     the step 2 prompt itself; this project found no example or other
-//     pinned-source occurrence of either spelling to confirm the exact
-//     hook/call name Tetragon v1.8.0 uses for it, so both the kprobe-call
-//     and lsmhook-hook forms are included defensively (see
-//     docs/reports/step-02b.md open questions: this is a judgment call,
-//     not a confirmed fact, and is flagged there rather than silently
-//     assumed).
-//   - No execve-syscall or execve-tracepoint hook name usable from a
-//     TracingPolicy was found anywhere in the pinned source or corpus:
-//     the only "sys_execve" occurrence (pkg/sensors/base/base.go:36) is a
-//     raw_tracepoint wired into Tetragon's always-on base sensor, not a
-//     user-addressable TracingPolicy hook. That category of G3 is
-//     therefore not enforced here; see the open questions in the report.
-var execKProbeCalls = map[string]bool{
-	"security_bprm_check":          true,
-	"security_bprm_creds_for_exec": true,
-}
-
-var execLsmHooks = map[string]bool{
-	"bprm_check_security": true,
-	"bprm_creds_for_exec": true,
+// isExecIdentifier implements architect review item C3: a hook is
+// exec-related iff its identifier contains "exec" or "bprm",
+// case-insensitive, regardless of hook kind. This replaces a fixed list
+// that missed, among others, any execve syscall/tracepoint hook.
+func isExecIdentifier(identifier string) bool {
+	lower := strings.ToLower(identifier)
+	return strings.Contains(lower, "exec") || strings.Contains(lower, "bprm")
 }
 
 // Guardrails implements internal/verify.Guardrails (step 2 prompt Part C0):
-// Check(ctx, docs) runs G7, G6, G8, G1, G2, G3, G4, G5 in that fixed order,
-// first failure wins.
+// Check(ctx, docs) runs G7, G6, G8, G10, G1, G2, G3, G4, G5 in that fixed
+// order, first failure wins. G10 (architect review item C5, Override hook
+// placement) is new in this review pass and runs immediately after G8
+// since both gate the Override action.
 type Guardrails struct {
 	Capabilities HostCapabilities
 	History      PolicyHistory
@@ -69,6 +52,9 @@ func (g *Guardrails) Check(ctx GuardContext, docs []*policydoc.Doc) error {
 		return err
 	}
 	if err := g.checkG8(docs); err != nil {
+		return err
+	}
+	if err := checkG10(docs); err != nil {
 		return err
 	}
 	if err := g.checkG1(docs); err != nil {
@@ -153,7 +139,7 @@ func (g *Guardrails) checkG8(docs []*policydoc.Doc) error {
 				if !selectorUsesOverride(s) {
 					continue
 				}
-				switch h.Kind { //nolint:exhaustive // G8 only names kprobes/lsmhooks (step 2 prompt Part C); Override on tracepoints/uprobes is not gated here, see docs/reports/step-02b.md open questions
+				switch h.Kind { //nolint:exhaustive // G10 (checked separately, right after this rule) rejects Override on every other hook kind outright
 				case policydoc.HookKindKProbe:
 					if !g.Capabilities.KprobeOverride() {
 						return violation(RuleG8, "policy %q hook %q: Override on a kprobe requires KprobeOverride capability", d.Name(), h.Identifier)
@@ -181,6 +167,35 @@ func selectorUsesOverride(s policydoc.Selector) bool {
 		}
 	}
 	return false
+}
+
+// --- G10: Override hook placement (architect review item C5) ---
+
+// checkG10 rejects Override on any hook kind other than kprobes and
+// lsmhooks: those two are the only kinds G8 has a capability check for,
+// and the CRD's own ActionSelector doc comment
+// (pkg/k8s/apis/cilium.io/v1alpha1/types.go:384-396) states Override's
+// three variants are supported on "kprobes, uprobes, lsm" — uprobe
+// override is a different mechanism (symbol/address/offset substitution,
+// not kernel ALLOW_ERROR_INJECTION) that this project has no capability
+// detection for, and tracepoints are not listed as supporting Override at
+// all. Loading Override on either would either fail open (no capability
+// gate exists to say no) or rely on an unconfirmed assumption about
+// tracepoint support; both are rejected outright instead.
+func checkG10(docs []*policydoc.Doc) error {
+	for _, d := range docs {
+		for _, h := range d.Hooks() {
+			if h.Kind == policydoc.HookKindKProbe || h.Kind == policydoc.HookKindLsmHook {
+				continue
+			}
+			for _, s := range h.Selectors {
+				if selectorUsesOverride(s) {
+					return violation(RuleG10, "policy %q hook %q: Override is only allowed on kprobes and lsmhooks, not %v", d.Name(), h.Identifier, h.Kind)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // --- G1: protected processes ---
@@ -215,18 +230,24 @@ func checkSelectorG1(policyName, hookID string, s policydoc.Selector, extraBinar
 	if len(s.MatchBinaries) == 0 {
 		return violation(RuleG1, "policy %q hook %q: enforcement selector has no matchBinaries", policyName, hookID)
 	}
+	// The pinned CRD caps matchBinaries at one entry
+	// (TestCRD_MatchBinariesMaxItemsOne verifies this directly against the
+	// vendored schema); inspecting only [0] would silently ignore any
+	// later entries if that ever changed, so reject outright instead of
+	// assuming the cap still holds.
+	if len(s.MatchBinaries) > 1 {
+		return violation(RuleG1, "policy %q hook %q: enforcement selector has more than one matchBinaries entry", policyName, hookID)
+	}
 	b := s.MatchBinaries[0]
-	switch b.Operator {
-	case "In", "Prefix", "Postfix":
-		if anyBinaryCovered(b.Operator, b.Values, extraBinaries) {
-			return violation(RuleG1, "policy %q hook %q: matchBinaries %s covers a protected binary", policyName, hookID, b.Operator)
-		}
-	case "NotIn", "NotPrefix", "NotPostfix":
-		if !excludesAllBinaries(b.Operator, b.Values, extraBinaries) {
-			return violation(RuleG1, "policy %q hook %q: matchBinaries %s does not exclude every protected binary", policyName, hookID, b.Operator)
-		}
-	default:
+	if !recognizedMatchOperators[b.Operator] {
 		return violation(RuleG1, "policy %q hook %q: unrecognized matchBinaries operator %q", policyName, hookID, b.Operator)
+	}
+	if hasUnsafeValue(b.Operator, b.Values) {
+		return violation(RuleG1, "policy %q hook %q: matchBinaries %s has an empty, relative, or \"..\"-containing value", policyName, hookID, b.Operator)
+	}
+	candidates := append(append([]string(nil), protectedBinaries...), extraBinaries...)
+	if matchesAnyCandidate(b.Operator, b.Values, candidates) {
+		return violation(RuleG1, "policy %q hook %q: matchBinaries %s matches a protected binary", policyName, hookID, b.Operator)
 	}
 	return nil
 }
@@ -263,14 +284,24 @@ func checkSelectorG2(policyName string, h policydoc.Hook, s policydoc.Selector, 
 
 	hasPositive := false
 	for _, a := range pathArgs {
+		if !recognizedMatchOperators[a.Operator] {
+			return violation(RuleG2, "policy %q hook %q: unrecognized matchArgs operator %q", policyName, h.Identifier, a.Operator)
+		}
 		switch a.Operator {
-		case "Equal", "Prefix", "Postfix":
+		case "Equal", "In", "Prefix", "Postfix":
 			hasPositive = true
-			if anyPathCovered(a.Operator, a.Values, extraPaths) {
+			if hasUnsafeValue(a.Operator, a.Values) {
+				return violation(RuleG2, "policy %q hook %q: matchArgs %s on a path arg has an empty, relative, or \"..\"-containing value", policyName, h.Identifier, a.Operator)
+			}
+			if anyPathCoveredPositive(a.Operator, a.Values, extraPaths) {
 				return violation(RuleG2, "policy %q hook %q: matchArgs %s on a path arg covers a protected path", policyName, h.Identifier, a.Operator)
 			}
-		case "NotEqual", "NotPrefix", "NotPostfix":
-			// handled by the hasPositive check below
+		case "NotEqual", "NotIn", "NotPrefix", "NotPostfix":
+			// A Not*-only selector on a path arg is rejected below
+			// regardless of these values (architect review: "Negative-only
+			// path selectors with enforcement remain rejected"); G2 does
+			// not need a G1-style "excludes every protected path" check
+			// for the negative case.
 		}
 	}
 	if !hasPositive {
@@ -291,8 +322,8 @@ func checkG3(docs []*policydoc.Doc) error {
 				if !selectorHasEnforcement(s) {
 					continue
 				}
-				if !execSelectorScoped(s) {
-					return violation(RuleG3, "policy %q hook %q: unscoped exec denial (no matchBinaries In/Prefix or positive matchArgs)", d.Name(), h.Identifier)
+				if !execSelectorScoped(h, s) {
+					return violation(RuleG3, "policy %q hook %q: unscoped exec denial (no matchBinaries In/Prefix or positive matchArgs on a path-typed arg)", d.Name(), h.Identifier)
 				}
 			}
 		}
@@ -300,25 +331,31 @@ func checkG3(docs []*policydoc.Doc) error {
 	return nil
 }
 
+// isExecHook implements architect review item C3: identifier-substring
+// based, across every hook kind (not just kprobe/lsmhook), so it also
+// catches tracepoint/uprobe identifiers naming an exec-related symbol
+// (e.g. a "syscalls/sys_enter_execve" tracepoint's Identifier is
+// "syscalls/sys_enter_execve", or a uprobe traced symbol named
+// "bprm_execve").
 func isExecHook(h policydoc.Hook) bool {
-	switch h.Kind { //nolint:exhaustive // only kprobes/lsmhooks can name an exec-related hook identifier in execKProbeCalls/execLsmHooks; tracepoints/uprobes always fall to the default
-	case policydoc.HookKindKProbe:
-		return execKProbeCalls[h.Identifier]
-	case policydoc.HookKindLsmHook:
-		return execLsmHooks[h.Identifier]
-	default:
-		return false
-	}
+	return isExecIdentifier(h.Identifier)
 }
 
-func execSelectorScoped(s policydoc.Selector) bool {
-	if len(s.MatchBinaries) > 0 {
+// execSelectorScoped reports whether s is scoped enough for G3: a single
+// matchBinaries entry using In/Prefix, or at least one positive-operator
+// matchArgs entry on a path-typed arg (architect review item C4: "positive
+// matchArgs" means specifically a path-typed arg, not any arg).
+func execSelectorScoped(h policydoc.Hook, s policydoc.Selector) bool {
+	if len(s.MatchBinaries) == 1 {
 		op := s.MatchBinaries[0].Operator
 		if op == "In" || op == "Prefix" {
 			return true
 		}
 	}
 	for _, a := range s.MatchArgs {
+		if !h.PathArgIndices[a.Index] {
+			continue
+		}
 		if !strings.HasPrefix(a.Operator, "Not") {
 			return true
 		}

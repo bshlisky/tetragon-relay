@@ -338,6 +338,9 @@ func TestCheck_G3(t *testing.T) {
 `, true},
 		{"notin_plus_positive_matchArgs_is_scoped", `  kprobes:
   - call: "security_bprm_check"
+    args:
+    - index: 0
+      type: "linux_binprm"
     selectors:
     - matchBinaries:
 ` + notInAllProtectedBinaries() + `      matchArgs:
@@ -350,12 +353,30 @@ func TestCheck_G3(t *testing.T) {
 `, false},
 		{"notin_plus_only_not_matchArgs_is_unscoped", `  kprobes:
   - call: "security_bprm_check"
+    args:
+    - index: 0
+      type: "linux_binprm"
     selectors:
     - matchBinaries:
 ` + notInAllProtectedBinaries() + `      matchArgs:
       - index: 0
         operator: "NotEqual"
         values: ["/usr/bin/safe"]
+      matchActions:
+      - action: "Override"
+        argError: -1
+`, true},
+		{"notin_plus_positive_matchArgs_on_non_path_type_is_still_unscoped", `  kprobes:
+  - call: "security_bprm_check"
+    args:
+    - index: 0
+      type: "int"
+    selectors:
+    - matchBinaries:
+` + notInAllProtectedBinaries() + `      matchArgs:
+      - index: 0
+        operator: "Equal"
+        values: ["5"]
       matchActions:
       - action: "Override"
         argError: -1

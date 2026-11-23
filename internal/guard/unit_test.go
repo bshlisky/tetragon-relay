@@ -26,43 +26,76 @@ func TestSelectorUsesOverride_MatchReturnActions(t *testing.T) {
 	}
 }
 
-func TestIsExecHook_NonKProbeNonLsm(t *testing.T) {
-	h := policydoc.Hook{Kind: policydoc.HookKindTracepoint, Identifier: "security_bprm_check"}
-	if isExecHook(h) {
-		t.Fatalf("a tracepoint must never be classified as an exec hook")
+// TestIsExecHook_AnyKindWithMatchingIdentifier is architect review item
+// C3: exec-hook classification is identifier-substring based ("exec" or
+// "bprm", case-insensitive) across every hook kind, not just kprobe/lsmhook
+// — a tracepoint or uprobe naming an exec-related symbol must also count.
+func TestIsExecHook_AnyKindWithMatchingIdentifier(t *testing.T) {
+	cases := []struct {
+		kind       policydoc.HookKind
+		identifier string
+		want       bool
+	}{
+		{policydoc.HookKindKProbe, "security_bprm_check", true},
+		{policydoc.HookKindLsmHook, "bprm_check_security", true},
+		{policydoc.HookKindKProbe, "sys_execve", true},
+		{policydoc.HookKindKProbe, "sys_execveat", true},
+		{policydoc.HookKindTracepoint, "syscalls/sys_enter_execve", true},
+		{policydoc.HookKindUProbe, "bprm_execve", true},
+		{policydoc.HookKindKProbe, "EXECVE_UPPERCASE", true},
+		{policydoc.HookKindKProbe, "tcp_connect", false},
+		{policydoc.HookKindTracepoint, "skb/kfree_skb", false},
 	}
-	h2 := policydoc.Hook{Kind: policydoc.HookKindUProbe, Identifier: "bprm_check_security"}
-	if isExecHook(h2) {
-		t.Fatalf("a uprobe must never be classified as an exec hook")
+	for _, tc := range cases {
+		h := policydoc.Hook{Kind: tc.kind, Identifier: tc.identifier}
+		if got := isExecHook(h); got != tc.want {
+			t.Errorf("isExecHook(kind=%v, identifier=%q) = %v, want %v", tc.kind, tc.identifier, got, tc.want)
+		}
 	}
 }
 
-func TestCoversPrefix_NestedInsideProtectedDirectory(t *testing.T) {
+func TestPathCoversPositive_PrefixNestedInsideProtectedDirectory(t *testing.T) {
 	// A Prefix value naming something nested inside a protected directory
 	// (rather than an ancestor of it) must also be covered.
-	if !coversPrefix("/run/tetragon/sub/", "/run/tetragon/") {
+	if !pathCoversPositive("Prefix", []string{"/run/tetragon/sub/"}, "/run/tetragon/") {
 		t.Fatalf("expected coverage for a prefix nested inside a protected directory")
 	}
-	if coversPrefix("/completely/unrelated/", "/run/tetragon/") {
+	if pathCoversPositive("Prefix", []string{"/completely/unrelated/"}, "/run/tetragon/") {
 		t.Fatalf("expected no coverage for an unrelated prefix")
 	}
 }
 
-func TestCoversPostfix_DirectoryTarget(t *testing.T) {
-	if !coversPostfix("tetragon/", "/run/tetragon/") {
-		t.Fatalf("expected coverage: postfix names the protected directory's own trailing segment")
-	}
-	if coversPostfix("unrelated-suffix", "/run/tetragon/") {
-		t.Fatalf("expected no coverage for an unrelated postfix")
+func TestPathCoversPositive_PostfixAlwaysCoversDirectory(t *testing.T) {
+	// Architect review item C2: Postfix on a directory target always
+	// covers, since some hypothetical file inside it could end with any
+	// given suffix.
+	if !pathCoversPositive("Postfix", []string{"unrelated-suffix"}, "/run/tetragon/") {
+		t.Fatalf("expected Postfix to always cover a directory target")
 	}
 }
 
-func TestExcludesAllBinaries_NotPrefix(t *testing.T) {
-	if !excludesAllBinaries("NotPrefix", []string{"/"}, nil) {
-		t.Fatalf("expected broad NotPrefix values to exclude every protected binary")
+func TestPathCoversPositive_ExactFileTarget(t *testing.T) {
+	if !pathCoversPositive("Postfix", []string{"tetragon.sock"}, "/run/tetragon/tetragon.sock") {
+		t.Fatalf("expected coverage: postfix names the protected file's own trailing segment")
 	}
-	if excludesAllBinaries("NotPrefix", []string{"/usr/sbin/"}, nil) {
-		t.Fatalf("expected a narrow NotPrefix to leave some protected binaries uncovered")
+	if pathCoversPositive("Postfix", []string{"unrelated-suffix"}, "/run/tetragon/tetragon.sock") {
+		t.Fatalf("expected no coverage for an unrelated postfix against an exact file target")
+	}
+}
+
+func TestMatches_NegativeOperatorsExcludeCorrectly(t *testing.T) {
+	// NotPrefix "/" means "does not start with /", which is false for
+	// every absolute candidate (every candidate here starts with "/"), so
+	// matches() (the negation of the positive form) is false: a broad "/"
+	// value excludes everything, i.e. "/" is a universal NotPrefix.
+	if matches("NotPrefix", []string{"/"}, "/usr/sbin/sshd") {
+		t.Fatalf("NotPrefix '/' must exclude every absolute candidate")
+	}
+	if matches("NotPrefix", []string{"/usr/sbin/"}, "/usr/sbin/sshd") {
+		t.Fatalf("NotPrefix '/usr/sbin/' must exclude /usr/sbin/sshd")
+	}
+	if !matches("NotPrefix", []string{"/usr/sbin/"}, "/sbin/init") {
+		t.Fatalf("NotPrefix '/usr/sbin/' must NOT exclude /sbin/init (different prefix)")
 	}
 }
 
@@ -188,7 +221,7 @@ func TestCheck_G1_PostfixAndNotPostfix(t *testing.T) {
       matchActions:
       - action: "Sigkill"
 `, true},
-		{"notpostfix_covers_all", `  kprobes:
+		{"notpostfix_empty_value_is_unsafe", `  kprobes:
   - call: "x"
     selectors:
     - matchBinaries:
@@ -196,7 +229,7 @@ func TestCheck_G1_PostfixAndNotPostfix(t *testing.T) {
         values: [""]
       matchActions:
       - action: "Sigkill"
-`, false},
+`, true}, // empty value is unsafe (C1), rejected outright regardless of what it would "exclude"
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -212,6 +245,38 @@ func TestCheck_G1_PostfixAndNotPostfix(t *testing.T) {
 	}
 }
 
+// TestCheck_G1_NotPostfixCoveringAllLastCharacters computes (rather than
+// assumes, per the architect's "compute it, don't assume" instruction) the
+// set of every protected binary's final character and uses exactly that
+// set as NotPostfix values: since every protected binary ends with one of
+// these single characters, this selector must be accepted (it genuinely
+// excludes all of them), proving the check isn't simply "NotPostfix always
+// rejects."
+func TestCheck_G1_NotPostfixCoveringAllLastCharacters(t *testing.T) {
+	seen := map[string]bool{}
+	var values []string
+	for _, b := range protectedBinaries {
+		last := string(b[len(b)-1])
+		if !seen[last] {
+			seen[last] = true
+			values = append(values, last)
+		}
+	}
+	spec := fmt.Sprintf(`  kprobes:
+  - call: "x"
+    selectors:
+    - matchBinaries:
+      - operator: "NotPostfix"
+        values: %s
+      matchActions:
+      - action: "Sigkill"
+`, yamlStringList(values))
+	d := mustParseDoc(t, "p", policyYAML("p", spec))
+	if err := newGuard().Check(GuardContext{Scope: "s", Mode: "monitor"}, []*policydoc.Doc{d}); err != nil {
+		t.Fatalf("NotPostfix covering every protected binary's last character was rejected: %v", err)
+	}
+}
+
 func TestCheckSelectorG1_UnrecognizedOperator(t *testing.T) {
 	s := policydoc.Selector{
 		MatchBinaries: []policydoc.BinarySelector{{Operator: "Bogus", Values: []string{"x"}}},
@@ -221,6 +286,70 @@ func TestCheckSelectorG1_UnrecognizedOperator(t *testing.T) {
 	var v *Violation
 	if err == nil || !errors.As(err, &v) || v.Rule != RuleG1 {
 		t.Fatalf("error = %v, want G1", err)
+	}
+}
+
+func TestCheck_G10_OverrideOnUprobeRejected(t *testing.T) {
+	spec := `  uprobes:
+  - path: "/usr/bin/myapp"
+    symbols: ["do_thing"]
+    selectors:
+    - matchActions:
+      - action: "Override"
+        argError: -1
+`
+	d := mustParseDoc(t, "p", policyYAML("p", spec))
+	err := newGuard().Check(GuardContext{Scope: "s", Mode: "monitor"}, []*policydoc.Doc{d})
+	if err == nil || ruleOf(t, err) != RuleG10 {
+		t.Fatalf("error = %v, want G10", err)
+	}
+}
+
+func TestCheck_G10_OverrideOnTracepointRejected(t *testing.T) {
+	spec := `  tracepoints:
+  - subsystem: "syscalls"
+    event: "sys_enter_open"
+    selectors:
+    - matchActions:
+      - action: "Override"
+        argError: -1
+`
+	d := mustParseDoc(t, "p", policyYAML("p", spec))
+	err := newGuard().Check(GuardContext{Scope: "s", Mode: "monitor"}, []*policydoc.Doc{d})
+	if err == nil || ruleOf(t, err) != RuleG10 {
+		t.Fatalf("error = %v, want G10", err)
+	}
+}
+
+func TestCheck_G10_ViaMatchReturnActions(t *testing.T) {
+	spec := `  uprobes:
+  - path: "/usr/bin/myapp"
+    symbols: ["do_thing"]
+    return: true
+    returnArg:
+      index: 0
+      type: "int"
+    selectors:
+    - matchReturnActions:
+      - action: "Override"
+        argError: -1
+`
+	d := mustParseDoc(t, "p", policyYAML("p", spec))
+	err := newGuard().Check(GuardContext{Scope: "s", Mode: "monitor"}, []*policydoc.Doc{d})
+	if err == nil || ruleOf(t, err) != RuleG10 {
+		t.Fatalf("error = %v, want G10", err)
+	}
+}
+
+func TestCheckSelectorG2_UnrecognizedOperator(t *testing.T) {
+	h := policydoc.Hook{PathArgIndices: map[uint32]bool{0: true}}
+	s := policydoc.Selector{
+		MatchArgs:    []policydoc.ArgSelector{{Index: 0, Operator: "Bogus", Values: []string{"/tmp/x"}}},
+		MatchActions: []policydoc.ActionSelector{{Action: "Sigkill"}},
+	}
+	err := checkSelectorG2("p", h, s, nil)
+	if err == nil || ruleOf(t, err) != RuleG2 {
+		t.Fatalf("error = %v, want G2", err)
 	}
 }
 

@@ -2,21 +2,23 @@ package guard
 
 import "fmt"
 
-// RuleID identifies which guardrail (G1-G9) produced a violation.
+// RuleID identifies which guardrail (G1-G10) produced a violation.
 type RuleID string
 
-// The nine guardrail rule IDs from the step 2 prompt's Part C (G9 has no
+// The guardrail rule IDs from the step 2 prompt's Part C (G9 has no
 // runtime check of its own: see internal/guard/interfaces.go's
-// ProtectedSetSource doc comment).
+// ProtectedSetSource doc comment) plus G10 (architect review item C5,
+// added in the step 2c review pass: Override hook placement).
 const (
-	RuleG1 RuleID = "G1" // protected processes
-	RuleG2 RuleID = "G2" // protected paths
-	RuleG3 RuleID = "G3" // unscoped exec denial
-	RuleG4 RuleID = "G4" // size limits
-	RuleG5 RuleID = "G5" // monitor-first
-	RuleG6 RuleID = "G6" // mode coherence
-	RuleG7 RuleID = "G7" // unknown action or hook type
-	RuleG8 RuleID = "G8" // capability check
+	RuleG1  RuleID = "G1"  // protected processes
+	RuleG2  RuleID = "G2"  // protected paths
+	RuleG3  RuleID = "G3"  // unscoped exec denial
+	RuleG4  RuleID = "G4"  // size limits
+	RuleG5  RuleID = "G5"  // monitor-first
+	RuleG6  RuleID = "G6"  // mode coherence
+	RuleG7  RuleID = "G7"  // unknown action or hook type
+	RuleG8  RuleID = "G8"  // capability check
+	RuleG10 RuleID = "G10" // Override hook placement
 )
 
 // Violation is the typed error every guard rule returns on rejection. The

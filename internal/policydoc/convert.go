@@ -44,8 +44,46 @@ func buildHooks(d *rawDoc) ([]Hook, error) {
 }
 
 // pathArgTypes are the KProbeArg.Type values (types.go:79's Type enum)
-// that denote an argument resolving to a filesystem path.
-var pathArgTypes = map[string]bool{"file": true, "filename": true, "path": true}
+// internal/guard's G2/G3 treat as path-typed, per architect review (step
+// 2c) item C2. Two sources, both cited:
+//
+//   - Tetragon's own path-type classifier,
+//     pkg/generictypes/generictypes.go:277-283 (func PathType), used by
+//     the sensor itself to decide which arg types need path resolution
+//     (pkg/sensors/tracing/generic.go:297:
+//     "generictypes.PathType(ty) && selectors.HasFilter(s, index)"):
+//     path, file, dentry, linux_binprm, kiocb.
+//   - Every remaining string/byte-buffer-shaped type from that same
+//     file's genericStringToType table (generictypes.go:84-136), which
+//     PathType() does not itself classify as "path" but which this
+//     project treats as path-typed defensively for guardrail purposes
+//     (architect review: "every string-like arg type ... and any other
+//     textual type"), since a policy author can put a filesystem path in
+//     any of these: string, char_buf, char_iovec, filename, const_buf,
+//     data_loc.
+//
+// linux_binprm specifically: pkg/selectors/kernel.go:1287-1293 confirms
+// Equal/NotEqual on a linux_binprm-typed arg goes through
+// writeMatchStrings, the same exact-string comparison path used for
+// file/path/string types (not a numeric or struct comparison), and
+// pkg/sensors/tracing/kprobe_test.go:5550's TestLinuxBinprmExtractPath /
+// lsm_test.go:264's WithLinuxBinprmArg(...).WithPath(testBin) confirm the
+// compared value is the binary's path: pinned-source confirmation that
+// architect review item C4 required before G3 could count linux_binprm
+// matchArgs as scoping.
+var pathArgTypes = map[string]bool{
+	"path":         true,
+	"file":         true,
+	"dentry":       true,
+	"linux_binprm": true,
+	"kiocb":        true,
+	"string":       true,
+	"char_buf":     true,
+	"char_iovec":   true,
+	"filename":     true,
+	"const_buf":    true,
+	"data_loc":     true,
+}
 
 // pathArgIndices returns the set of Index values among args whose Type is
 // path-typed.
