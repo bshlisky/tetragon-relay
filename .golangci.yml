@@ -44,6 +44,15 @@ linters:
         linters:
           - gosec
           - forcetypeassert
+      # Vendored protoc-gen-go/-go-grpc/-go-json output (third_party/
+      # tetragon/v1.8.0/api/v1/tetragon/README.md): copied verbatim from
+      # upstream and never hand-edited, so this project's own style rules
+      # do not apply to it.
+      - path: third_party/tetragon/v1\.8\.0/api/
+        linters:
+          - revive
+          - gocritic
+          - staticcheck
 
 formatters:
   enable:

@@ -116,7 +116,56 @@ const (
 	// MatchArgs, MatchPIDs, etc. value list, summed across a bundle)
 	// internal/guard will analyze. Step 2 prompt Part C, G4.
 	MaxSelectorValuesPerBundle = 4096
+
+	// --- Step 3: internal/tetra, internal/hostprobe, internal/apply ---
+
+	// DefaultTetragonRPCTimeout is the default per-call timeout for every
+	// internal/tetra RPC (step 3 prompt Part B3), overridable by config.
+	DefaultTetragonRPCTimeout = 10 * time.Second
+
+	// MaxTetragonErrorMessageBytes bounds how much of a Tetragon-returned
+	// error message internal/tetra's RejectedByTetragon error retains.
+	// Step 3 prompt Part B3.
+	MaxTetragonErrorMessageBytes = 512
+
+	// MaxGetEventsResponseBytes bounds a single GetEvents stream message.
+	// Step 3 prompt Part B3 ("bounded response sizes"); applied via
+	// grpc.MaxCallRecvMsgSize on the client connection.
+	MaxGetEventsResponseBytes = 4 << 20 // 4 MiB
+
+	// DefaultApplyHealthWindow is internal/apply's post-add health window
+	// default (step 3 prompt Part D5).
+	DefaultApplyHealthWindow = 60 * time.Second
+	// MinApplyHealthWindow bounds a configured health window from below.
+	MinApplyHealthWindow = 15 * time.Second
+	// MaxApplyHealthWindow bounds a configured health window from above.
+	MaxApplyHealthWindow = 600 * time.Second
+
+	// DefaultApplySurgeThreshold is the default enforcement-events-per-
+	// minute rollback threshold (step 3 prompt Part D5).
+	DefaultApplySurgeThreshold = 500
+
+	// MaxLoadedPolicyNameBytes is Tetragon v1.8.0's own name limit
+	// (RFC 1123 DNS subdomain, apivalidation.NameIsDNSSubdomain; ADR
+	// 0016), restated here as a defensive invariant: PolicyNamePattern
+	// (63 bytes) plus "-v<version>-<8 hex>" never approaches it.
+	MaxLoadedPolicyNameBytes = 253
 )
+
+// TetragonVersionFamily is the pinned major.minor version family internal/
+// tetra's version gate (step 3 prompt Part B4) requires GetVersion to
+// match exactly (any patch release, "v1.8.x"); third_party/tetragon/v1.8.0
+// records the exact commit this project was built and tested against.
+const TetragonVersionFamily = "1.8"
+
+// TetragonVersionPattern matches an accepted GetVersion response: exactly
+// "v1.8." followed by one or more digits (a patch release), optionally
+// followed by a build-metadata/pre-release suffix Tetragon's own
+// `-ldflags` version string sometimes carries (e.g. "v1.8.0-dirty" from a
+// non-release build) — rejected unless the numeric patch component is
+// present, so a bare "v1.8" (no patch) is also rejected as not a real
+// release identifier.
+var TetragonVersionPattern = regexp.MustCompile(`^v1\.8\.[0-9]+([-+][0-9A-Za-z.-]+)?$`)
 
 // PolicyNamePattern is the required shape of a policy name, taken verbatim
 // from architecture doc section 7.4 step 11 / typical Kubernetes-style

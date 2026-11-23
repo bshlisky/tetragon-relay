@@ -37,6 +37,22 @@ coverage:
 	done; \
 	exit $$fail
 
+COVER90_PKGS := internal/tetra internal/apply internal/hostprobe
+
+.PHONY: coverage90
+coverage90:
+	@fail=0; \
+	for pkg in $(COVER90_PKGS); do \
+		if [ ! -d "$$pkg" ]; then continue; fi; \
+		echo "== $$pkg (>=90% gate; step 3 prompt Part E5) =="; \
+		$(GO) test -count=1 -covermode=count -coverprofile=/tmp/tetragon-relay-$$(basename $$pkg).out ./$$pkg/... >/dev/null; \
+		line=$$($(GO) tool cover -func=/tmp/tetragon-relay-$$(basename $$pkg).out | tail -1); \
+		echo "$$line"; \
+		pct=$$(echo "$$line" | awk '{print $$NF}' | tr -d '%'); \
+		awk -v p="$$pct" 'BEGIN { exit !(p+0 >= 90) }' || { echo "$$pkg coverage $$pct% is below the required 90%"; fail=1; }; \
+	done; \
+	exit $$fail
+
 .PHONY: fuzz-short
 fuzz-short:
 	$(GO) test -run=NONE -fuzz=FuzzStrictJSON -fuzztime=60s ./internal/strictjson/...
@@ -47,8 +63,8 @@ fuzz-short:
 
 .PHONY: lint
 lint:
-	gofmt -l $$(find . -name '*.go' -not -path './vendor/*' -not -path './api/*') | tee /tmp/gofmt-out; test ! -s /tmp/gofmt-out
-	goimports -l $$(find . -name '*.go' -not -path './vendor/*' -not -path './api/*') | tee /tmp/goimports-out; test ! -s /tmp/goimports-out
+	gofmt -l $$(find . -name '*.go' -not -path './vendor/*' -not -path './api/*' -not -path './third_party/tetragon/v1.8.0/api/*') | tee /tmp/gofmt-out; test ! -s /tmp/gofmt-out
+	goimports -l $$(find . -name '*.go' -not -path './vendor/*' -not -path './api/*' -not -path './third_party/tetragon/v1.8.0/api/*') | tee /tmp/goimports-out; test ! -s /tmp/goimports-out
 	$(GO) vet ./...
 	golangci-lint run ./...
 
@@ -125,4 +141,4 @@ verify-tetragon-api:
 		|| (echo "$(TETRAGON_API_DIR) does not match MANIFEST.sha256 (re-vendoring or tampering); see README.md" && exit 1)
 
 .PHONY: ci
-ci: lint vuln modverify vendor-check verify-crd verify-tetragon-api test-race coverage fuzz-short proto breaking verify-repro sbom
+ci: lint vuln modverify vendor-check verify-crd verify-tetragon-api test-race coverage coverage90 fuzz-short proto breaking verify-repro sbom
