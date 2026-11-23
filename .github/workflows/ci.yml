@@ -124,11 +124,11 @@ jobs:
     env:
       TETRAGON_VERSION: v1.8.0
       # Pin the release tarball's sha256 (architecture doc 8.12 supply
-      # chain policy: every fetched artifact is hash-pinned). Recorded
-      # from the GitHub release page at vendoring time
-      # (third_party/tetragon/v1.8.0/README.md); update together with any
-      # re-vendoring of the CRD/API bindings.
-      TETRAGON_TARBALL_SHA256: "0000000000000000000000000000000000000000000000000000000000000000"
+      # chain policy: every fetched artifact is hash-pinned). This matches
+      # the official tetragon-v1.8.0-amd64.tar.gz asset's published
+      # .sha256sum file on the v1.8.0 GitHub release; update together with
+      # any re-vendoring of the CRD/API bindings.
+      TETRAGON_TARBALL_SHA256: "e88691c5f05a2a61aba58974a080603050b924c7f13ecc06f3d05172feb05f59"
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
