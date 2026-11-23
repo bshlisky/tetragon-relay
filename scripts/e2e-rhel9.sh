@@ -43,7 +43,7 @@ if [ ! -f "${TARBALL}" ]; then
 fi
 echo "${TETRAGON_TARBALL_SHA256}  ${TARBALL}" | sha256sum -c -
 tar -xzf "${TARBALL}" -C "${WORKDIR}"
-TETRAGON_BIN="$(find "${WORKDIR}" -maxdepth 2 -type f -name tetragon | head -1)"
+TETRAGON_BIN="$(find "${WORKDIR}" -maxdepth 6 -type f -name tetragon | head -1)"
 if [ -z "${TETRAGON_BIN}" ]; then
   echo "could not find the tetragon binary inside the extracted tarball" >&2
   exit 1

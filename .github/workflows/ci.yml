@@ -158,7 +158,7 @@ jobs:
           # tetragon-v1.8.0-amd64/" confirms this), so the binary's
           # containing directory must be located dynamically rather than
           # assumed to be /tmp/tetragon-install itself.
-          tetragon_bin="$(find /tmp/tetragon-install -maxdepth 2 -type f -name tetragon | head -1)"
+          tetragon_bin="$(find /tmp/tetragon-install -maxdepth 6 -type f -name tetragon | head -1)"
           if [ -z "${tetragon_bin}" ]; then
             echo "could not find the tetragon binary inside the extracted tarball" >&2
             find /tmp/tetragon-install >&2
