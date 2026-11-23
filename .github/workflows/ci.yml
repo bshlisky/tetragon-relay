@@ -32,13 +32,13 @@ jobs:
       - name: gofmt / goimports check
         run: |
           go install golang.org/x/tools/cmd/goimports@v0.52.0
-          out=$(gofmt -l $(find . -name '*.go' -not -path './vendor/*' -not -path './api/*'))
+          out=$(gofmt -l $(find . -name '*.go' -not -path './vendor/*' -not -path './api/*' -not -path './third_party/tetragon/v1.8.0/api/*'))
           if [ -n "$out" ]; then
             echo "gofmt needs to be run on:"
             echo "$out"
             exit 1
           fi
-          out=$(goimports -l $(find . -name '*.go' -not -path './vendor/*' -not -path './api/*'))
+          out=$(goimports -l $(find . -name '*.go' -not -path './vendor/*' -not -path './api/*' -not -path './third_party/tetragon/v1.8.0/api/*'))
           if [ -n "$out" ]; then
             echo "goimports needs to be run on:"
             echo "$out"
