@@ -33,6 +33,96 @@ func (f fakeFileInfo) ModTime() time.Time { return time.Time{} }
 func (f fakeFileInfo) IsDir() bool        { return f.mode.IsDir() }
 func (f fakeFileInfo) Sys() any           { return nil }
 
+// TestDial_BadRelayGroup covers Dial's own relayGID resolution failure, no
+// root required.
+func TestDial_BadRelayGroup(t *testing.T) {
+	cfg := Config{SocketPath: "/nonexistent", RelayGroupName: "this-group-should-not-exist-tetragon-relay"}
+	if _, err := Dial(context.Background(), cfg); err == nil {
+		t.Fatal("Dial with an unresolvable relay group returned no error")
+	}
+}
+
+// currentGroupName resolves the invoking user's primary group name, used
+// by tests below that need a RelayGroupName guaranteed to resolve without
+// root (CI runners are never root for the plain "ci" job).
+func currentGroupName(t *testing.T) string {
+	t.Helper()
+	u, err := user.Current()
+	if err != nil {
+		t.Skipf("user.Current: %v", err)
+	}
+	g, err := user.LookupGroupId(u.Gid)
+	if err != nil {
+		t.Skipf("LookupGroupId: %v", err)
+	}
+	return g.Name
+}
+
+// TestDial_NonexistentSocket exercises Dial's full construction path (gid
+// resolution, dialer closure, grpc.NewClient) plus the dialer's
+// verifySocketFile call on the first real RPC attempt, with no root
+// required: grpc.NewClient itself never dials eagerly, so Dial succeeds,
+// and the failure surfaces on the first RPC.
+func TestDial_NonexistentSocket(t *testing.T) {
+	cfg := Config{
+		SocketPath:         filepath.Join(t.TempDir(), "does-not-exist"),
+		TetragonBinaryPath: "/usr/sbin/tetragon",
+		RelayGroupName:     currentGroupName(t),
+		Timeout:            2 * time.Second,
+	}
+	c, err := Dial(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if _, err := c.GetVersion(ctx); err == nil {
+		t.Fatal("GetVersion over a nonexistent socket returned no error")
+	}
+}
+
+// TestDial_RealSocketWrongOwner creates a real unix socket owned by this
+// (non-root) test process and dials it for real through Dial, expecting
+// the post-lstat owner check to reject it — covering verifySocketFile's
+// real os.Lstat + syscall.Stat_t path (not just evaluateSocketStat's
+// synthetic-FileInfo unit test above) without requiring root.
+func TestDial_RealSocketWrongOwner(t *testing.T) {
+	dir, err := os.MkdirTemp("", "tetradialowner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	sock := filepath.Join(dir, "s")
+	lis, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lis.Close() }()
+	if err := os.Chmod(sock, 0o660); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := Config{
+		SocketPath:         sock,
+		TetragonBinaryPath: "/usr/sbin/tetragon",
+		RelayGroupName:     currentGroupName(t),
+		Timeout:            2 * time.Second,
+	}
+	c, err := Dial(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if _, err := c.GetVersion(ctx); err == nil {
+		t.Fatal("GetVersion over a socket not owned by uid 0 returned no error")
+	}
+}
+
 func TestEvaluateSocketStat(t *testing.T) {
 	const wantGID = 123
 	cases := []struct {
