@@ -225,7 +225,11 @@ jobs:
           go test -tags integration -race -count=1 -c -o /tmp/apply.itest ./internal/apply
           sudo setcap cap_sys_ptrace+ep /tmp/tetra.itest
           sudo setcap cap_sys_ptrace+ep /tmp/apply.itest
-          sg tetragon-relay -c '/tmp/tetra.itest -test.v && /tmp/apply.itest -test.v'
+          # TestAllowlist_NoOtherRPCsReferenced (internal/tetra) reads its
+          # own package's .go files via a relative path, so each compiled
+          # test binary must run with its source package directory as the
+          # working directory, not wherever it happens to be invoked from.
+          sg tetragon-relay -c 'cd internal/tetra && /tmp/tetra.itest -test.v && cd ../apply && /tmp/apply.itest -test.v'
 
       - name: Stop Tetragon
         if: always()

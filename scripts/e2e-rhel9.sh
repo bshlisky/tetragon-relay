@@ -91,7 +91,11 @@ go test -tags integration -race -count=1 -c -o "${WORKDIR}/tetra.itest" ./intern
 go test -tags integration -race -count=1 -c -o "${WORKDIR}/apply.itest" ./internal/apply
 sudo setcap cap_sys_ptrace+ep "${WORKDIR}/tetra.itest"
 sudo setcap cap_sys_ptrace+ep "${WORKDIR}/apply.itest"
-sg "${RELAY_GROUP}" -c "'${WORKDIR}/tetra.itest' -test.v && '${WORKDIR}/apply.itest' -test.v"
+# TestAllowlist_NoOtherRPCsReferenced (internal/tetra) reads its own
+# package's .go files via a relative path, so each compiled test binary
+# must run with its source package directory as the working directory.
+REPO_ROOT="$(pwd)"
+sg "${RELAY_GROUP}" -c "cd '${REPO_ROOT}/internal/tetra' && '${WORKDIR}/tetra.itest' -test.v && cd '${REPO_ROOT}/internal/apply' && '${WORKDIR}/apply.itest' -test.v"
 
 echo "== done =="
 echo "Record this run's kernel version (uname -r above), scenario pass/fail,"
