@@ -82,8 +82,10 @@ make ci
 Exit code: 0
 ```
 
-Final commit for this step: `<filled in after push>`. GitHub Actions `ci`
-run: `<filled in after push>`.
+Final commit for this step: `ad752ec` ("Step 2d: remove value normalization
+from guard matching (review of 5bf5866)"). GitHub Actions `ci` run:
+**https://github.com/bshlisky/tetragon-relay/actions/runs/45166311483**,
+status `success`, all steps green.
 
 ## 5. Self-review
 
