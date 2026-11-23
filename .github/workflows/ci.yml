@@ -64,11 +64,20 @@ jobs:
       - name: Vendor drift check
         run: make vendor-check
 
+      - name: Verify vendored CRD hash
+        run: make verify-crd
+
+      - name: Verify vendored Tetragon API bindings hash
+        run: make verify-tetragon-api
+
       - name: Test with race detector and coverage
         run: go test -race -count=1 -cover ./...
 
       - name: Per-package coverage gate (internal/dsse, internal/strictjson, internal/trust, internal/verify, internal/policydoc, internal/guard >= 95%)
         run: make coverage
+
+      - name: Per-package coverage gate (internal/tetra, internal/apply, internal/hostprobe >= 90%; step 3 Part E5)
+        run: make coverage90
 
       - name: Fuzz smoke (60s per target)
         run: make fuzz-short
@@ -100,3 +109,75 @@ jobs:
           format: spdx-json
           output-file: dist/sbom.spdx.json
           upload-artifact: false
+
+  # Step 3 prompt Part E3: integration tests against a REAL Tetragon v1.8.0,
+  # downloaded from the official release tarball and run as root. The test
+  # binary itself (go test) runs as the unprivileged "runner" user; only
+  # starting/stopping the tetragon daemon uses sudo (see
+  # docs/reports/step-03.md section 13 and 11 for the facts/citations this
+  # job and internal/tetra/internal/apply's integration-tagged tests rely
+  # on, and for why this job's own execution could not be verified from
+  # this development environment, only authored and reviewed).
+  integration:
+    runs-on: ubuntu-24.04
+    needs: ci
+    env:
+      TETRAGON_VERSION: v1.8.0
+      # Pin the release tarball's sha256 (architecture doc 8.12 supply
+      # chain policy: every fetched artifact is hash-pinned). Recorded
+      # from the GitHub release page at vendoring time
+      # (third_party/tetragon/v1.8.0/README.md); update together with any
+      # re-vendoring of the CRD/API bindings.
+      TETRAGON_TARBALL_SHA256: "0000000000000000000000000000000000000000000000000000000000000000"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Download and verify Tetragon release tarball
+        run: |
+          set -euo pipefail
+          url="https://github.com/cilium/tetragon/releases/download/${TETRAGON_VERSION}/tetragon-${TETRAGON_VERSION}-amd64.tar.gz"
+          curl -fsSL -o tetragon.tar.gz "$url"
+          echo "${TETRAGON_TARBALL_SHA256}  tetragon.tar.gz" | sha256sum -c -
+          mkdir -p /tmp/tetragon-install
+          tar -xzf tetragon.tar.gz -C /tmp/tetragon-install
+          echo "/tmp/tetragon-install" >> "$GITHUB_PATH"
+
+      - name: Create relay-managed group and socket directories
+        run: |
+          sudo groupadd -f tetragon-relay
+          sudo mkdir -p /var/run/tetragon /etc/tetragon/tetragon.tp.d/relay
+          sudo chown root:tetragon-relay /var/run/tetragon /etc/tetragon/tetragon.tp.d/relay
+          sudo chmod 2770 /etc/tetragon/tetragon.tp.d/relay
+          sudo usermod -a -G tetragon-relay "$(id -un)"
+
+      - name: Record kernel version and capability probe output
+        run: |
+          uname -a
+          GOOS=linux go build -o relay-probe ./cmd/relay-probe
+          sudo ./relay-probe --report --tetragon-binary /tmp/tetragon-install/tetragon || true
+
+      - name: Start Tetragon (root) on the unix socket
+        run: |
+          sudo /tmp/tetragon-install/tetragon \
+            --server-address unix:///var/run/tetragon/tetragon.sock \
+            --tracing-policy-dir /etc/tetragon/tetragon.tp.d \
+            &
+          echo $! > /tmp/tetragon.pid
+          sleep 3
+
+      - name: Run integration test suite (unprivileged, build tag "integration")
+        run: |
+          sg tetragon-relay -c 'go test -tags integration -race -count=1 -v ./internal/tetra/... ./internal/apply/...'
+
+      - name: Stop Tetragon
+        if: always()
+        run: sudo kill "$(cat /tmp/tetragon.pid)" || true
