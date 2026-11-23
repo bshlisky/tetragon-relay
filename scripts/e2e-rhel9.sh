@@ -67,7 +67,7 @@ echo "== starting Tetragon =="
 # --bpf-lib defaults to /var/lib/tetragon, which only install.sh (not run
 # by this script) would populate, so point it at the extracted
 # usr/local/lib/tetragon directory directly instead.
-BPF_LIB_DIR="$(dirname "${TETRAGON_BIN}")/../lib/tetragon"
+BPF_LIB_DIR="$(dirname "${TETRAGON_BIN}")/../lib/tetragon/bpf"
 sudo "${TETRAGON_BIN}" \
   --server-address unix:///var/run/tetragon/tetragon.sock \
   --tracing-policy-dir /etc/tetragon/tetragon.tp.d \

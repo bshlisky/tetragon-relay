@@ -191,7 +191,7 @@ jobs:
           # --bpf-lib defaults to. Since this job only extracted the
           # tarball rather than running install.sh, point --bpf-lib at the
           # extracted usr/local/lib/tetragon directory directly instead.
-          bpf_lib_dir="$(dirname "${TETRAGON_BIN}")/../lib/tetragon"
+          bpf_lib_dir="$(dirname "${TETRAGON_BIN}")/../lib/tetragon/bpf"
           sudo "${TETRAGON_BIN}" \
             --server-address unix:///var/run/tetragon/tetragon.sock \
             --tracing-policy-dir /etc/tetragon/tetragon.tp.d \
