@@ -184,9 +184,18 @@ jobs:
 
       - name: Start Tetragon (root) on the unix socket
         run: |
+          # The release tarball mirrors an FHS tree
+          # (tetragon-v1.8.0-amd64/usr/local/{bin,lib}/...); its own
+          # install.sh would copy usr/local/lib/tetragon's contents
+          # (bpf_alignchecker.o and friends) to /var/lib/tetragon/, which
+          # --bpf-lib defaults to. Since this job only extracted the
+          # tarball rather than running install.sh, point --bpf-lib at the
+          # extracted usr/local/lib/tetragon directory directly instead.
+          bpf_lib_dir="$(dirname "${TETRAGON_BIN}")/../lib/tetragon"
           sudo "${TETRAGON_BIN}" \
             --server-address unix:///var/run/tetragon/tetragon.sock \
             --tracing-policy-dir /etc/tetragon/tetragon.tp.d \
+            --bpf-lib "${bpf_lib_dir}" \
             > /tmp/tetragon.log 2>&1 &
           echo $! > /tmp/tetragon.pid
           sleep 3
