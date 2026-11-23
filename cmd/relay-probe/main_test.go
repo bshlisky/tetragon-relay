@@ -13,6 +13,14 @@ func collectIsImplemented() bool { return runtime.GOOS == "linux" }
 // this only asserts run() propagates that failure with exit code 1 rather
 // than panicking; the real success path is exercised on linux CI (step 3
 // prompt Part E3/C5) where collect() is the real implementation.
+//
+// --tetragon-binary is pointed at this test binary's own executable
+// (guaranteed to exist and be readable, unlike the default
+// "/usr/local/bin/tetragon") rather than left at its default: the plain
+// "ci" job's runner has no Tetragon installed at all (only the
+// "integration" job installs one), so collect()'s sha256File step would
+// otherwise fail for a reason that has nothing to do with the rest of
+// collect_linux.go actually working.
 func TestRun_ReportMode(t *testing.T) {
 	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
@@ -20,7 +28,12 @@ func TestRun_ReportMode(t *testing.T) {
 	}
 	defer func() { _ = devNull.Close() }()
 
-	code := run([]string{"--report"}, devNull, devNull)
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+
+	code := run([]string{"--report", "--tetragon-binary", self}, devNull, devNull)
 	if collectIsImplemented() {
 		if code != 0 {
 			t.Fatalf("run(--report) = %d, want 0", code)
