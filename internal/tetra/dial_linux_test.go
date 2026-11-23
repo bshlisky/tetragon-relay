@@ -226,6 +226,30 @@ func TestEvaluateSocketStat(t *testing.T) {
 	}
 }
 
+// TestGetxattrFunc_Real exercises the real (non-stubbed) getxattrFunc
+// (unix.Lgetxattr) against a real file. On a host with SELinux disabled
+// (every GitHub-hosted ubuntu-24.04 runner), this returns ENODATA/
+// ENOTSUP, exercising isSELinuxDisabledErr's real caller path end to end.
+func TestGetxattrFunc_Real(t *testing.T) {
+	dir, err := os.MkdirTemp("", "tetraxattr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	p := filepath.Join(dir, "f")
+	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 256)
+	_, err = getxattrFunc(p, "security.selinux", buf)
+	if err == nil {
+		t.Skip("security.selinux xattr present and readable on this host; nothing to assert")
+	}
+	if !isSELinuxDisabledErr(err) {
+		t.Fatalf("getxattrFunc on a host with no SELinux xattr returned an unexpected error: %v", err)
+	}
+}
+
 func TestVerifySELinuxLabel(t *testing.T) {
 	restore := getxattrFunc
 	defer func() { getxattrFunc = restore }()
@@ -310,6 +334,57 @@ func realUnixConnPair(t *testing.T) *net.UnixConn {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 	return conn
+}
+
+// TestPeerCredFunc_Real exercises the real (non-stubbed) default
+// peerCredFunc implementation (SO_PEERCRED via raw.Control +
+// unix.GetsockoptUcred) against a real unix socket pair. SO_PEERCRED
+// requires no special privilege to query on a connection this process
+// itself owns, so this covers the real syscall path without root: the
+// peer here is this same test process, so uid/pid must match
+// os.Getuid()/os.Getpid() exactly.
+func TestPeerCredFunc_Real(t *testing.T) {
+	conn := realUnixConnPair(t)
+	uid, pid, err := peerCredFunc(conn)
+	if err != nil {
+		t.Fatalf("peerCredFunc: %v", err)
+	}
+	if uid != uint32(os.Getuid()) {
+		t.Errorf("uid = %d, want %d", uid, os.Getuid())
+	}
+	if pid != int32(os.Getpid()) {
+		t.Errorf("pid = %d, want %d", pid, os.Getpid())
+	}
+}
+
+// TestPeerExeFunc_Real exercises the real (non-stubbed) default
+// peerExeFunc implementation (os.Readlink of /proc/<pid>/exe) against this
+// test process's own pid, which it can always resolve regardless of
+// privilege.
+func TestPeerExeFunc_Real(t *testing.T) {
+	exe, err := peerExeFunc(int32(os.Getpid()))
+	if err != nil {
+		t.Fatalf("peerExeFunc: %v", err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exe != self {
+		t.Errorf("peerExeFunc(self) = %q, want %q", exe, self)
+	}
+}
+
+// TestPeerCredFunc_ClosedConn covers peerCredFunc's error return when the
+// underlying connection is already closed.
+func TestPeerCredFunc_ClosedConn(t *testing.T) {
+	conn := realUnixConnPair(t)
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := peerCredFunc(conn); err == nil {
+		t.Fatal("peerCredFunc on a closed connection returned no error")
+	}
 }
 
 func TestVerifyPeerCredAndExe(t *testing.T) {
