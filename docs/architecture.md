@@ -706,8 +706,8 @@ RestartSec=2s
 
 # Privilege
 NoNewPrivileges=yes
-CapabilityBoundingSet=
-AmbientCapabilities=
+CapabilityBoundingSet=CAP_SYS_PTRACE  # step 3: required for internal/tetra's /proc/<pid>/exe peer check against Tetragon's root-owned process
+AmbientCapabilities=CAP_SYS_PTRACE
 SecureBits=noroot-locked
 
 # Filesystem

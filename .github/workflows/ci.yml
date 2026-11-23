@@ -212,7 +212,20 @@ jobs:
 
       - name: Run integration test suite (unprivileged, build tag "integration")
         run: |
-          sg tetragon-relay -c 'go test -tags integration -race -count=1 -v ./internal/tetra/... ./internal/apply/...'
+          set -euo pipefail
+          # go test compiles a fresh temp binary per invocation, so a
+          # capability granted via setcap would not survive a plain
+          # `go test ...`. Build real test binaries first, grant each
+          # CAP_SYS_PTRACE (needed for internal/tetra's real
+          # /proc/<pid>/exe check against Tetragon's root-owned process;
+          # see packaging/systemd/tetragon-relay.service's own comment on
+          # why), then run them directly as the unprivileged
+          # tetragon-relay group member.
+          go test -tags integration -race -count=1 -c -o /tmp/tetra.itest ./internal/tetra
+          go test -tags integration -race -count=1 -c -o /tmp/apply.itest ./internal/apply
+          sudo setcap cap_sys_ptrace+ep /tmp/tetra.itest
+          sudo setcap cap_sys_ptrace+ep /tmp/apply.itest
+          sg tetragon-relay -c '/tmp/tetra.itest -test.v && /tmp/apply.itest -test.v'
 
       - name: Stop Tetragon
         if: always()

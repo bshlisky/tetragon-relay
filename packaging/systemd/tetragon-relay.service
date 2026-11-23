@@ -34,8 +34,16 @@ RestartSec=2s
 
 # Privilege
 NoNewPrivileges=yes
-CapabilityBoundingSet=
-AmbientCapabilities=
+# CAP_SYS_PTRACE is required for internal/tetra's Part B2 post-connect
+# check: resolving the Tetragon socket peer's /proc/<pid>/exe. Tetragon
+# runs as root and relayd does not (User=tetragon-relay above); reading
+# another uid's /proc/<pid>/exe is gated by the kernel's ptrace permission
+# check (Yama/commoncap), not by the symlink's file mode, so without this
+# capability every Dial() would fail verifyPeerCredAndExe with EPERM, as
+# confirmed by step 3's real-Tetragon integration job (docs/reports/
+# step-03.md section 13). No other capability is granted.
+CapabilityBoundingSet=CAP_SYS_PTRACE
+AmbientCapabilities=CAP_SYS_PTRACE
 SecureBits=noroot-locked
 
 # Filesystem

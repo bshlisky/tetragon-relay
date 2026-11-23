@@ -78,10 +78,20 @@ trap cleanup_tetragon EXIT
 sleep 3
 
 echo "== running integration test suite (unprivileged, group ${RELAY_GROUP}) =="
-# `sg` starts a subshell with RELAY_GROUP as a supplementary group without
-# requiring a fresh login, matching how the systemd unit's own
-# SupplementaryGroups= works in production.
-sg "${RELAY_GROUP}" -c "go test -tags integration -race -count=1 -v ./internal/tetra/... ./internal/apply/..."
+# go test compiles a fresh temp binary per invocation, so a capability
+# granted via setcap would not survive a plain `go test ...`: build real
+# test binaries first and grant each CAP_SYS_PTRACE (needed for
+# internal/tetra's real /proc/<pid>/exe check against Tetragon's
+# root-owned process; see packaging/systemd/tetragon-relay.service's own
+# comment on why), then run them directly. `sg` starts a subshell with
+# RELAY_GROUP as a supplementary group without requiring a fresh login,
+# matching how the systemd unit's own SupplementaryGroups= works in
+# production.
+go test -tags integration -race -count=1 -c -o "${WORKDIR}/tetra.itest" ./internal/tetra
+go test -tags integration -race -count=1 -c -o "${WORKDIR}/apply.itest" ./internal/apply
+sudo setcap cap_sys_ptrace+ep "${WORKDIR}/tetra.itest"
+sudo setcap cap_sys_ptrace+ep "${WORKDIR}/apply.itest"
+sg "${RELAY_GROUP}" -c "'${WORKDIR}/tetra.itest' -test.v && '${WORKDIR}/apply.itest' -test.v"
 
 echo "== done =="
 echo "Record this run's kernel version (uname -r above), scenario pass/fail,"
