@@ -26,14 +26,18 @@ type Client struct {
 	closed bool
 }
 
-// newClient wraps an already-established, already-verified *grpc.ClientConn
-// as a Client. Dial (platform-specific, dial_linux.go) is the only
-// production caller; tests call this directly against a fake gRPC server
-// dialed with no socket peer verification at all, which is intentional:
-// Part B2's checks are about which process this package will *connect to*
-// in production, not about the RPC-level behavior newClient's callers
-// (every other test in this package) exist to exercise.
-func newClient(conn *grpc.ClientConn, cfg Config) *Client {
+// NewUnverified wraps an already-established *grpc.ClientConn as a Client,
+// skipping Part B2's socket peer verification entirely. Dial
+// (platform-specific, dial_linux.go) is the only production caller. The
+// exported name exists so internal/apply's tests (step 3 prompt Part E1:
+// "a fake Tetragon gRPC server over a real unix socket in a temp dir") can
+// wire a real *Client to a fake server without needing a uid-0-owned
+// socket. Part B2's checks are about which process this package will
+// *connect to* in production, not about the RPC-level behavior these
+// tests exist to exercise, so skipping them here is intentional, not a
+// gap: no production code path other than Dial (which performs the real
+// B2 checks itself before ever calling this) reaches NewUnverified.
+func NewUnverified(conn *grpc.ClientConn, cfg Config) *Client {
 	return &Client{conn: conn, stub: tetragonpb.NewFineGuidanceSensorsClient(conn), cfg: cfg}
 }
 
@@ -122,10 +126,15 @@ func (c *Client) DisableTracingPolicy(ctx context.Context, name, domain string) 
 // internal/apply needs from tetragonpb.TracingPolicyStatus, so callers
 // never need to import the vendored protobuf package directly.
 type TracingPolicyStatus struct {
-	ID       uint64
-	Name     string
-	Domain   string
-	State    tetragonpb.TracingPolicyState
+	ID     uint64
+	Name   string
+	Domain string
+	State  tetragonpb.TracingPolicyState
+	// Enabled is TracingPolicyStatus.enabled (sensors.proto:143),
+	// deprecated upstream in favor of State but still part of the
+	// (loaded name, state, enabled, mode, sensors) digest tuple step 3
+	// prompt Part D8 specifies.
+	Enabled  bool
 	Mode     tetragonpb.TracingPolicyMode
 	Sensors  []string
 	Error    string
@@ -148,6 +157,7 @@ func (c *Client) ListTracingPolicies(ctx context.Context, domain string) ([]Trac
 			Name:     p.GetName(),
 			Domain:   p.GetDomain(),
 			State:    p.GetState(),
+			Enabled:  p.GetEnabled(), //nolint:staticcheck // SA1019: deprecated upstream; still part of Part D8's digest tuple
 			Mode:     p.GetMode(),
 			Sensors:  append([]string(nil), p.GetSensors()...),
 			Error:    p.GetError(),

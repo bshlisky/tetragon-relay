@@ -13,7 +13,7 @@ import (
 // inherently Linux-specific, and architecture doc section 1.1 scopes this
 // project to RHEL 9. This stub exists only so the package (and anything
 // that imports it) builds and vets on a non-Linux development machine;
-// internal/tetra's RPC-behavior tests use newClient directly against a
+// internal/tetra's RPC-behavior tests use NewUnverified directly against a
 // fake gRPC server instead of calling Dial, so they are unaffected and run
 // on every platform. dial_linux.go's own tests are Linux-only and run in
 // the real CI job (ubuntu-24.04) that step 3's report documents.

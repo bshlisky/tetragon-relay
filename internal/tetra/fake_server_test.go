@@ -137,8 +137,8 @@ func (f *fakeServer) GetEvents(_ *tetragonpb.GetEventsRequest, stream grpc.Serve
 }
 
 // startFakeServer starts f listening on a unix socket inside a fresh temp
-// dir and returns a Client wired directly to it via newClient (not Dial:
-// see newClient's doc comment for why that is the correct choice for these
+// dir and returns a Client wired directly to it via NewUnverified (not Dial:
+// see NewUnverified's doc comment for why that is the correct choice for these
 // tests) and a cleanup func.
 func startFakeServer(t *testing.T, f *fakeServer) (*Client, func()) {
 	t.Helper()
@@ -170,7 +170,7 @@ func startFakeServer(t *testing.T, f *fakeServer) (*Client, func()) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	c := newClient(conn, Config{Timeout: 2 * time.Second})
+	c := NewUnverified(conn, Config{Timeout: 2 * time.Second})
 	cleanup := func() {
 		_ = c.Close()
 		srv.Stop()

@@ -67,7 +67,7 @@ func Dial(_ context.Context, cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
-	return newClient(conn, cfg), nil
+	return NewUnverified(conn, cfg), nil
 }
 
 // verifySocketFile implements Part B2's pre-connect checks: lstat (never
