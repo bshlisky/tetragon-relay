@@ -115,5 +115,14 @@ verify-crd:
 	fi; \
 	echo "verify-crd OK: $$got"
 
+TETRAGON_API_DIR := third_party/tetragon/v1.8.0/api/v1/tetragon
+TETRAGON_API_MANIFEST := $(TETRAGON_API_DIR)/MANIFEST.sha256
+
+.PHONY: verify-tetragon-api
+verify-tetragon-api:
+	@cd $(TETRAGON_API_DIR) && shasum -a 256 -c MANIFEST.sha256 --status \
+		&& echo "verify-tetragon-api OK" \
+		|| (echo "$(TETRAGON_API_DIR) does not match MANIFEST.sha256 (re-vendoring or tampering); see README.md" && exit 1)
+
 .PHONY: ci
-ci: lint vuln modverify vendor-check verify-crd test-race coverage fuzz-short proto breaking verify-repro sbom
+ci: lint vuln modverify vendor-check verify-crd verify-tetragon-api test-race coverage fuzz-short proto breaking verify-repro sbom
