@@ -107,13 +107,18 @@ make sbom                                          -> dist/sbom.spdx.json genera
 Exit code: 0
 ```
 
-GitHub Actions `ci` run for the final commit of this pass: **(recorded in
-section 3.1 below, filled in after push)**.
+GitHub Actions `ci` run for the final commit of this pass: **run 45161381388
+(success, 5m59s)**, recorded in section 3.1.
 
 ### 3.1 Final commit and CI run
 
-Final commit for this step: `<filled in after push>`. GitHub Actions `ci`
-run: `<run number, filled in after push>`.
+Final commit for this step: `9be3a5d` ("Step 2c: guardrail correctness
+fixes (architect review of fe11a62)"). GitHub Actions `ci` run:
+**https://github.com/bshlisky/tetragon-relay/actions/runs/45161381388**,
+status `success`, all 20 steps green (lint, govulncheck, vendor check,
+race tests + per-package coverage gate, 60s fuzz smoke across all five
+fuzz targets, reproducible build check, proto generate/diff/breaking,
+SBOM).
 
 ### Per-package coverage (statement, plain `go test`, no `-race`)
 
