@@ -224,6 +224,7 @@ metadata:
 spec:
   kprobes:
   - call: "security_bprm_check"
+    syscall: false
     selectors:
       - matchBinaries:
         - operator: "In"
