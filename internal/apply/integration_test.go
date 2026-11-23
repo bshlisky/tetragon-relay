@@ -17,6 +17,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
+	"strconv"
 	"testing"
 	"time"
 
@@ -25,6 +27,37 @@ import (
 )
 
 const integrationSocket = "/var/run/tetragon/tetragon.sock"
+
+// newIntegrationEngine builds an Engine configured the way a real relayd
+// would be: PersistUID/PersistGID are THIS (unprivileged) process's own
+// uid and the tetragon-relay group's gid, never 0 — relayd itself runs as
+// an unprivileged user (packaging/systemd/tetragon-relay.service's
+// User=tetragon-relay, not root), so PersistDir's chown target must be
+// something this process can actually set; chowning to uid 0 would fail
+// with EPERM for the same reason the integration test suite itself is
+// deliberately run unprivileged (step 3 prompt Part E3).
+func newIntegrationEngine(t *testing.T, client *tetra.Client) *Engine {
+	t.Helper()
+	return newIntegrationEngineWithPersistDir(t, client, t.TempDir())
+}
+
+func newIntegrationEngineWithPersistDir(t *testing.T, client *tetra.Client, persistDir string) *Engine {
+	t.Helper()
+	g, err := user.LookupGroup("tetragon-relay")
+	if err != nil {
+		t.Fatalf("lookup tetragon-relay group: %v", err)
+	}
+	gid, err := strconv.Atoi(g.Gid)
+	if err != nil {
+		t.Fatalf("parse tetragon-relay gid %q: %v", g.Gid, err)
+	}
+	return NewEngine(client, RealPolicyParser{}, NewFakeLKGStore(), &FakeReachabilityChecker{ReachableValue: true}, &FakeAuditor{}, Config{
+		PersistDir:   persistDir,
+		PersistUID:   os.Getuid(),
+		PersistGID:   gid,
+		HealthWindow: HealthWindowConfig{Window: 15 * time.Second, PollInterval: time.Second},
+	})
+}
 
 func dialIntegration(t *testing.T) *tetra.Client {
 	t.Helper()
@@ -58,10 +91,7 @@ func TestIntegration_LoadMonitorBundle_ThenUpgradeToEnforce(t *testing.T) {
 	client := dialIntegration(t)
 	defer func() { _ = client.Close() }()
 
-	e := NewEngine(client, RealPolicyParser{}, NewFakeLKGStore(), &FakeReachabilityChecker{ReachableValue: true}, &FakeAuditor{}, Config{
-		PersistDir:   t.TempDir(),
-		HealthWindow: HealthWindowConfig{Window: 15 * time.Second, PollInterval: time.Second},
-	})
+	e := newIntegrationEngine(t, client)
 
 	canaryYAML := canaryPolicyYAML("itest-canary", "Sigkill")
 	monitorResult := acceptedBundleYAML("monitor", "itest-canary", 1, canaryYAML)
@@ -86,10 +116,7 @@ func TestIntegration_EnforcementKillsCanary_AdminPathSurvives(t *testing.T) {
 	defer func() { _ = client.Close() }()
 
 	canaryPath := buildCanaryBinary(t, "/tmp/testbin-canary")
-	e := NewEngine(client, RealPolicyParser{}, NewFakeLKGStore(), &FakeReachabilityChecker{ReachableValue: true}, &FakeAuditor{}, Config{
-		PersistDir:   t.TempDir(),
-		HealthWindow: HealthWindowConfig{Window: 15 * time.Second, PollInterval: time.Second},
-	})
+	e := newIntegrationEngine(t, client)
 
 	yaml := canaryPolicyYAML("itest-kill-canary", "Sigkill")
 	yaml = withBinaryPath(yaml, canaryPath)
@@ -119,10 +146,7 @@ func TestIntegration_RollbackOnAdminPathKill(t *testing.T) {
 	client := dialIntegration(t)
 	defer func() { _ = client.Close() }()
 
-	e := NewEngine(client, RealPolicyParser{}, NewFakeLKGStore(), &FakeReachabilityChecker{ReachableValue: true}, &FakeAuditor{}, Config{
-		PersistDir:   t.TempDir(),
-		HealthWindow: HealthWindowConfig{Window: 15 * time.Second, PollInterval: time.Second},
-	})
+	e := newIntegrationEngine(t, client)
 
 	// A policy that Sigkills /usr/bin/bash itself (a real, compiled-in
 	// admin-path entry) is expected to trip the health window.
@@ -148,10 +172,7 @@ func TestIntegration_RestartReloadsPersistedSet(t *testing.T) {
 	defer func() { _ = client.Close() }()
 
 	dir := "/etc/tetragon/tetragon.tp.d/relay"
-	e := NewEngine(client, RealPolicyParser{}, NewFakeLKGStore(), &FakeReachabilityChecker{ReachableValue: true}, &FakeAuditor{}, Config{
-		PersistDir:   dir,
-		HealthWindow: HealthWindowConfig{Window: 15 * time.Second, PollInterval: time.Second},
-	})
+	e := newIntegrationEngineWithPersistDir(t, client, dir)
 	yaml := canaryPolicyYAML("itest-persist", "Post")
 	if res, err := e.Apply(context.Background(), acceptedBundleYAML("enforce", "itest-persist", 1, yaml)); err != nil || res.Status != StatusApplied {
 		t.Fatalf("apply: res=%+v err=%v", res, err)
@@ -174,10 +195,7 @@ func TestIntegration_ForeignPolicyLeftUntouched(t *testing.T) {
 
 	client := dialIntegration(t)
 	defer func() { _ = client.Close() }()
-	e := NewEngine(client, RealPolicyParser{}, NewFakeLKGStore(), &FakeReachabilityChecker{ReachableValue: true}, &FakeAuditor{}, Config{
-		PersistDir:   t.TempDir(),
-		HealthWindow: HealthWindowConfig{Window: 15 * time.Second, PollInterval: time.Second},
-	})
+	e := newIntegrationEngine(t, client)
 	if res, err := e.Apply(context.Background(), acceptedBundleYAML("enforce", "itest-managed", 1, canaryPolicyYAML("itest-managed", "Post"))); err != nil || res.Status != StatusApplied {
 		t.Fatalf("apply: res=%+v err=%v", res, err)
 	}

@@ -151,7 +151,22 @@ jobs:
           echo "${TETRAGON_TARBALL_SHA256}  tetragon.tar.gz" | sha256sum -c -
           mkdir -p /tmp/tetragon-install
           tar -xzf tetragon.tar.gz -C /tmp/tetragon-install
-          echo "/tmp/tetragon-install" >> "$GITHUB_PATH"
+          # The release tarball extracts into a versioned subdirectory
+          # (tetragon-${TETRAGON_VERSION}-amd64/tetragon), not directly
+          # into the target directory's root (tetragon.io/docs/
+          # installation/package/'s own "tar -xvf ...; cd
+          # tetragon-v1.8.0-amd64/" confirms this), so the binary's
+          # containing directory must be located dynamically rather than
+          # assumed to be /tmp/tetragon-install itself.
+          tetragon_bin="$(find /tmp/tetragon-install -maxdepth 2 -type f -name tetragon | head -1)"
+          if [ -z "${tetragon_bin}" ]; then
+            echo "could not find the tetragon binary inside the extracted tarball" >&2
+            find /tmp/tetragon-install >&2
+            exit 1
+          fi
+          chmod +x "${tetragon_bin}"
+          dirname "${tetragon_bin}" >> "$GITHUB_PATH"
+          echo "TETRAGON_BIN=${tetragon_bin}" >> "$GITHUB_ENV"
 
       - name: Create relay-managed group and socket directories
         run: |
@@ -165,16 +180,26 @@ jobs:
         run: |
           uname -a
           GOOS=linux go build -o relay-probe ./cmd/relay-probe
-          sudo ./relay-probe --report --tetragon-binary /tmp/tetragon-install/tetragon || true
+          sudo ./relay-probe --report --tetragon-binary "${TETRAGON_BIN}" || true
 
       - name: Start Tetragon (root) on the unix socket
         run: |
-          sudo /tmp/tetragon-install/tetragon \
+          sudo "${TETRAGON_BIN}" \
             --server-address unix:///var/run/tetragon/tetragon.sock \
             --tracing-policy-dir /etc/tetragon/tetragon.tp.d \
-            &
+            > /tmp/tetragon.log 2>&1 &
           echo $! > /tmp/tetragon.pid
           sleep 3
+          # Fail fast and loudly if Tetragon did not actually start,
+          # rather than letting the integration test suite fail later
+          # with a confusing "connection refused".
+          if ! sudo kill -0 "$(cat /tmp/tetragon.pid)" 2>/dev/null; then
+            echo "Tetragon did not start; log:" >&2
+            cat /tmp/tetragon.log >&2
+            exit 1
+          fi
+          sudo chmod 660 /var/run/tetragon/tetragon.sock
+          sudo chown root:tetragon-relay /var/run/tetragon/tetragon.sock
 
       - name: Run integration test suite (unprivileged, build tag "integration")
         run: |
