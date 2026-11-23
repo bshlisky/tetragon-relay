@@ -359,17 +359,18 @@ func TestPeerCredFunc_Real(t *testing.T) {
 // TestGetsockoptPeerSecFunc_Real exercises the real (non-stubbed) default
 // getsockoptPeerSecFunc implementation (SO_PEERSEC via raw.Control +
 // unix.GetsockoptString) against a real unix socket pair this test
-// process owns on both ends. On a host with SELinux disabled (every
-// GitHub-hosted ubuntu-24.04 runner), this returns ENOPROTOOPT, exercising
-// isPeerSELinuxUnavailableErr's real caller path end to end.
+// process owns on both ends. The outcome is host-dependent: a host with
+// no LSM providing SO_PEERSEC returns ENOPROTOOPT
+// (isPeerSELinuxUnavailableErr); GitHub-hosted ubuntu-24.04 runners
+// default to AppArmor, which implements SO_PEERSEC too and succeeds with
+// its own bare label (e.g. "unconfined") instead — verifyPeerSELinux
+// handles that case separately (TestVerifyPeerSELinux's
+// apparmor_bare_label_* subtests), so this only exercises the real
+// syscall path itself, not any particular outcome.
 func TestGetsockoptPeerSecFunc_Real(t *testing.T) {
 	conn := realUnixConnPair(t)
-	_, err := getsockoptPeerSecFunc(conn)
-	if err == nil {
-		t.Skip("SELinux peer security context available on this host; nothing to assert")
-	}
-	if !isPeerSELinuxUnavailableErr(err) {
-		t.Fatalf("getsockoptPeerSecFunc on a host with no SELinux returned an unexpected error: %v", err)
+	if _, err := getsockoptPeerSecFunc(conn); err != nil && !isPeerSELinuxUnavailableErr(err) {
+		t.Fatalf("getsockoptPeerSecFunc returned an unexpected error: %v", err)
 	}
 }
 
@@ -506,6 +507,25 @@ func TestVerifyPeerSELinux(t *testing.T) {
 		active, err := verifyPeerSELinux(Config{SELinuxRequired: false}, conn)
 		if err != nil || active {
 			t.Fatalf("active=%v err=%v, want false/nil", active, err)
+		}
+	})
+
+	// AppArmor (the default LSM on GitHub-hosted ubuntu-24.04 runners)
+	// implements SO_PEERSEC too, returning its own bare label (no
+	// colons) instead of failing with ENOPROTOOPT — this must be treated
+	// like disabled SELinux, not a type mismatch.
+	t.Run("apparmor_bare_label_treated_as_disabled", func(t *testing.T) {
+		getsockoptPeerSecFunc = func(*net.UnixConn) (string, error) { return "unconfined", nil }
+		active, err := verifyPeerSELinux(Config{SELinuxRequired: false}, conn)
+		if err != nil || active {
+			t.Fatalf("active=%v err=%v, want false/nil", active, err)
+		}
+	})
+
+	t.Run("apparmor_bare_label_required_true_fails_closed", func(t *testing.T) {
+		getsockoptPeerSecFunc = func(*net.UnixConn) (string, error) { return "unconfined", nil }
+		if _, err := verifyPeerSELinux(Config{SELinuxRequired: true}, conn); err == nil {
+			t.Fatal("an unparseable (non-SELinux) label with selinux_required=true was accepted")
 		}
 	})
 

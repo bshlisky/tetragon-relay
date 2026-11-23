@@ -234,20 +234,35 @@ func isPeerSELinuxUnavailableErr(err error) bool {
 // where err is also nil without active being true.
 func verifyPeerSELinux(cfg Config, uc *net.UnixConn) (active bool, err error) {
 	sec, gerr := getsockoptPeerSecFunc(uc)
+	disabled := func() (bool, error) {
+		if cfg.SELinuxRequired {
+			return false, fmt.Errorf("%w: SELinux is disabled on this host but selinux_required is true", ErrSocketVerification)
+		}
+		warnPeerSELinuxDisabledOnce.Do(func() {
+			cfg.logger().Warn("SELinux is disabled on this host; continuing because selinux_required is false", "check", "peer_so_peersec")
+		})
+		return false, nil
+	}
 	if gerr != nil {
 		if isPeerSELinuxUnavailableErr(gerr) {
-			if cfg.SELinuxRequired {
-				return false, fmt.Errorf("%w: SELinux is disabled on this host but selinux_required is true", ErrSocketVerification)
-			}
-			warnPeerSELinuxDisabledOnce.Do(func() {
-				cfg.logger().Warn("SELinux is disabled on this host; continuing because selinux_required is false", "check", "peer_so_peersec")
-			})
-			return false, nil
+			return disabled()
 		}
 		return false, fmt.Errorf("%w: SO_PEERSEC: %w", ErrSocketVerification, gerr)
 	}
 	parts := strings.SplitN(sec, ":", 4)
-	if len(parts) < 3 || parts[2] != cfg.peerSELinuxType() {
+	if len(parts) < 3 {
+		// SO_PEERSEC is not SELinux-specific: AppArmor implements it too
+		// (Ubuntu launchpad bug 1235478), returning its own bare label
+		// (e.g. "unconfined", with no colons) instead of SELinux's
+		// "user:role:type:level" format. On a host where AppArmor, not
+		// SELinux, is the active LSM providing SO_PEERSEC (observed on
+		// GitHub-hosted ubuntu-24.04 runners), getsockopt succeeds but
+		// returns a label this check cannot interpret as an SELinux
+		// type — handled the same as SELinux being unavailable, not as
+		// a type mismatch.
+		return disabled()
+	}
+	if parts[2] != cfg.peerSELinuxType() {
 		return false, fmt.Errorf("%w: socket peer has SELinux context %q, want type %q", ErrSocketVerification, sec, cfg.peerSELinuxType())
 	}
 	return true, nil

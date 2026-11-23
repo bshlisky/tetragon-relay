@@ -84,3 +84,21 @@ error is a hard verification failure, not a fallback to "unavailable".
 - `internal/tetra.Config.TetragonBinaryPath` is no longer read by the peer verification
   path at all; it remains on `Config` only because other callers (`cmd/relay-probe`,
   `internal/hostprobe`) still need the configured binary path for host-fact collection.
+
+## Addendum: SO_PEERSEC is not SELinux-specific (found via real CI, run 45277523718)
+
+The integration job's first real run surfaced that `SO_PEERSEC` is not an SELinux-only
+mechanism: AppArmor implements it too (Ubuntu launchpad bug 1235478, "In 13.10, AppArmor
+added the ability to get the AppArmor label of the peer on the other end of a UNIX domain
+socket"), returning its own bare label (no colons, e.g. `"unconfined"`) instead of
+SELinux's `user:role:type:level` format. GitHub-hosted `ubuntu-24.04` runners default to
+AppArmor, so `getsockopt(SO_PEERSEC)` there succeeds (not `ENOPROTOOPT` as assumed) and
+returns `"unconfined"`, which `verifyPeerSELinux` initially tried to parse as an SELinux
+context and rejected as a type mismatch, failing every integration test.
+
+`verifyPeerSELinux` (`internal/tetra/dial_linux.go`) now treats a successfully-returned
+label that does not parse as an SELinux context (fewer than 3 `:`-separated fields) the
+same as SELinux being unavailable (the `cfg.SELinuxRequired` disabled-SELinux fallback),
+rather than as a type mismatch. This does not weaken the check on a real SELinux-enforcing
+RHEL 9 host (architecture doc 9.2): a genuine SELinux context always has the
+`user:role:type:level` shape, so this path is never reached there.
