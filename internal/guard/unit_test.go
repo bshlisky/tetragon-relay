@@ -3,10 +3,23 @@ package guard
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/bshlisky/tetragon-relay/internal/policydoc"
 )
+
+func TestTruncateValue_LongValueTruncated(t *testing.T) {
+	long := strings.Repeat("a", 500)
+	got := truncateValue(long)
+	if len(got) != 128 {
+		t.Fatalf("truncateValue(500 a's) has length %d, want 128", len(got))
+	}
+	short := "/usr/bin/x"
+	if truncateValue(short) != short {
+		t.Fatalf("truncateValue should not modify a short value")
+	}
+}
 
 func TestViolation_Error(t *testing.T) {
 	v := &Violation{Rule: RuleG1, Detail: "something"}

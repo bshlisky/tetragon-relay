@@ -1,6 +1,12 @@
 package guard
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+	"unicode/utf8"
+
+	"github.com/bshlisky/tetragon-relay/internal/limits"
+)
 
 // RuleID identifies which guardrail (G1-G10) produced a violation.
 type RuleID string
@@ -41,4 +47,22 @@ func (v *Violation) Error() string {
 
 func violation(rule RuleID, format string, args ...interface{}) *Violation {
 	return &Violation{Rule: rule, Detail: fmt.Sprintf(format, args...)}
+}
+
+// truncateValue bounds an attacker-controlled selector value to at most
+// limits.MaxReasonBytes bytes (on a valid UTF-8 boundary) before it is
+// embedded in a Violation's Detail (architect review item D1: "message
+// names the offending value, truncated per the existing 128-byte rule"),
+// mirroring internal/verify's boundReason so a rejection message can name
+// the offending value without becoming an unbounded-size string built
+// from policy content.
+func truncateValue(v string) string {
+	var b strings.Builder
+	for _, r := range v {
+		if b.Len()+utf8.RuneLen(r) > limits.MaxReasonBytes {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }

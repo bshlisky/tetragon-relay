@@ -242,8 +242,8 @@ func checkSelectorG1(policyName, hookID string, s policydoc.Selector, extraBinar
 	if !recognizedMatchOperators[b.Operator] {
 		return violation(RuleG1, "policy %q hook %q: unrecognized matchBinaries operator %q", policyName, hookID, b.Operator)
 	}
-	if hasUnsafeValue(b.Operator, b.Values) {
-		return violation(RuleG1, "policy %q hook %q: matchBinaries %s has an empty, relative, or \"..\"-containing value", policyName, hookID, b.Operator)
+	if v, bad := firstNonCanonicalValue(b.Operator, b.Values); bad {
+		return violation(RuleG1, "policy %q hook %q: matchBinaries %s has a non-canonical value %q", policyName, hookID, b.Operator, truncateValue(v))
 	}
 	candidates := append(append([]string(nil), protectedBinaries...), extraBinaries...)
 	if matchesAnyCandidate(b.Operator, b.Values, candidates) {
@@ -287,12 +287,18 @@ func checkSelectorG2(policyName string, h policydoc.Hook, s policydoc.Selector, 
 		if !recognizedMatchOperators[a.Operator] {
 			return violation(RuleG2, "policy %q hook %q: unrecognized matchArgs operator %q", policyName, h.Identifier, a.Operator)
 		}
+		// Architect review item D1: every anchored value on a path-typed
+		// arg must be canonical, for every operator - not just the
+		// positive ones this function goes on to evaluate for coverage -
+		// since a non-canonical value is unsafe to reason about either
+		// way and "no special cases" applies here exactly as it does to
+		// G1's matchBinaries check.
+		if v, bad := firstNonCanonicalValue(a.Operator, a.Values); bad {
+			return violation(RuleG2, "policy %q hook %q: matchArgs %s on a path arg has a non-canonical value %q", policyName, h.Identifier, a.Operator, truncateValue(v))
+		}
 		switch a.Operator {
 		case "Equal", "In", "Prefix", "Postfix":
 			hasPositive = true
-			if hasUnsafeValue(a.Operator, a.Values) {
-				return violation(RuleG2, "policy %q hook %q: matchArgs %s on a path arg has an empty, relative, or \"..\"-containing value", policyName, h.Identifier, a.Operator)
-			}
 			if anyPathCoveredPositive(a.Operator, a.Values, extraPaths) {
 				return violation(RuleG2, "policy %q hook %q: matchArgs %s on a path arg covers a protected path", policyName, h.Identifier, a.Operator)
 			}

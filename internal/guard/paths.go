@@ -32,38 +32,71 @@ func isUnsafePostfixValue(v string) bool {
 	return v == "" || strings.Contains(v, "..")
 }
 
-// hasUnsafeValue reports whether any value in values is unsafe for
-// operator's family (C1's "reject outright" rule), checked before any
-// matching is attempted.
-func hasUnsafeValue(operator string, values []string) bool {
+// isCanonicalAnchoredValue implements architect review item D1
+// (step 2d): Tetragon compares matchBinaries/matchArgs values as raw,
+// uninterpreted strings against an already-resolved path
+// (pkg/selectors/kernel.go:1287-1301: writeMatchStrings/writePrefixStrings
+// never normalize their input). A value like "/usr/sbin/sshd/" (trailing
+// slash), "//usr/sbin/sshd" (doubled slash), or "/usr/./sbin/sshd" (a "."
+// segment) is therefore a DIFFERENT string to Tetragon than the canonical
+// path it resembles: it would never equal, or be a real prefix/suffix of,
+// an actual resolved exec path. Cleaning such a value before comparing it
+// (as step 2c's cleanAnchoredValues did) makes this project's OWN check
+// believe a NotIn/NotPrefix value excludes a protected binary that, on a
+// real host, it never would — exactly the fail-open bug step 2d's
+// architect review reproduced. The fix is two-part: matches() now compares
+// raw strings only (no cleaning anywhere in this file), and this function
+// rejects any anchored value that is not already in canonical form
+// outright, for every operator (positive or negative), before matching is
+// even attempted — a non-canonical value is unsafe to reason about either
+// way, not just for negative operators.
+func isCanonicalAnchoredValue(operator, v string) bool {
+	if isUnsafeAnchoredValue(v) {
+		return false
+	}
+	clean := path.Clean(v)
+	switch operator {
+	case "Prefix", "NotPrefix":
+		// A trailing "/" is a meaningful, different value for a
+		// directory-anchored prefix ("/usr/sbin/" only matches things
+		// inside that directory; "/usr/sbin" also matches "/usr/sbinfoo"),
+		// so both the fully clean form and that one-trailing-slash form
+		// are canonical; anything else (a second trailing slash, "/./"
+		// segments, etc.) is not.
+		return v == clean || v == clean+"/"
+	default:
+		return v == clean
+	}
+}
+
+// isCanonicalPostfixValue is the Postfix/NotPostfix counterpart: beyond
+// isUnsafePostfixValue's empty/".."-anywhere check, a value containing a
+// doubled slash or a "." path segment can likewise never appear in a real
+// resolved path, so it can never genuinely match (or, for a negative
+// operator, genuinely exclude) anything either.
+func isCanonicalPostfixValue(v string) bool {
+	if isUnsafePostfixValue(v) {
+		return false
+	}
+	return !strings.Contains(v, "//") && !strings.Contains(v, "/./") && !strings.Contains(v, "/../")
+}
+
+// firstNonCanonicalValue returns the first value in values that is unsafe
+// or non-canonical for operator's family (architect review item D1),
+// checked before any matching is attempted, for both positive and
+// negative operators alike ("no special cases").
+func firstNonCanonicalValue(operator string, values []string) (string, bool) {
 	postfix := operator == "Postfix" || operator == "NotPostfix"
 	for _, v := range values {
 		if postfix {
-			if isUnsafePostfixValue(v) {
-				return true
+			if !isCanonicalPostfixValue(v) {
+				return v, true
 			}
-		} else if isUnsafeAnchoredValue(v) {
-			return true
+		} else if !isCanonicalAnchoredValue(operator, v) {
+			return v, true
 		}
 	}
-	return false
-}
-
-// cleanAnchoredValues path.Cleans every value for the anchored operator
-// families (not Postfix/NotPostfix, whose values are not path-shaped), so
-// a sloppy-but-equivalent value ("/usr/sbin//sshd") cannot evade a literal
-// string comparison against a clean candidate. Call only after
-// hasUnsafeValue has confirmed every value is safe to clean (path.Clean on
-// an empty or ".."-containing string is not a meaningful operation here).
-func cleanAnchoredValues(operator string, values []string) []string {
-	if operator == "Postfix" || operator == "NotPostfix" {
-		return values
-	}
-	out := make([]string, len(values))
-	for i, v := range values {
-		out[i] = path.Clean(v)
-	}
-	return out
+	return "", false
 }
 
 // matches reports whether operator/values, evaluated the way Tetragon
@@ -131,13 +164,14 @@ func matches(operator string, values []string, candidate string) bool {
 	}
 }
 
-// matchesAnyCandidate reports whether operator/values (already known
-// operator-safe; call hasUnsafeValue first) would match at least one of
-// candidates, cleaning values for the anchored families first.
+// matchesAnyCandidate reports whether operator/values (already known to be
+// canonical; call firstNonCanonicalValue first) would match at least one
+// of candidates. Values are compared raw, exactly as matches() does
+// (architect review item D1): no cleaning happens here or anywhere else in
+// this file.
 func matchesAnyCandidate(operator string, values []string, candidates []string) bool {
-	cleaned := cleanAnchoredValues(operator, values)
 	for _, c := range candidates {
-		if matches(operator, cleaned, c) {
+		if matches(operator, values, c) {
 			return true
 		}
 	}
@@ -158,7 +192,6 @@ func matchesAnyCandidate(operator string, values []string, candidates []string) 
 //     right for a single fixed candidate (including Postfix, which is
 //     decidable for one known string, unlike an open-ended directory).
 func pathCoversPositive(operator string, values []string, target string) bool {
-	values = cleanAnchoredValues(operator, values)
 	if !strings.HasSuffix(target, "/") {
 		return matches(operator, values, target)
 	}
