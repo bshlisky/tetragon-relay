@@ -149,9 +149,29 @@ func TestIntegration_RollbackOnAdminPathKill(t *testing.T) {
 	e := newIntegrationEngine(t, client)
 
 	// A policy that Sigkills /usr/bin/bash itself (a real, compiled-in
-	// admin-path entry) is expected to trip the health window.
+	// admin-path entry) is expected to trip the health window — but only
+	// once something actually execs bash while the policy is loaded and
+	// the window is open, so run one repeatedly in the background for
+	// the health window's duration.
 	yaml := canaryPolicyYAML("itest-admin-kill", "Sigkill")
 	yaml = withBinaryPath(yaml, "/usr/bin/bash")
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_ = exec.Command("/usr/bin/bash", "-c", "true").Run()
+				time.Sleep(200 * time.Millisecond)
+			}
+		}
+	}()
+	defer func() { close(stop); <-done }()
+
 	res, err := e.Apply(context.Background(), acceptedBundleYAML("enforce", "itest-admin-kill", 1, yaml))
 	if err == nil {
 		t.Fatal("Apply succeeded despite targeting an admin-path binary; expected a rollback")

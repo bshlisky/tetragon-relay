@@ -53,8 +53,12 @@ chmod +x "${TETRAGON_BIN}"
 echo "== preparing relay group and directories =="
 sudo groupadd -f "${RELAY_GROUP}"
 sudo mkdir -p /var/run/tetragon /etc/tetragon/tetragon.tp.d/relay
-sudo chown root:"${RELAY_GROUP}" /var/run/tetragon /etc/tetragon/tetragon.tp.d/relay
-sudo chmod 2770 /etc/tetragon/tetragon.tp.d/relay
+# internal/apply.PersistDir creates its atomic-swap temp directory as a
+# SIBLING of the target "relay" dir (inside tetragon.tp.d itself), so
+# tetragon.tp.d's own permissions must allow the relay group to create
+# entries there too, not only inside the "relay" subdirectory.
+sudo chown root:"${RELAY_GROUP}" /var/run/tetragon /etc/tetragon/tetragon.tp.d /etc/tetragon/tetragon.tp.d/relay
+sudo chmod 2770 /etc/tetragon/tetragon.tp.d /etc/tetragon/tetragon.tp.d/relay
 sudo usermod -a -G "${RELAY_GROUP}" "$(id -un)"
 
 echo "== running capability probe (relay-probe --report) =="
