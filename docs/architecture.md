@@ -755,6 +755,24 @@ WantedBy=multi-user.target
 
 `systemd-analyze security tetragon-relay` should score at or below 2.0 ("OK"); this is a CI gate.
 
+**Step 3 addendum (Part C):** the checked-in unit, `packaging/systemd/tetragon-relay.service`,
+adds `ExecStartPre=+/usr/libexec/tetragon-relay/relay-probe ...` ahead of `ExecStart` (the
+leading `+` runs that one line as root per `systemd.service(5)`, even though the unit's own
+`User=`/`Group=` stay unprivileged). `relay-probe` (`cmd/relay-probe`) gathers host facts that
+require root to read — kernel config (`CONFIG_BPF_KPROBE_OVERRIDE`, `CONFIG_BPF_LSM`,
+`CONFIG_FUNCTION_ERROR_INJECTION`), the active LSM list, the debugfs error-injection list,
+usrmerge symlink state, Secure Boot/lockdown state, SELinux mode, and the Tetragon binary's
+SHA-256 — and writes them atomically to `/run/tetragon-relay/host-facts.json`
+(`root:tetragon-relay`, `0640`) via `RuntimeDirectory=tetragon-relay` (kept out of
+`ReadOnlyPaths=`, which would otherwise block that one root write). `internal/hostprobe`
+(the agent, unprivileged) reads this file at startup and implements
+`guard.HostCapabilities` from it, failing closed — `KprobeOverride()`/`LSMBPF()` both false,
+enforcement bundles rejected with `REJECTED_CAPABILITY` — if the file is missing, unparseable,
+on the wrong schema version, or stamped with a `boot_id` that does not match the current boot.
+A failing `ExecStartPre` is fatal by default, so the agent never starts without this file
+freshly written for the current boot. See `docs/runbooks/capability-matrix.md` for the
+`relay-probe --report` mode used to build the RHEL 9 kernel capability matrix (section 15.2).
+
 ### 8.8 SELinux policy module (outline)
 
 The agent runs in its own confined domain `relay_t`. Key rules (CIL/TE outline, not a complete module):

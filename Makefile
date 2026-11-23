@@ -15,6 +15,7 @@ all: ci
 .PHONY: build
 build:
 	$(GO) build -trimpath -buildvcs=false -ldflags "$(LDFLAGS)" -o bin/relayd ./cmd/relayd
+	GOOS=linux $(GO) build -trimpath -buildvcs=false -ldflags "$(LDFLAGS)" -o bin/relay-probe ./cmd/relay-probe
 
 .PHONY: test
 test:

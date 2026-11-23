@@ -1,0 +1,86 @@
+# /usr/lib/systemd/system/tetragon-relay.service
+#
+# Step 3 prompt Part C: adds ExecStartPre=+/usr/libexec/tetragon-relay/
+# relay-probe ahead of the architecture doc section 8.7 unit. The leading
+# "+" runs that one line as root (systemd.service(5)) even though the unit
+# itself runs as the unprivileged tetragon-relay user; relay-probe gathers
+# host facts (kernel config, SELinux, usrmerge, Secure Boot/lockdown state,
+# the Tetragon binary's hash) that require root to read, and writes them
+# atomically to /run/tetragon-relay/host-facts.json (root:tetragon-relay,
+# 0640) for the agent to read at startup via internal/hostprobe. If
+# relay-probe fails, systemd aborts the start (ExecStartPre failures are
+# fatal by default): the agent never starts in a state where it cannot
+# establish host capabilities, and (per internal/hostprobe.Load's
+# fail-closed behavior) would otherwise have silently refused every
+# enforcement bundle without explanation.
+[Unit]
+Description=Tetragon relay agent
+After=network-online.target tetragon.service
+Wants=network-online.target
+BindsTo=tetragon.service
+
+[Service]
+Type=notify
+User=tetragon-relay
+Group=tetragon-relay
+SupplementaryGroups=tss
+RuntimeDirectory=tetragon-relay
+RuntimeDirectoryMode=0750
+ExecStartPre=+/usr/libexec/tetragon-relay/relay-probe --tetragon-binary /usr/local/bin/tetragon --relay-group tetragon-relay --facts-path /run/tetragon-relay/host-facts.json
+ExecStart=/usr/libexec/tetragon-relay/relayd --config /etc/tetragon-relay/relay.yaml
+WatchdogSec=30s
+Restart=always
+RestartSec=2s
+
+# Privilege
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SecureBits=noroot-locked
+
+# Filesystem
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=no            # needs /dev/tpmrm0
+DeviceAllow=/dev/tpmrm0 rw
+DevicePolicy=closed
+ReadWritePaths=/var/lib/tetragon-relay /var/spool/tetragon-relay /etc/tetragon/tetragon.tp.d/relay
+ReadOnlyPaths=/etc/tetragon-relay
+# /run/tetragon-relay is NOT listed in ReadOnlyPaths: RuntimeDirectory=
+# above already makes it writable for the unit's whole process tree
+# (including the root ExecStartPre), which relay-probe needs in order to
+# write host-facts.json; ReadOnlyPaths would block that write (namespacing
+# directives apply to every Exec* of the unit, not just ExecStart).
+InaccessiblePaths=/root /home
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+
+# Kernel surface
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @debug @cpu-emulation @obsolete
+IPAddressDeny=any
+IPAddressAllow=10.20.0.0/24  # management core only; mirrors switch policy
+UMask=0077
+
+# Resource bounds
+MemoryMax=256M
+CPUQuota=25%
+TasksMax=64
+LimitNOFILE=1024
+
+[Install]
+WantedBy=multi-user.target

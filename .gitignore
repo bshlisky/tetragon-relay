@@ -1,7 +1,9 @@
 # Go
 /bin/
 /relayd
+/relay-probe
 /cmd/relayd/relayd
+/cmd/relay-probe/relay-probe
 /bundlesign-test
 *.test
 *.out
