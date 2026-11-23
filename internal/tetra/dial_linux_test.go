@@ -123,6 +123,75 @@ func TestDial_RealSocketWrongOwner(t *testing.T) {
 	}
 }
 
+// TestVerifySocketFile_RealFilesystemObjects exercises verifySocketFile's
+// real os.Lstat + syscall.Stat_t path (the wrapper around
+// evaluateSocketStat, which is unit-tested above with a synthetic
+// os.FileInfo) against real filesystem objects this non-root test process
+// can create directly: a regular file, a symlink, and a real socket owned
+// by the wrong (non-root) uid.
+func TestVerifySocketFile_RealFilesystemObjects(t *testing.T) {
+	dir, err := os.MkdirTemp("", "tetraverify")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	gid, err := Config{RelayGroupName: currentGroupName(t)}.relayGID()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("regular_file_not_socket", func(t *testing.T) {
+		p := filepath.Join(dir, "regular")
+		if err := os.WriteFile(p, []byte("x"), 0o660); err != nil {
+			t.Fatal(err)
+		}
+		cfg := Config{SocketPath: p, RelayGroupName: currentGroupName(t)}
+		if err := verifySocketFile(cfg, gid); err == nil {
+			t.Fatal("verifySocketFile accepted a regular file")
+		}
+	})
+
+	t.Run("symlink_to_socket", func(t *testing.T) {
+		realSock := filepath.Join(dir, "real.sock")
+		lis, err := net.Listen("unix", realSock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = lis.Close() }()
+		link := filepath.Join(dir, "link.sock")
+		if err := os.Symlink(realSock, link); err != nil {
+			t.Fatal(err)
+		}
+		cfg := Config{SocketPath: link, RelayGroupName: currentGroupName(t)}
+		if err := verifySocketFile(cfg, gid); err == nil {
+			t.Fatal("verifySocketFile accepted a symlink")
+		}
+	})
+
+	t.Run("real_socket_wrong_owner", func(t *testing.T) {
+		p := filepath.Join(dir, "owned.sock")
+		lis, err := net.Listen("unix", p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = lis.Close() }()
+		if err := os.Chmod(p, 0o660); err != nil {
+			t.Fatal(err)
+		}
+		cfg := Config{SocketPath: p, RelayGroupName: currentGroupName(t)}
+		if err := verifySocketFile(cfg, gid); err == nil {
+			t.Fatal("verifySocketFile accepted a socket not owned by uid 0")
+		}
+	})
+
+	t.Run("nonexistent_path", func(t *testing.T) {
+		cfg := Config{SocketPath: filepath.Join(dir, "nope"), RelayGroupName: currentGroupName(t)}
+		if err := verifySocketFile(cfg, gid); err == nil {
+			t.Fatal("verifySocketFile accepted a nonexistent path")
+		}
+	})
+}
+
 func TestEvaluateSocketStat(t *testing.T) {
 	const wantGID = 123
 	cases := []struct {

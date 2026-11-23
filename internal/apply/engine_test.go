@@ -33,7 +33,7 @@ func fastHealthWindow() HealthWindowConfig {
 	// keeping these tests from depending on several extra real RPC round
 	// trips completing within a sub-second window on a loaded/
 	// race-detector-instrumented CI machine.
-	return HealthWindowConfig{Window: time.Second, PollInterval: 10 * time.Second, SurgeThreshold: 1000}
+	return HealthWindowConfig{Window: 4 * time.Second, PollInterval: 30 * time.Second, SurgeThreshold: 1000}
 }
 
 func newTestEngine(t *testing.T, f *fakeServer, parser *fakePolicyParser) (*Engine, *FakeAuditor, *FakeLKGStore) {
