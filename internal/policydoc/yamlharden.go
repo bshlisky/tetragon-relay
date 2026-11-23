@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"unicode"
 	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
@@ -100,6 +101,55 @@ func checkRawBytes(raw []byte) error {
 	return nil
 }
 
+// isNoncharacter reports whether r is one of the 66 Unicode noncharacters:
+// U+FDD0..U+FDEF, and the last two code points of every plane (U+FFFE,
+// U+FFFF, U+1FFFE, U+1FFFF, ..., U+10FFFE, U+10FFFF).
+func isNoncharacter(r rune) bool {
+	if r >= 0xFDD0 && r <= 0xFDEF {
+		return true
+	}
+	low := r & 0xFFFF
+	return low == 0xFFFE || low == 0xFFFF
+}
+
+// isDisallowedScalarRune implements architect review R2D-1 / step 3 prompt
+// Part A1's baseline rule, applied to every decoded YAML scalar (key or
+// value): reject Unicode category Cc except tab/LF/CR, all of category Cf
+// (bidi controls, zero-width characters, the byte-order mark as a decoded
+// character, etc.), the Unicode line/paragraph separators U+2028/U+2029,
+// and noncharacters. Tab/LF/CR are allowed here (they are legitimate in,
+// e.g., a free-form message string); checkIdentifierWhitespace and
+// checkSelectorValueWhitespace reject them in the specific fields where
+// they have no legitimate meaning and a spoofing risk (R2D-1 impact 2).
+func isDisallowedScalarRune(r rune) bool {
+	switch r {
+	case '\t', '\n', '\r':
+		return false
+	case 0x2028, 0x2029:
+		return true
+	}
+	if unicode.Is(unicode.Cc, r) || unicode.Is(unicode.Cf, r) {
+		return true
+	}
+	return isNoncharacter(r)
+}
+
+// checkScalarContent scans a fully escape-decoded YAML scalar value for
+// every rune isDisallowedScalarRune forbids. It must run on n.Value (the
+// decoded form), never on the raw document bytes: checkRawBytes already
+// rejects a literal NUL byte or control character typed directly into the
+// document, but a double-quoted scalar's "\0" or "\u202e" escape sequence
+// is plain ASCII in the raw bytes and only becomes the dangerous character
+// once yaml.v3 decodes it, which is exactly what this check closes.
+func checkScalarContent(s string) error {
+	for _, r := range s {
+		if isDisallowedScalarRune(r) {
+			return fmt.Errorf("%w: %q", ErrYAMLInvisibleOrControlChar, s)
+		}
+	}
+	return nil
+}
+
 // hardenedYAML walks a structurally-hardened yaml.Node tree. nodeCount and
 // maxDepth bound the walk itself (DoS resistance); every structural
 // rejection rule from step 2 prompt Part B1 is enforced here in a single
@@ -129,6 +179,9 @@ func (h *hardenedYAML) walk(n *yaml.Node, depth int) error {
 	case yaml.ScalarNode:
 		if len(n.Value) > limits.MaxYAMLScalarBytes {
 			return ErrYAMLScalarTooLarge
+		}
+		if err := checkScalarContent(n.Value); err != nil {
+			return err
 		}
 		if isPlainScalar(n) && isYAML11Ambiguous(n.Value) {
 			return fmt.Errorf("%w: %q", ErrYAMLAmbiguousScalar, n.Value)
@@ -172,6 +225,9 @@ func (h *hardenedYAML) walkMapping(n *yaml.Node, depth int) error {
 		}
 		if len(key.Value) > limits.MaxYAMLScalarBytes {
 			return ErrYAMLScalarTooLarge
+		}
+		if err := checkScalarContent(key.Value); err != nil {
+			return err
 		}
 		if key.Kind == yaml.ScalarNode && key.Value == "<<" {
 			return ErrYAMLMergeKey

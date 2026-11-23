@@ -55,4 +55,32 @@ var (
 	// --- B8: name binding ---
 
 	ErrNameMismatch = errors.New("policydoc: metadata.name does not match the bundle's policy name")
+
+	// --- A1 (step 3 prompt, architect review R2D-1): escape-decoded
+	// control and invisible characters ---
+
+	// ErrYAMLInvisibleOrControlChar is returned when a decoded scalar
+	// (key or value, after YAML escape processing) contains a Unicode
+	// category Cc code point other than tab/LF/CR, any category Cf code
+	// point, U+2028, U+2029, or a noncharacter. checkRawBytes only
+	// inspects the raw document bytes, which a quoted scalar's escape
+	// sequences (\0, \u202e, ...) bypass entirely; this check runs on
+	// every decoded scalar value instead.
+	ErrYAMLInvisibleOrControlChar = errors.New("policydoc: scalar contains a disallowed control or invisible character")
+
+	// ErrHookIdentifierWhitespace is returned when a hook identifier
+	// (kprobe call, tracepoint subsystem/event, uprobe path/symbols,
+	// lsmhook hook) contains a tab, newline, or carriage return. These
+	// are otherwise-legal scalar characters (ErrYAMLInvisibleOrControlChar
+	// exempts them) but have no legitimate meaning inside an identifier
+	// Tetragon matches as an opaque string, and a tab/newline embedded in
+	// one can make an approver's rendering of the policy differ from
+	// what is actually loaded (architect review R2D-1).
+	ErrHookIdentifierWhitespace = errors.New("policydoc: hook identifier contains a tab, newline, or carriage return")
+
+	// ErrSelectorValueWhitespace is the matchBinaries/matchParentBinaries
+	// and matchArgs/matchData/matchReturnArgs analog of
+	// ErrHookIdentifierWhitespace: a tab/newline/CR inside a selector
+	// value has no legitimate use and the same spoofing risk.
+	ErrSelectorValueWhitespace = errors.New("policydoc: selector value contains a tab, newline, or carriage return")
 )

@@ -1,10 +1,31 @@
 package policydoc
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // ErrUnknownMacro is returned when a selector's `macros` field names an
 // entry not present in spec.selectorsMacros.
 var ErrUnknownMacro = fmt.Errorf("%w: unknown macro name", ErrModelDecode)
+
+// containsLineWhitespace reports whether s contains a tab, newline, or
+// carriage return: step 3 prompt Part A1's additional rule for selector
+// values and hook identifiers, on top of the generic scalar check in
+// yamlharden.go (which deliberately allows these three characters
+// elsewhere, e.g. in a free-form message string).
+func containsLineWhitespace(s string) bool {
+	return strings.ContainsAny(s, "\t\n\r")
+}
+
+// checkIdentifierWhitespace enforces Part A1 on a hook identifier field
+// (call, symbols, path, subsystem, event, hook).
+func checkIdentifierWhitespace(s string) error {
+	if containsLineWhitespace(s) {
+		return fmt.Errorf("%w: %q", ErrHookIdentifierWhitespace, s)
+	}
+	return nil
+}
 
 // buildHooks converts the typed model's per-hook-type specs into the
 // exported, uniform Hook/Selector shape internal/guard consumes, resolving
@@ -13,6 +34,9 @@ func buildHooks(d *rawDoc) ([]Hook, error) {
 	var hooks []Hook
 
 	for _, k := range d.Spec.KProbes {
+		if err := checkIdentifierWhitespace(k.Call); err != nil {
+			return nil, err
+		}
 		sels, err := resolveSelectors(k.Selectors, d.Spec.SelectorsMacros)
 		if err != nil {
 			return nil, err
@@ -20,6 +44,12 @@ func buildHooks(d *rawDoc) ([]Hook, error) {
 		hooks = append(hooks, Hook{Kind: HookKindKProbe, Identifier: k.Call, Selectors: sels, PathArgIndices: pathArgIndices(k.Args)})
 	}
 	for _, t := range d.Spec.Tracepoints {
+		if err := checkIdentifierWhitespace(t.Subsystem); err != nil {
+			return nil, err
+		}
+		if err := checkIdentifierWhitespace(t.Event); err != nil {
+			return nil, err
+		}
 		sels, err := resolveSelectors(t.Selectors, d.Spec.SelectorsMacros)
 		if err != nil {
 			return nil, err
@@ -27,6 +57,14 @@ func buildHooks(d *rawDoc) ([]Hook, error) {
 		hooks = append(hooks, Hook{Kind: HookKindTracepoint, Identifier: t.Subsystem + "/" + t.Event, Selectors: sels, PathArgIndices: pathArgIndices(t.Args)})
 	}
 	for _, u := range d.Spec.UProbes {
+		if err := checkIdentifierWhitespace(u.Path); err != nil {
+			return nil, err
+		}
+		for _, sym := range u.Symbols {
+			if err := checkIdentifierWhitespace(sym); err != nil {
+				return nil, err
+			}
+		}
 		sels, err := resolveSelectors(u.Selectors, d.Spec.SelectorsMacros)
 		if err != nil {
 			return nil, err
@@ -34,6 +72,9 @@ func buildHooks(d *rawDoc) ([]Hook, error) {
 		hooks = append(hooks, Hook{Kind: HookKindUProbe, Identifier: u.Path, Selectors: sels, PathArgIndices: pathArgIndices(u.Args)})
 	}
 	for _, l := range d.Spec.LsmHooks {
+		if err := checkIdentifierWhitespace(l.Hook); err != nil {
+			return nil, err
+		}
 		sels, err := resolveSelectors(l.Selectors, d.Spec.SelectorsMacros)
 		if err != nil {
 			return nil, err
@@ -125,27 +166,59 @@ func resolveSelectors(raws []rawSelector, macros map[string]rawSelector) ([]Sele
 // macro that itself names other macros as using only its own direct
 // filters (see docs/reports/step-02b.md open questions).
 func resolveSelector(r rawSelector, macros map[string]rawSelector) (Selector, error) {
+	matchArgs, err := convertArgSelectors(r.MatchArgs)
+	if err != nil {
+		return Selector{}, err
+	}
+	matchReturnArgs, err := convertArgSelectors(r.MatchReturnArgs)
+	if err != nil {
+		return Selector{}, err
+	}
+	matchBinaries, err := convertBinarySelectors(r.MatchBinaries)
+	if err != nil {
+		return Selector{}, err
+	}
+	matchParentBinaries, err := convertBinarySelectors(r.MatchParentBinaries)
+	if err != nil {
+		return Selector{}, err
+	}
 	s := Selector{
 		MatchPIDs:           convertPIDSelectors(r.MatchPIDs),
-		MatchArgs:           convertArgSelectors(r.MatchArgs),
+		MatchArgs:           matchArgs,
 		MatchActions:        convertActionSelectors(r.MatchActions),
-		MatchReturnArgs:     convertArgSelectors(r.MatchReturnArgs),
+		MatchReturnArgs:     matchReturnArgs,
 		MatchReturnActions:  convertActionSelectors(r.MatchReturnActions),
-		MatchBinaries:       convertBinarySelectors(r.MatchBinaries),
-		MatchParentBinaries: convertBinarySelectors(r.MatchParentBinaries),
+		MatchBinaries:       matchBinaries,
+		MatchParentBinaries: matchParentBinaries,
 	}
 	for _, name := range r.Macros {
 		m, ok := macros[name]
 		if !ok {
 			return Selector{}, fmt.Errorf("%w: %q", ErrUnknownMacro, name)
 		}
+		mArgs, err := convertArgSelectors(m.MatchArgs)
+		if err != nil {
+			return Selector{}, err
+		}
+		mReturnArgs, err := convertArgSelectors(m.MatchReturnArgs)
+		if err != nil {
+			return Selector{}, err
+		}
+		mBinaries, err := convertBinarySelectors(m.MatchBinaries)
+		if err != nil {
+			return Selector{}, err
+		}
+		mParentBinaries, err := convertBinarySelectors(m.MatchParentBinaries)
+		if err != nil {
+			return Selector{}, err
+		}
 		s.MatchPIDs = append(s.MatchPIDs, convertPIDSelectors(m.MatchPIDs)...)
-		s.MatchArgs = append(s.MatchArgs, convertArgSelectors(m.MatchArgs)...)
+		s.MatchArgs = append(s.MatchArgs, mArgs...)
 		s.MatchActions = append(s.MatchActions, convertActionSelectors(m.MatchActions)...)
-		s.MatchReturnArgs = append(s.MatchReturnArgs, convertArgSelectors(m.MatchReturnArgs)...)
+		s.MatchReturnArgs = append(s.MatchReturnArgs, mReturnArgs...)
 		s.MatchReturnActions = append(s.MatchReturnActions, convertActionSelectors(m.MatchReturnActions)...)
-		s.MatchBinaries = append(s.MatchBinaries, convertBinarySelectors(m.MatchBinaries)...)
-		s.MatchParentBinaries = append(s.MatchParentBinaries, convertBinarySelectors(m.MatchParentBinaries)...)
+		s.MatchBinaries = append(s.MatchBinaries, mBinaries...)
+		s.MatchParentBinaries = append(s.MatchParentBinaries, mParentBinaries...)
 	}
 	return s, nil
 }
@@ -161,26 +234,50 @@ func convertPIDSelectors(in []rawPIDSelector) []PIDSelector {
 	return out
 }
 
-func convertArgSelectors(in []rawArgSelector) []ArgSelector {
+// checkSelectorValueWhitespace enforces Part A1 on a matchArgs/matchData/
+// matchReturnArgs/matchBinaries/matchParentBinaries value. The step 3
+// prompt names "matchArgs values" explicitly; this project applies the
+// same rule to matchData and matchReturnArgs (which share ArgSelector's
+// shape and are compared the same way) and to matchParentBinaries (which
+// shares matchBinaries' shape and purpose) as a reject-more interpretation
+// (see docs/reports/step-03.md section 14).
+func checkSelectorValueWhitespace(v string) error {
+	if containsLineWhitespace(v) {
+		return fmt.Errorf("%w: %q", ErrSelectorValueWhitespace, v)
+	}
+	return nil
+}
+
+func convertArgSelectors(in []rawArgSelector) ([]ArgSelector, error) {
 	if in == nil {
-		return nil
+		return nil, nil
 	}
 	out := make([]ArgSelector, len(in))
 	for i, a := range in {
+		for _, v := range a.Values {
+			if err := checkSelectorValueWhitespace(v); err != nil {
+				return nil, err
+			}
+		}
 		out[i] = ArgSelector{Index: a.Index, Operator: a.Operator, Values: a.Values}
 	}
-	return out
+	return out, nil
 }
 
-func convertBinarySelectors(in []rawBinarySelector) []BinarySelector {
+func convertBinarySelectors(in []rawBinarySelector) ([]BinarySelector, error) {
 	if in == nil {
-		return nil
+		return nil, nil
 	}
 	out := make([]BinarySelector, len(in))
 	for i, b := range in {
+		for _, v := range b.Values {
+			if err := checkSelectorValueWhitespace(v); err != nil {
+				return nil, err
+			}
+		}
 		out[i] = BinarySelector(b)
 	}
-	return out
+	return out, nil
 }
 
 func convertActionSelectors(in []rawActionSelector) []ActionSelector {

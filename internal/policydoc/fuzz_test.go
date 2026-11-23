@@ -31,6 +31,30 @@ func FuzzPolicyParse(f *testing.F) {
 	f.Add("not: valid: yaml: [")
 	f.Add("apiVersion: cilium.io/v1alpha1\nkind: TracingPolicy\nmetadata:\n  name: &a x\nspec:\n  kprobes:\n  - call: *a\n")
 
+	// A1 (architect review R2D-1) seeds: escape-decoded control and
+	// invisible characters in quoted scalars, exercising
+	// isDisallowedScalarRune/checkIdentifierWhitespace/
+	// checkSelectorValueWhitespace via every character class the review
+	// named, plus the four reproduction probes verbatim.
+	for _, v := range []string{
+		`/\0anything`,                  // probe 1: NUL escape
+		`/\tx`,                         // probe 2: tab escape (selector-value-only rule)
+		`/opt/app\u0000/usr/sbin/sshd`, // probe 3: NUL via \u escape
+		`/\u202e`,                      // probe 4: bidi override (Cf)
+		`a\u0085b`,                     // Cc (C1 control), escape-only
+		`a\u200bb`,                     // Cf: zero-width space
+		`a\ufeffb`,                     // Cf: BOM mid-string
+		`a\u2028b`,                     // line separator
+		`a\u2029b`,                     // paragraph separator
+		`a\ufffeb`,                     // BMP noncharacter
+		`a\ufdd5b`,                     // FDD0..FDEF noncharacter block
+		`a\U0001fffeb`,                 // astral-plane noncharacter
+		`a\nb`,                         // newline, selector-value-only rule
+		`a\rb`,                         // carriage return, selector-value-only rule
+	} {
+		f.Add("apiVersion: cilium.io/v1alpha1\nkind: TracingPolicy\nmetadata:\n  name: \"fuzz\"\nspec:\n  kprobes:\n  - call: \"x\"\n    selectors:\n    - matchBinaries:\n      - operator: \"In\"\n        values:\n        - \"" + v + "\"\n")
+	}
+
 	f.Fuzz(func(t *testing.T, y string) {
 		doc, err := Parse("fuzz", y)
 		if err != nil {
