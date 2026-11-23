@@ -172,13 +172,16 @@ jobs:
         run: |
           sudo groupadd -f tetragon-relay
           sudo mkdir -p /var/run/tetragon /etc/tetragon/tetragon.tp.d/relay
-          # internal/apply.PersistDir creates its atomic-swap temp
-          # directory as a SIBLING of the target "relay" dir (i.e. inside
-          # tetragon.tp.d itself), so tetragon.tp.d's own permissions must
-          # allow the relay group to create entries there too, not only
-          # inside the "relay" subdirectory.
-          sudo chown root:tetragon-relay /var/run/tetragon /etc/tetragon/tetragon.tp.d /etc/tetragon/tetragon.tp.d/relay
-          sudo chmod 2770 /etc/tetragon/tetragon.tp.d /etc/tetragon/tetragon.tp.d/relay
+          # step-03a-review.md R3-2: internal/apply.PersistDir now only
+          # ever writes inside the "relay" subdirectory itself (a staging
+          # subdirectory nested inside it, then renames within that same
+          # directory) — never into tetragon.tp.d, the parent, matching
+          # the production unit's ReadWritePaths=.../relay (which does not
+          # grant write access to tetragon.tp.d itself). Only "relay"
+          # needs relay-group write access here; tetragon.tp.d stays
+          # root-owned/read-only to the relay group, same as production.
+          sudo chown root:tetragon-relay /var/run/tetragon /etc/tetragon/tetragon.tp.d/relay
+          sudo chmod 2770 /etc/tetragon/tetragon.tp.d/relay
           sudo usermod -a -G tetragon-relay "$(id -un)"
 
       - name: Record kernel version and capability probe output
