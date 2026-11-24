@@ -248,6 +248,21 @@ jobs:
           # scripts/e2e-rhel9.sh on a real RHEL 9 host.
           sg tetragon-relay -c 'cd internal/tetra && /tmp/tetra.itest -test.v && cd ../apply && /tmp/apply.itest -test.v'
 
+      - name: Verify the admin-path test's PID scoping actually held (step-03a-review.md R3-E3)
+        if: always()
+        run: |
+          # TestIntegration_RollbackOnAdminPathKill's policy scopes its
+          # Sigkill action to that test's own pid tree via matchPIDs (not
+          # by path, since it must target the real, compiled-in
+          # "/usr/bin/bash" admin-path entry — see ADR 0020 and the
+          # test's own doc comment). This runs a real "/usr/bin/bash"
+          # invocation from a brand new, unrelated process tree (this
+          # workflow step, not any go test process) and requires it to
+          # exit 0 — proving the policy did not (and, since Tetragon has
+          # since been asked to roll it back, does not still) affect
+          # anything outside the test that loaded it.
+          /usr/bin/bash -c '/usr/bin/true; /usr/bin/true'
+
       - name: Verify no tracing policies were left loaded (step-03a-review.md R3-E3 fix F2)
         if: always()
         run: |
