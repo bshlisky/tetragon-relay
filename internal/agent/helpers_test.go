@@ -136,6 +136,15 @@ func standardRoot(t *testing.T, version int, expires time.Time) (envelope []byte
 // satisfies (*trust.Root).Update), and returns its bytes.
 func rotatedRoot(t *testing.T, version int, expires time.Time, oldRootKeys []*genKey) []byte {
 	t.Helper()
+	b, _ := rotatedRootWithKeys(t, version, expires, oldRootKeys)
+	return b
+}
+
+// rotatedRootWithKeys is rotatedRoot, additionally returning the new
+// root's own key set so a test can chain a further rotation on top of it
+// (step-04b-review.md R4B-1's multi-version forward chaining).
+func rotatedRootWithKeys(t *testing.T, version int, expires time.Time, oldRootKeys []*genKey) (envelope []byte, newRootKeys []*genKey) {
+	t.Helper()
 	r1, r2, r3 := mustKey(t), mustKey(t), mustKey(t)
 	tk := mustKey(t)
 	lk := mustKey(t)
@@ -153,5 +162,5 @@ func rotatedRoot(t *testing.T, version int, expires time.Time, oldRootKeys []*ge
 	if err != nil {
 		panic(err)
 	}
-	return b
+	return b, []*genKey{r1, r2, r3}
 }

@@ -34,4 +34,13 @@ var (
 	// forward move at every subsequent boot per Part C7) fails to
 	// parse or self-verify.
 	ErrInitialRootInvalid = errors.New("agent: RPM-shipped initial trust root is invalid")
+
+	// ErrTooManyRootFiles is returned by Startup when
+	// Config.AvailableRPMRoots has more than limits.MaxRootChainFiles
+	// entries (step-04b-review.md R4B-1: "bound the number of files
+	// read"). This is a configuration error (the caller is expected to
+	// have already bounded how many files it ever reads from
+	// /etc/tetragon-relay/trust/roots/), not a security decision this
+	// package makes silently by truncating the set.
+	ErrTooManyRootFiles = errors.New("agent: too many RPM-shipped root files configured")
 )

@@ -3,8 +3,10 @@ package agent
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
+	"github.com/bshlisky/tetragon-relay/internal/limits"
 	"github.com/bshlisky/tetragon-relay/internal/store"
 	"github.com/bshlisky/tetragon-relay/internal/trust"
 )
@@ -26,9 +28,30 @@ type Config struct {
 	// (/etc/tetragon-relay/trust/root.json), read by the caller (not
 	// this package: internal/agent has no filesystem access of its own
 	// for config paths, matching the no-os.Getenv/no-hidden-I/O rule).
-	// Required at first boot; optional at every later boot, where it is
-	// only ever considered as a possible forward move (Part C7).
+	// Required at first boot. At every later boot it is also considered
+	// as one possible forward-chain candidate (folded into
+	// AvailableRPMRoots by its own declared version), since
+	// docs/decisions/0024-forward-root-chaining.md keeps root.json as
+	// the lowest version an RPM ships.
 	InitialRootBytes []byte
+	// AvailableRPMRoots is every OTHER RPM-shipped root metadata
+	// version's raw signed bytes the caller found under
+	// /etc/tetragon-relay/trust/roots/ (step-04b-review.md R4B-1),
+	// keyed by the version parsed from that file's OWN NAME
+	// ("<version>.root.json") — not yet cross-checked against the
+	// metadata's own declared version inside; establishTrustRoot does
+	// that (a mismatch means the file is ignored and audited, never
+	// trusted by file name alone). The caller does no interpretation
+	// beyond listing the directory and reading each file's bytes: it is
+	// this package's job to decide which are usable and in what order.
+	// Optional; nil or empty means "chain by at most the single step
+	// InitialRootBytes may offer," matching this package's behavior
+	// before R4B-1. Bounded to limits.MaxRootChainFiles entries;
+	// Startup returns a config error if there are more (see
+	// docs/decisions/0024-forward-root-chaining.md: the caller, not
+	// this package, is responsible for bounding how many files it ever
+	// reads from disk in the first place — this is defense in depth).
+	AvailableRPMRoots map[uint64][]byte
 	// Auditor records startup-time security events. Required: a nil
 	// Auditor is a configuration error (the same fail-closed convention
 	// internal/verify and internal/guard already use for their required
@@ -93,7 +116,12 @@ func Startup(cfg Config, now time.Time) (*StartupResult, error) {
 		return nil, fmt.Errorf("%w: %w", ErrStoreOpenFailed, err)
 	}
 
-	root, err := establishTrustRoot(st, cfg.InitialRootBytes, now, cfg.Auditor)
+	if len(cfg.AvailableRPMRoots) > limits.MaxRootChainFiles {
+		_ = st.Close()
+		return nil, fmt.Errorf("%w: %d RPM root files configured, max %d", ErrTooManyRootFiles, len(cfg.AvailableRPMRoots), limits.MaxRootChainFiles)
+	}
+
+	root, err := establishTrustRoot(st, cfg, now, cfg.Auditor)
 	if err != nil {
 		_ = st.Close()
 		return nil, err
@@ -118,30 +146,34 @@ func Startup(cfg Config, now time.Time) (*StartupResult, error) {
 	}, nil
 }
 
-// establishTrustRoot implements Part C7: at first boot, the RPM-shipped
-// initial root is adopted unconditionally. At every later boot, the
-// persisted root is authoritative; the RPM-shipped root is considered
-// only as a possible forward move, exactly one version via
-// (*trust.Root).Update — never a downgrade, never accepted silently on
-// any chaining failure (logged via auditor and the persisted root is kept
-// instead).
-func establishTrustRoot(st *store.Store, initialRootBytes []byte, now time.Time, auditor Auditor) (*trust.Root, error) {
+// establishTrustRoot implements Part C7, extended by step-04b-review.md
+// R4B-1: at first boot, the RPM-shipped initial root is adopted
+// unconditionally. At every later boot, the persisted root is
+// authoritative; every other RPM-shipped root version (cfg.InitialRootBytes
+// folded in by its own declared version, plus cfg.AvailableRPMRoots) is
+// considered only as a possible forward move, walked one version at a time
+// via (*trust.Root).Update starting from persisted+1 — never a downgrade,
+// and the walk stops (keeping the last version it successfully reached)
+// at the first missing version (a gap) or the first chain-verification
+// failure, logging either via auditor. The persisted root is never left
+// unset by a failed or partial walk.
+func establishTrustRoot(st *store.Store, cfg Config, now time.Time, auditor Auditor) (*trust.Root, error) {
 	if st.FirstBoot() {
-		if len(initialRootBytes) == 0 {
+		if len(cfg.InitialRootBytes) == 0 {
 			return nil, fmt.Errorf("%w: first boot with no RPM-shipped initial root configured", ErrNoTrustRoot)
 		}
-		root, err := trust.LoadInitialRoot(initialRootBytes)
+		root, err := trust.LoadInitialRoot(cfg.InitialRootBytes)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrInitialRootInvalid, err)
 		}
-		if err := st.PersistTrustRoot(initialRootBytes, root.Version); err != nil {
+		if err := st.PersistTrustRoot(cfg.InitialRootBytes, root.Version); err != nil {
 			return nil, fmt.Errorf("agent: persist initial trust root: %w", err)
 		}
 		auditor.Record(AuditEvent{Step: "trust_root", Detail: fmt.Sprintf("first boot: adopted initial root version %d", root.Version)})
 		return root, nil
 	}
 
-	persistedRaw, persistedVersion, ok, err := st.TrustRoot()
+	persistedRaw, _, ok, err := st.TrustRoot()
 	if err != nil {
 		return nil, fmt.Errorf("agent: load persisted trust root: %w", err)
 	}
@@ -159,39 +191,100 @@ func establishTrustRoot(st *store.Store, initialRootBytes []byte, now time.Time,
 		auditor.Record(AuditEvent{Step: "trust_root", Detail: "persisted trust root failed to parse", Err: err})
 		return nil, fmt.Errorf("%w: persisted root: %w", store.ErrTampered, err)
 	}
-	_ = persistedVersion
 
-	if len(initialRootBytes) == 0 {
-		return persistedRoot, nil
+	candidates := collectRootChainCandidates(cfg, auditor)
+
+	current := persistedRoot
+	currentRaw := persistedRaw
+	steps := 0
+	for {
+		next, ok := candidates[current.Version+1]
+		if !ok {
+			break // no (usable) file at the next version: a gap, or simply nothing further to adopt.
+		}
+		if steps >= limits.MaxRootChainFiles {
+			auditor.Record(AuditEvent{Step: "trust_root", Detail: fmt.Sprintf("forward root chain stopped at version %d: reached the %d-step bound", current.Version, limits.MaxRootChainFiles)})
+			break
+		}
+		updated, uerr := current.Update(next, now)
+		if uerr != nil {
+			// Never accept, keep the last good version, log it. This
+			// covers both an outright malicious/unchainable candidate
+			// at the right version and name, and (defense in depth)
+			// any other Update failure.
+			auditor.Record(AuditEvent{Step: "trust_root", Detail: fmt.Sprintf("RPM-shipped root version %d did not chain from version %d; stopping, keeping version %d", current.Version+1, current.Version, current.Version), Err: uerr})
+			break
+		}
+		current, currentRaw = updated, next
+		steps++
 	}
 
-	candidate, err := trust.LoadInitialRoot(initialRootBytes)
-	if err != nil {
-		auditor.Record(AuditEvent{Step: "trust_root", Detail: "RPM-shipped root failed to parse; keeping persisted root", Err: err})
-		return persistedRoot, nil //nolint:nilerr // Part C7: an unusable RPM root is logged and ignored, never a Startup-level error; the persisted root remains authoritative
-	}
-	switch {
-	case candidate.Version <= persistedRoot.Version:
-		auditor.Record(AuditEvent{Step: "trust_root", Detail: fmt.Sprintf("RPM-shipped root version %d is not newer than persisted version %d; ignored", candidate.Version, persistedRoot.Version)})
+	if steps == 0 {
 		return persistedRoot, nil
-	default:
-		updated, err := persistedRoot.Update(initialRootBytes, now)
+	}
+	if err := st.PersistTrustRoot(currentRaw, current.Version); err != nil {
+		return nil, fmt.Errorf("agent: persist updated trust root: %w", err)
+	}
+	auditor.Record(AuditEvent{Step: "trust_root", Detail: fmt.Sprintf("adopted RPM-shipped root: version %d -> %d (%d step(s))", persistedRoot.Version, current.Version, steps)})
+	return current, nil
+}
+
+// collectRootChainCandidates builds the set of usable forward-chain
+// candidates from cfg: cfg.InitialRootBytes (keyed by its own declared
+// version) plus every entry in cfg.AvailableRPMRoots, EXCEPT any whose
+// file-name version does not match the version its own metadata declares
+// (step-04b-review.md R4B-1: "File-name versions must match the metadata
+// version inside, else ignore that file and audit") or that fails to
+// parse/self-verify at all. The persisted root's own forward-chain
+// verification (old-threshold AND new-threshold, (*trust.Root).Update) is
+// NOT done here — this only establishes which (version -> bytes) pairs
+// are even worth attempting, so a candidate accepted here can still stop
+// the walk later if it fails to chain from whatever the walk's current
+// root turns out to be.
+func collectRootChainCandidates(cfg Config, auditor Auditor) map[uint64][]byte {
+	type namedFile struct {
+		fileVersion uint64
+		raw         []byte
+		source      string
+	}
+	files := make([]namedFile, 0, len(cfg.AvailableRPMRoots)+1)
+	if len(cfg.InitialRootBytes) > 0 {
+		if parsed, err := trust.LoadInitialRoot(cfg.InitialRootBytes); err == nil {
+			files = append(files, namedFile{fileVersion: parsed.Version, raw: cfg.InitialRootBytes, source: "root.json"})
+		} else {
+			auditor.Record(AuditEvent{Step: "trust_root_candidate", Detail: "root.json failed to parse/self-verify, ignored", Err: err})
+		}
+	}
+	// Deterministic order (ascending file-name version) so audit
+	// records for a fixed input are reproducible across runs, even
+	// though map iteration order is not.
+	versions := make([]uint64, 0, len(cfg.AvailableRPMRoots))
+	for v := range cfg.AvailableRPMRoots {
+		versions = append(versions, v)
+	}
+	sort.Slice(versions, func(i, j int) bool { return versions[i] < versions[j] })
+	for _, v := range versions {
+		files = append(files, namedFile{fileVersion: v, raw: cfg.AvailableRPMRoots[v], source: fmt.Sprintf("roots/%d.root.json", v)})
+	}
+
+	out := make(map[uint64][]byte, len(files))
+	for _, f := range files {
+		parsed, err := trust.LoadInitialRoot(f.raw)
 		if err != nil {
-			// Covers both ErrVersionSkip (the RPM root is more than
-			// one version ahead; an intermediate version is needed
-			// first, architecture doc 7.6 — not available to this
-			// package, which has no control-stream client) and any
-			// chain-verification failure. Either way: never accept,
-			// keep the persisted root, log it.
-			auditor.Record(AuditEvent{Step: "trust_root", Detail: fmt.Sprintf("RPM-shipped root version %d did not chain from persisted version %d; keeping persisted root", candidate.Version, persistedRoot.Version), Err: err})
-			return persistedRoot, nil //nolint:nilerr // Part C7: a chain-verification failure is logged and ignored, never a Startup-level error; the persisted root remains authoritative
+			auditor.Record(AuditEvent{Step: "trust_root_candidate", Detail: fmt.Sprintf("%s failed to parse/self-verify, ignored", f.source), Err: err})
+			continue
 		}
-		if err := st.PersistTrustRoot(initialRootBytes, updated.Version); err != nil {
-			return nil, fmt.Errorf("agent: persist updated trust root: %w", err)
+		if parsed.Version != f.fileVersion {
+			auditor.Record(AuditEvent{Step: "trust_root_candidate", Detail: fmt.Sprintf("%s: file name declares version %d but metadata declares version %d; ignored", f.source, f.fileVersion, parsed.Version)})
+			continue
 		}
-		auditor.Record(AuditEvent{Step: "trust_root", Detail: fmt.Sprintf("adopted RPM-shipped root: version %d -> %d", persistedRoot.Version, updated.Version)})
-		return updated, nil
+		if existing, dup := out[f.fileVersion]; dup && string(existing) != string(f.raw) {
+			auditor.Record(AuditEvent{Step: "trust_root_candidate", Detail: fmt.Sprintf("%s: version %d already claimed by a different file's content; ignored", f.source, f.fileVersion)})
+			continue
+		}
+		out[f.fileVersion] = f.raw
 	}
+	return out
 }
 
 // checkMLDSARequirement implements step-04a-review.md R4A-3's audit

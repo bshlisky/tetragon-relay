@@ -214,6 +214,22 @@ const (
 	// (apply.LKGStore keys) the index may track, for the same reason as
 	// MaxStoreScopes.
 	MaxStoreDomains = 256
+
+	// --- step-04b-review.md R4B-1: forward root chaining ---
+
+	// MaxRootChainFiles bounds both the number of RPM-shipped
+	// versioned root files (internal/agent.Config.AvailableRPMRoots)
+	// Startup will consider, and (transitively, since each file can
+	// advance the chain by at most one version) the number of
+	// trust.Root.Update steps a single Startup call will walk through.
+	// A legitimate fleet rotates its root key set on the order of a
+	// handful of times a year at most (architecture doc section 7.6:
+	// 365-day root metadata expiry); 64 is generous headroom over any
+	// plausible number of versions a host could realistically fall
+	// behind by, while still bounding the work a maliciously large
+	// roots/ directory (or a caller bug) could force onto one Startup
+	// call.
+	MaxRootChainFiles = 64
 )
 
 // TetragonVersionFamily is the pinned major.minor version family internal/
