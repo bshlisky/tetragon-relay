@@ -260,10 +260,139 @@ timeout mid-removal (covered by the same delete-fails path returning an
 (`TestApply_HealthWindowFails_RollsBack`/`RollsBackToPriorLKG`, via
 `healthRunning=false`) ✓.
 
-## 13. What could not be verified from this environment, and why
+## 13. Step 3a (review of 709f3da): final verification evidence
 
-This step was carried out on macOS (darwin/arm64), with no Linux host,
-root access, or real Tetragon daemon available. Concretely, this means:
+This development environment is macOS (darwin/arm64) with no Linux host, root access, or
+real Tetragon daemon; every claim below is from real GitHub Actions runs, read back via
+`gh run view`/`gh run view --log`, not from local execution. R3-1 through R3-4 (and R3-E3,
+the admin-path integration test fix) are implemented; both the `ci` and `integration`
+workflows are green on GitHub for the final commit.
+
+### Final green run
+
+- Commit: `decd204` (`apply: fix R3-E3 F1 cleanup race - dialIntegration must own Close()`)
+- `ci` run: **45385390664** — passed (7m26s)
+- `integration` run: **45385390664** (same workflow run, `integration` job) — passed (2m45s)
+- Runner kernel: `Linux ip-10-0-137-211 7.0.0-1014-aws #14~24.04.1-Ubuntu SMP PREEMPT Fri
+  Sep 18 21:24:59 UTC 2026 x86_64` (GitHub-hosted `ubuntu-24.04`)
+- `relay-probe --report` output (same run, "Record kernel version and capability probe
+  output" step): `kernel_release: "7.0.0-1014-aws"`, `rhel_release: "unknown"` (not RHEL;
+  see "remaining unverified" below), `kprobe_override: true`, `lsm_bpf: false`,
+  `error_injection_source: "debugfs"`, `usrmerge_ok: false` (`/var/run` is a symlink to
+  `/run`, not the RHEL-style `../run`; a GitHub-runner-specific fact, not a bug),
+  `secure_boot: false`, `lockdown_mode: "none"`, `selinux_mode: "disabled"`,
+  `tetragon_binary_sha256: e13d9b8599ec217a10f5a15cb9e6de27467d0de633115d86dc24479455795494`.
+
+### E3 scenario pass/fail (final green run, `internal/apply` integration-tagged tests)
+
+| Scenario | Result |
+| --- | --- |
+| `TestIntegration_LoadMonitorBundle_ThenUpgradeToEnforce` | PASS |
+| `TestIntegration_EnforcementKillsCanary_AdminPathSurvives` | PASS |
+| `TestIntegration_RollbackOnAdminPathKill` | PASS |
+| `TestIntegration_RestartReloadsPersistedSet` | PASS |
+| `TestIntegration_ForeignPolicyLeftUntouched` | PASS |
+| `TestZZZFinalCheck_NoTracingPoliciesLeftLoaded` (R3-E3 fix F2) | PASS |
+| `TestAllowlist_NoOtherRPCsReferenced` + full `internal/tetra`/`internal/apply` suites | PASS (193 `--- PASS`, 0 `--- FAIL` in the run's own log) |
+
+### R3-4: health-window race, `-count=200 -race` results
+
+- `TestApply_HappyPath_Enforce -count=200 -race` (the review's required stress run,
+  executed locally cross-building for GOOS=linux is not possible without a Linux host for
+  `-race`, so this was run on an x86_64 Linux machine with a native Go toolchain during
+  development): **200/200 passed**, 0 failures, ~805s total (~4.02s/run, matching
+  `fastHealthWindow`'s 4s window).
+- `internal/apply`'s full `TestRunHealthWindow_*` suite `-count=200 -race`: **200/200
+  passed** after two fixes:
+  1. The `errc` branch treating a `tetra.ErrTimeout`-wrapped error the same as
+     `windowCtx.Done()` even when `windowCtx.Err()` has not been locally observed yet.
+  2. A residual instance of the same race on the `events`-closed branch
+     (`pendingErrIsTimeout`, a non-blocking check of `errc` for the same reason), found by
+     this exact stress run after the first fix.
+
+### Select audit (`internal/`, per the review's requirement)
+
+| Location | Mixes ctx.Done with | Verdict |
+| --- | --- | --- |
+| `internal/apply/health.go`'s `runHealthWindow` main select | `windowCtx.Done()`, `events`/`errc` fed by `GetEvents(windowCtx, ...)` | Was the R3-4 bug (two race instances, both fixed; see above) |
+| `internal/tetra/client.go`'s `GetEvents` send-side select (`case events <- ev: case <-ctx.Done():`) | `ctx.Done()`, a send on `events` (fed by this same goroutine under the same `ctx`) | Safe: only used to abandon a blocked send on cancellation, never to interpret which branch fired as a health verdict; no corresponding bug |
+
+No other `select` in `internal/` mixes a context's `Done()` with a channel fed by work
+under that same context (grep confirms only these two production sites; test-file
+`select`s either don't involve context at all or are the deliberately-constructed fakes
+these two findings' own regression tests use).
+
+### R3-E3: the admin-path integration test (not one of R3-1–R3-4, fixed to reach "integration green")
+
+`TestIntegration_RollbackOnAdminPathKill` had never actually run against real Tetragon
+before this step (every prior CI run failed earlier, in `ci`, before `integration` could
+even start). Root-caused via two throwaway, unmerged diagnostic PRs (branches
+`diagnose-r3-e3` and `diagnose-r3-e3-v2`, both closed and deleted):
+
+- **E1** (`security_bprm_check`, no `matchBinaries`, `matchActions: [Post]`, triggered by
+  this test process directly exec'ing `/usr/bin/true`): first matching event **778ms**
+  after `AddTracingPolicy` returned. Rules out BPF-attach latency.
+- **E2** (`matchBinaries: In ["/tmp/testbin/bash"]`, triggered by
+  `/tmp/testbin/bash -c "/usr/bin/true; /usr/bin/true"`): first event and first
+  `Sigkill` both at **691ms**, with `process.binary` reported as the copied bash — the
+  **caller**, confirming `security_bprm_check` describes the exec caller, not the new
+  image (ADR 0020).
+- **E3 citation**: `AddTracingPolicy` is synchronous end to end.
+  `pkg/server/server.go`'s `(*Server).AddTracingPolicy` (cilium/tetragon tag `v1.8.0`)
+  calls `s.observer.AddTracingPolicy(ctx, &gtp)` and returns its error directly (no
+  goroutine spawned for that call); `pkg/sensors/manager.go`'s `(*Manager).AddTracingPolicy`
+  /`AddTracingPolicyWithState` call `h.handler.addTracingPolicy(op)` and return its result,
+  where `addTracingPolicy` is itself the blocking round trip through the package's own
+  documented "sensor controller goroutine" (`StartSensorManager`'s doc comment: "serialize
+  loading and unloading of sensors as requested from different goroutines") — the RPC does
+  not return `TP_STATE_ENABLED` until that goroutine has actually processed the add.
+- In the real integration test (not the throwaway diagnostic), `Apply()` start to the
+  first observed matching event was **612.7ms** (final green run), consistent with E1/E2.
+
+Given E1/E2 ruled out latency, the fix was: target the real, compiled-in
+`adminPathBinaries` entry `/usr/bin/bash` (not a path that is never in that intentionally
+non-configurable map), scoped to this test's own process tree via a `matchPIDs` selector
+(`operator: In`, `followForks: true`, `values: [<this test's own pid>]`) so it can never
+affect any other `/usr/bin/bash` invocation on the host, including the CI runner's own
+step-execution shell. `.github/workflows/ci.yml` runs an independent `/usr/bin/bash`
+invocation from outside any test process after the suite, requiring exit 0, as a
+second, infrastructure-level proof the scoping held — it did, in the final green run.
+
+Two further, unrelated bugs surfaced and were fixed while getting to a clean run:
+
+- `TestZZZFinalCheck_NoTracingPoliciesLeftLoaded` (fix F2) was originally named
+  `finalcheck_integration_test.go`, which sorts (and compiles) *before*
+  `integration_test.go` alphabetically, so it ran before most of that file's own tests —
+  observed as a false positive in CI run 45380551662. Renamed to
+  `zzz_finalcheck_integration_test.go`.
+- Every integration test's own `defer client.Close()` ran before any `t.Cleanup` func
+  (Go runs a test function's own defers to completion before any `t.Cleanup` fires), so
+  fix F1's `cleanupAllTracingPolicies` ran against an already-closing gRPC connection and
+  silently failed — observed for real in CI run 45382934692
+  (`ListTracingPolicies: ... grpc: the client connection is closing`). `dialIntegration`
+  now owns the whole client lifecycle via two `t.Cleanup` registrations in the order that
+  makes policy cleanup run first (LIFO): close registered first (runs last), cleanup
+  registered second (runs first, while the connection is still live). Every test's own
+  explicit `client.Close()` call was removed.
+
+### Remaining unverified (unchanged from before this review cycle, or newly noted)
+
+- **RHEL 9 specifically**: every real run above is `ubuntu-24.04`, not RHEL. `relay-probe
+  --report` reports `"rhel_release": "unknown"` and `"usrmerge_ok": false` for exactly
+  this reason — neither is a RHEL 9 regression. `scripts/e2e-rhel9.sh` exists for this gap
+  and has still not been executed on real RHEL 9 hardware/VM.
+- **SO_PEERSEC against a real, enabled SELinux policy**: `selinux_mode: "disabled"` on
+  every GitHub-hosted runner (confirmed: `getsockopt(SO_PEERSEC)` there succeeds via
+  AppArmor instead, returning a non-SELinux bare label — see
+  `docs/decisions/0018-peer-identity-check-no-capability.md`'s addendum). Only
+  `scripts/e2e-rhel9.sh` on a real RHEL 9 host exercises the actual SELinux-context-match
+  branch of `internal/tetra`'s peer verification.
+- **`cmd/relay-probe/collect_linux.go`**: compiles and lints clean cross-compiled, and now
+  has run for real in CI (the `relay-probe --report` output above is from a real run), but
+  its output has not been cross-checked against a real RHEL 9 host's values, only
+  ubuntu-24.04's.
+
+### What could not be verified from this environment, and why (original, pre-review-cycle notes)
 
 - **`internal/tetra/dial_linux.go` and `dial_linux_test.go`**: compiled
   (`GOOS=linux go build`/`go vet`) and linted (`golangci-lint run` with
