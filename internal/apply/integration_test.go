@@ -15,9 +15,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/user"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -72,7 +74,32 @@ func dialIntegration(t *testing.T) *tetra.Client {
 	if err != nil {
 		t.Fatalf("Dial(real Tetragon): %v", err)
 	}
+	// step-03a-review.md R3-E3 fix F1: every integration test must leave
+	// Tetragon clean, regardless of how it ends (pass, fail, or a policy
+	// it loaded was never meant to be deleted by Apply's own logic, as
+	// with TestIntegration_ForeignPolicyLeftUntouched's intentionally
+	// foreign policy). This CI job's Tetragon instance exists solely for
+	// this test suite, so deleting every loaded policy after each test
+	// function returns is safe and simpler than tracking exactly which
+	// policy each test loaded.
+	t.Cleanup(func() { cleanupAllTracingPolicies(t, c) })
 	return c
+}
+
+func cleanupAllTracingPolicies(t *testing.T, c *tetra.Client) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	statuses, err := c.ListTracingPolicies(ctx, "")
+	if err != nil {
+		t.Logf("cleanup: ListTracingPolicies: %v", err)
+		return
+	}
+	for _, s := range statuses {
+		if err := c.DeleteTracingPolicy(ctx, s.Name, s.Domain); err != nil {
+			t.Logf("cleanup: DeleteTracingPolicy(%s, domain=%s): %v", s.Name, s.Domain, err)
+		}
+	}
 }
 
 func mustLookPath(t *testing.T, name string) string {
@@ -82,6 +109,32 @@ func mustLookPath(t *testing.T, name string) string {
 		t.Fatalf("LookPath(%s): %v", name, err)
 	}
 	return p
+}
+
+// copySelfContainedBinary copies src to dst (step-03a-review.md R3-E3 fix
+// F1): every integration test policy must be scoped so it can never match
+// anything outside /tmp/testbin/, which for a test that needs to exercise
+// the admin-path rule against a real shell means testing against a private
+// copy, never the system binary at src (which, for /usr/bin/bash, is also
+// the CI runner's own step-execution shell).
+func copySelfContainedBinary(t *testing.T, src, dst string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(dst), err)
+	}
+	in, err := os.Open(src) //nolint:gosec // src is a fixed, repo-controlled path, not attacker input
+	if err != nil {
+		t.Fatalf("open %s: %v", src, err)
+	}
+	defer func() { _ = in.Close() }()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755) //nolint:gosec // dst is under /tmp/testbin, a fixed test-owned directory
+	if err != nil {
+		t.Fatalf("create %s: %v", dst, err)
+	}
+	defer func() { _ = out.Close() }()
+	if _, err := io.Copy(out, in); err != nil {
+		t.Fatalf("copy %s -> %s: %v", src, dst, err)
+	}
 }
 
 // TestIntegration_LoadMonitorBundle_ThenUpgradeToEnforce covers the first
@@ -148,13 +201,21 @@ func TestIntegration_RollbackOnAdminPathKill(t *testing.T) {
 
 	e := newIntegrationEngine(t, client)
 
-	// A policy that Sigkills /usr/bin/bash itself (a real, compiled-in
-	// admin-path entry) is expected to trip the health window — but only
-	// once something actually execs bash while the policy is loaded and
-	// the window is open, so run one repeatedly in the background for
-	// the health window's duration.
+	// security_bprm_check's process/matchBinaries describe the CALLER of
+	// exec, not the binary image about to replace it (step-03a-review.md
+	// R3-E3 diagnosis). A policy on "/usr/bin/bash" only trips when
+	// something ELSE execs bash as a child — never when bash itself is
+	// directly exec'd as the new image — and since the real system
+	// /usr/bin/bash is also the CI runner's own step-execution shell
+	// (step-03a-review.md R3-E3 fix F1), this test never targets it: a
+	// private copy at /tmp/testbin/bash is both the admin-path entry
+	// under test and the thing that execs /usr/bin/true, so this test
+	// can never affect anything outside /tmp/testbin/.
+	adminPath := filepath.Join("/tmp/testbin", "bash")
+	copySelfContainedBinary(t, "/usr/bin/bash", adminPath)
+
 	yaml := canaryPolicyYAML("itest-admin-kill", "Sigkill")
-	yaml = withBinaryPath(yaml, "/usr/bin/bash")
+	yaml = withBinaryPath(yaml, adminPath)
 
 	stop := make(chan struct{})
 	done := make(chan struct{})
@@ -165,7 +226,13 @@ func TestIntegration_RollbackOnAdminPathKill(t *testing.T) {
 			case <-stop:
 				return
 			default:
-				_ = exec.Command("/usr/bin/bash", "-c", "true").Run()
+				// Two external commands, not one: bash optimizes a
+				// single trailing command in a "-c" string into an
+				// exec() that replaces itself, so it would never be the
+				// caller the kprobe observes. With two commands bash
+				// must fork for at least the first, keeping adminPath
+				// itself as the caller when it execs /usr/bin/true.
+				_ = exec.Command(adminPath, "-c", "/usr/bin/true; /usr/bin/true").Run()
 				time.Sleep(200 * time.Millisecond)
 			}
 		}

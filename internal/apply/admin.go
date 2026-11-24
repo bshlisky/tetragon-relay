@@ -10,6 +10,23 @@ package apply
 // apply engine's health window treats a kill of any of these (or any
 // ancestor of the killed process being one of these) as a rollback
 // trigger.
+//
+// Caller semantics (step-03a-review.md R3-E3, ADR 0020): for a
+// `security_bprm_check` kprobe (the hook internal/apply's own canary
+// policies use, and a plausible one for a real enforce-mode policy to
+// hook), Tetragon's reported process/matchBinaries describe the CALLER of
+// exec — the process about to replace its own image — not the new binary
+// being loaded. A policy whose matchBinaries lists one of these paths
+// therefore fires when that binary itself execs something while loaded,
+// not when something else execs that binary; this is still the correct
+// detection for this package's purpose (a malicious policy killing an
+// admin's shell mid-session, which fires exactly when that shell is about
+// to run the next command), it is just not "kills X" in the naive sense
+// of X being the new image. internal/apply/integration_test.go's own
+// admin-path test targets a private copy of bash at /tmp/testbin/bash
+// precisely because of this: the test must exec something FROM that
+// binary to trigger the hook at all, and must never do so from the real
+// /usr/bin/bash (which is also whatever shell is running the test).
 var adminPathBinaries = map[string]bool{
 	"/usr/sbin/sshd":                     true,
 	"/sbin/sshd":                         true,
