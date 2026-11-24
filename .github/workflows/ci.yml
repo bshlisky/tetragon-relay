@@ -248,6 +248,11 @@ jobs:
           # scripts/e2e-rhel9.sh on a real RHEL 9 host.
           sg tetragon-relay -c 'cd internal/tetra && /tmp/tetra.itest -test.v && cd ../apply && /tmp/apply.itest -test.v'
 
+      - name: Verify no tracing policies were left loaded (step-03a-review.md R3-E3 fix F2)
+        if: always()
+        run: |
+          sg tetragon-relay -c 'cd internal/apply && /tmp/apply.itest -test.v -test.run "^TestZZZFinalCheck_NoTracingPoliciesLeftLoaded$"'
+
       - name: Stop Tetragon
         if: always()
         run: sudo systemctl stop tetragon.service || true
