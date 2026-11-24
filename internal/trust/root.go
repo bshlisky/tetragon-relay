@@ -1,9 +1,6 @@
 package trust
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/x509"
 	"encoding/base64"
 	"fmt"
 	"time"
@@ -19,9 +16,17 @@ import (
 type parsedPayload struct {
 	version uint64
 	expires time.Time
-	keys    map[KeyID]*ecdsa.PublicKey
+	keys    map[KeyID]TrustedKey
 	roles   Roles
 	logReq  bool
+}
+
+// knownKeyTypes is every KeyType this package recognizes, used to reject
+// unknown values outright rather than ignoring them (step 4 prompt Part
+// B1/B3).
+var knownKeyTypes = map[KeyType]bool{
+	KeyTypeECDSAP384: true,
+	KeyTypeMLDSA87:   true,
 }
 
 func parseAndValidatePayload(payload []byte) (*parsedPayload, error) {
@@ -42,31 +47,25 @@ func parseAndValidatePayload(payload []byte) (*parsedPayload, error) {
 		return nil, fmt.Errorf("%w: no keys", ErrMalformedMetadata)
 	}
 
-	keys := make(map[KeyID]*ecdsa.PublicKey, len(rp.Keys))
+	keys := make(map[KeyID]TrustedKey, len(rp.Keys))
 	for idStr, ke := range rp.Keys {
-		if ke.KeyType != "ecdsa-p384" {
-			return nil, fmt.Errorf("%w: key %q has keytype %q", ErrUnsupportedKeyType, idStr, ke.KeyType)
+		keyType := KeyType(ke.KeyType)
+		if !knownKeyTypes[keyType] {
+			return nil, fmt.Errorf("%w: key %q has keytype %q", ErrUnknownKeyType, idStr, ke.KeyType)
 		}
 		der, err := base64.StdEncoding.Strict().DecodeString(ke.PublicKeyDER)
 		if err != nil {
 			return nil, fmt.Errorf("%w: key %q has invalid base64: %w", ErrMalformedMetadata, idStr, err)
 		}
-		pubAny, err := x509.ParsePKIXPublicKey(der)
+		tk, err := parseTrustedKey(keyType, der)
 		if err != nil {
-			return nil, fmt.Errorf("%w: key %q has invalid DER: %w", ErrMalformedMetadata, idStr, err)
+			return nil, fmt.Errorf("key %q: %w", idStr, err)
 		}
-		pub, ok := pubAny.(*ecdsa.PublicKey)
-		if !ok || pub.Curve != elliptic.P384() {
-			return nil, fmt.Errorf("%w: key %q is not ECDSA P-384", ErrUnsupportedKeyType, idStr)
-		}
-		derived, err := DeriveKeyID(pub)
-		if err != nil {
-			return nil, err
-		}
+		derived := DeriveKeyIDFromDER(der)
 		if string(derived) != idStr {
 			return nil, fmt.Errorf("%w: declared %q derived %q", ErrKeyIDMismatch, idStr, derived)
 		}
-		keys[KeyID(idStr)] = pub
+		keys[KeyID(idStr)] = tk
 	}
 
 	validateRole := func(role rolePayload) (Role, error) {
@@ -78,18 +77,49 @@ func parseAndValidatePayload(payload []byte) (*parsedPayload, error) {
 		}
 		seen := make(map[KeyID]struct{}, len(role.KeyIDs))
 		ids := make([]KeyID, 0, len(role.KeyIDs))
+		presentTypes := make(map[KeyType]bool, len(role.KeyIDs))
 		for _, k := range role.KeyIDs {
 			kid := KeyID(k)
 			if _, dup := seen[kid]; dup {
 				return Role{}, fmt.Errorf("%w: duplicate key id %q", ErrInvalidRoleDefinition, k)
 			}
 			seen[kid] = struct{}{}
-			if _, ok := keys[kid]; !ok {
+			tk, ok := keys[kid]
+			if !ok {
 				return Role{}, fmt.Errorf("%w: references unknown key %q", ErrInvalidRoleDefinition, k)
 			}
+			presentTypes[tk.Type] = true
 			ids = append(ids, kid)
 		}
-		return Role{KeyIDs: ids, Threshold: role.Threshold}, nil
+
+		// Step 4 prompt Part B3: require_keytypes must be non-empty
+		// (explicitly present but empty is malformed; omitted is
+		// fine — no requirement), contain only known keytypes without
+		// duplicates, and every listed type must have at least one
+		// key in this role.
+		var requireTypes []KeyType
+		if role.RequireKeyTypes != nil {
+			if len(role.RequireKeyTypes) == 0 {
+				return Role{}, fmt.Errorf("%w: require_keytypes is present but empty", ErrInvalidRequireKeyTypes)
+			}
+			seenTypes := make(map[KeyType]bool, len(role.RequireKeyTypes))
+			for _, rt := range role.RequireKeyTypes {
+				kt := KeyType(rt)
+				if !knownKeyTypes[kt] {
+					return Role{}, fmt.Errorf("%w: unknown keytype %q", ErrInvalidRequireKeyTypes, rt)
+				}
+				if seenTypes[kt] {
+					return Role{}, fmt.Errorf("%w: duplicate keytype %q", ErrInvalidRequireKeyTypes, rt)
+				}
+				seenTypes[kt] = true
+				if !presentTypes[kt] {
+					return Role{}, fmt.Errorf("%w: keytype %q required but the role has no key of that type", ErrInvalidRequireKeyTypes, rt)
+				}
+				requireTypes = append(requireTypes, kt)
+			}
+		}
+
+		return Role{KeyIDs: ids, Threshold: role.Threshold, RequireKeyTypes: requireTypes}, nil
 	}
 
 	rootRole, err := validateRole(rp.Roles.Root)
@@ -123,11 +153,21 @@ func parseAndValidatePayload(payload []byte) (*parsedPayload, error) {
 	}, nil
 }
 
-// verifyRoleThreshold reports whether at least role.Threshold distinct keys
-// drawn from both role.KeyIDs and keys produced a valid signature over
-// env's PAE. Signatures from keys not listed in the role, or not present in
-// keys, are ignored. Multiple signatures from the same key count once.
-func verifyRoleThreshold(env *dsse.Envelope, keys map[KeyID]*ecdsa.PublicKey, role Role) bool {
+// verifyRoleThreshold reports whether env's signatures satisfy role: at
+// least role.Threshold distinct keys drawn from both role.KeyIDs and keys
+// produced a valid signature over env's PAE, AND (step 4 prompt Part B3)
+// for every keytype listed in role.RequireKeyTypes, at least one distinct
+// key of that type produced a valid signature. Both conditions must hold.
+// Signatures from keys not listed in the role, or not present in keys, are
+// ignored. Multiple signatures from the same key count once.
+//
+// The returned error is non-nil only when an mldsa-87 key's signature
+// could not be evaluated at all (ErrMLDSAUnavailable); it is reported
+// regardless of whether the role was ultimately satisfied, so a caller
+// whose threshold was met only by coincidence despite an unavailable key
+// still has that fact on hand for logging. It is never nil as a result of
+// the role simply not being satisfied by ordinary invalid signatures.
+func verifyRoleThreshold(env *dsse.Envelope, keys map[KeyID]TrustedKey, role Role) (bool, error) {
 	allowed := make(map[KeyID]struct{}, len(role.KeyIDs))
 	for _, k := range role.KeyIDs {
 		allowed[k] = struct{}{}
@@ -135,6 +175,8 @@ func verifyRoleThreshold(env *dsse.Envelope, keys map[KeyID]*ecdsa.PublicKey, ro
 	pae := dsse.PAE(env.PayloadType, env.Payload)
 
 	verified := make(map[KeyID]struct{})
+	verifiedTypes := make(map[KeyType]struct{})
+	var firstErr error
 	for _, sig := range env.Signatures {
 		kid := KeyID(sig.KeyID)
 		if _, ok := allowed[kid]; !ok {
@@ -143,15 +185,29 @@ func verifyRoleThreshold(env *dsse.Envelope, keys map[KeyID]*ecdsa.PublicKey, ro
 		if _, ok := verified[kid]; ok {
 			continue
 		}
-		pub, ok := keys[kid]
+		key, ok := keys[kid]
 		if !ok {
 			continue
 		}
-		if dsse.VerifyECDSAP384(pub, pae, sig.Sig) {
+		ok, err := key.verifySignature(pae, sig.Sig)
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+		if ok {
 			verified[kid] = struct{}{}
+			verifiedTypes[key.Type] = struct{}{}
 		}
 	}
-	return len(verified) >= role.Threshold
+
+	if len(verified) < role.Threshold {
+		return false, firstErr
+	}
+	for _, rt := range role.RequireKeyTypes {
+		if _, ok := verifiedTypes[rt]; !ok {
+			return false, firstErr
+		}
+	}
+	return true, firstErr
 }
 
 // LoadInitialRoot parses and validates a self-signed root metadata envelope:
@@ -177,7 +233,11 @@ func LoadInitialRoot(signedBytes []byte) (*Root, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !verifyRoleThreshold(env, pp.keys, pp.roles.Root) {
+	ok, verr := verifyRoleThreshold(env, pp.keys, pp.roles.Root)
+	if !ok {
+		if verr != nil {
+			return nil, fmt.Errorf("%w: %w", ErrThresholdNotMet, verr)
+		}
 		return nil, ErrThresholdNotMet
 	}
 	return &Root{
@@ -263,10 +323,22 @@ func (r *Root) Update(newSignedBytes []byte, now time.Time) (*Root, error) {
 		return nil, ErrRootValidityTooLong
 	}
 
-	if !verifyRoleThreshold(env, r.keys, r.roles.Root) {
+	// Step 4 prompt Part B3: "Root rotation (Update) applies the same
+	// requirement to both the old and the new root roles" — each side
+	// is checked against its OWN role definition (r.roles.Root's own
+	// RequireKeyTypes for the old side, pp.roles.Root's own for the
+	// new side), since the two versions may declare different
+	// requirements (e.g. a rotation from ecdsa-p384-only to hybrid).
+	if ok, verr := verifyRoleThreshold(env, r.keys, r.roles.Root); !ok {
+		if verr != nil {
+			return nil, fmt.Errorf("%w: %w", ErrOldThresholdNotMet, verr)
+		}
 		return nil, ErrOldThresholdNotMet
 	}
-	if !verifyRoleThreshold(env, pp.keys, pp.roles.Root) {
+	if ok, verr := verifyRoleThreshold(env, pp.keys, pp.roles.Root); !ok {
+		if verr != nil {
+			return nil, fmt.Errorf("%w: %w", ErrNewThresholdNotMet, verr)
+		}
 		return nil, ErrNewThresholdNotMet
 	}
 
@@ -281,13 +353,17 @@ func (r *Root) Update(newSignedBytes []byte, now time.Time) (*Root, error) {
 
 // targetsVerifier is the Verifier returned by TargetsVerifier.
 type targetsVerifier struct {
-	keys            map[KeyID]*ecdsa.PublicKey
+	keys            map[KeyID]TrustedKey
 	role            Role
 	requireLogProof bool
 }
 
 func (v *targetsVerifier) Verify(env *dsse.Envelope) error {
-	if !verifyRoleThreshold(env, v.keys, v.role) {
+	ok, verr := verifyRoleThreshold(env, v.keys, v.role)
+	if !ok {
+		if verr != nil {
+			return fmt.Errorf("%w: %w", ErrThresholdNotMet, verr)
+		}
 		return ErrThresholdNotMet
 	}
 	return nil

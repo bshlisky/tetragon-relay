@@ -1,7 +1,6 @@
 package trust
 
 import (
-	"crypto/ecdsa"
 	"time"
 
 	"github.com/bshlisky/tetragon-relay/internal/dsse"
@@ -11,12 +10,40 @@ import (
 // envelopes (architecture doc section 7.6).
 const RootPayloadType = "application/vnd.relay.root.v1+json"
 
+// KeyType identifies a supported public key algorithm for a trust-root key
+// entry (step 4 prompt Part B1). Production roles today require only
+// KeyTypeECDSAP384 (Part B5); KeyTypeMLDSA87 exists so a future
+// trust-root-signed update can add it to a role's require_keytypes without
+// any change to these formats (ADR 0022).
+type KeyType string
+
+const (
+	// KeyTypeECDSAP384 is an ECDSA key on the P-384 curve (the only
+	// algorithm production roles require today).
+	KeyTypeECDSAP384 KeyType = "ecdsa-p384"
+	// KeyTypeMLDSA87 is an ML-DSA-87 (FIPS 204) key. Verification support
+	// is complete and tested (Part B2), but no production role requires
+	// it yet (Part B5).
+	KeyTypeMLDSA87 KeyType = "mldsa-87"
+)
+
 // Role is one named role (root, targets, or log) from trust-root metadata:
-// the set of keys permitted to act in that role, and how many distinct keys
-// from that set must sign for the role's authority to be exercised.
+// the set of keys permitted to act in that role, how many distinct keys
+// from that set must sign for the role's authority to be exercised, and
+// (step 4 prompt Part B3) which key algorithms must each contribute at
+// least one verifying signature.
 type Role struct {
 	KeyIDs    []KeyID
 	Threshold int
+	// RequireKeyTypes, when non-empty, requires at least one distinct
+	// key of each listed KeyType to have produced a valid signature,
+	// IN ADDITION TO the distinct-key Threshold above (both must hold).
+	// A role with no keytype requirement carries this empty (the
+	// pre-Part-B3 behavior: only Threshold distinct keys of any
+	// supported type). ["ecdsa-p384"] is production's requirement
+	// today (Part B5); a future hybrid rotation can add "mldsa-87" by
+	// trust-root update alone, with no format or code change.
+	RequireKeyTypes []KeyType
 }
 
 // Roles is the full set of roles carried by one version of root metadata.
@@ -43,7 +70,7 @@ type Roles struct {
 type Root struct {
 	Version uint64
 	Expires time.Time
-	keys    map[KeyID]*ecdsa.PublicKey
+	keys    map[KeyID]TrustedKey
 	roles   Roles
 
 	// RequireLogProof mirrors architecture doc section 7.4 step 4
@@ -71,7 +98,9 @@ func (r *Root) LogRole() Role { return copyRole(r.roles.Log) }
 func copyRole(role Role) Role {
 	ids := make([]KeyID, len(role.KeyIDs))
 	copy(ids, role.KeyIDs)
-	return Role{KeyIDs: ids, Threshold: role.Threshold}
+	types := make([]KeyType, len(role.RequireKeyTypes))
+	copy(types, role.RequireKeyTypes)
+	return Role{KeyIDs: ids, Threshold: role.Threshold, RequireKeyTypes: types}
 }
 
 // Verifier checks whether an envelope's signatures meet a specific role's
@@ -121,6 +150,11 @@ type rolesPayload struct {
 type rolePayload struct {
 	KeyIDs    []string `json:"keyids"`
 	Threshold int      `json:"threshold"`
+	// RequireKeyTypes is step 4 prompt Part B3's per-role algorithm
+	// requirement, e.g. ["ecdsa-p384"] or (hybrid, future)
+	// ["ecdsa-p384", "mldsa-87"]. Omitted/empty means no keytype
+	// requirement beyond Threshold distinct keys of any supported type.
+	RequireKeyTypes []string `json:"require_keytypes,omitempty"`
 }
 
 // RootSchema is the required value of rootPayload.Schema.

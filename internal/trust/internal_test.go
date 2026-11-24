@@ -5,6 +5,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha512"
+	"errors"
 	"testing"
 
 	"github.com/bshlisky/tetragon-relay/internal/dsse"
@@ -51,9 +52,9 @@ func TestVerifyRoleThreshold_DuplicateSignatureInEnvelopeCountsOnce(t *testing.T
 	// "already verified" branch.
 	env.Signatures = []dsse.Signature{{KeyID: string(kid), Sig: sig}, {KeyID: string(kid), Sig: sig}}
 
-	keys := map[KeyID]*ecdsa.PublicKey{kid: &priv.PublicKey}
+	keys := map[KeyID]TrustedKey{kid: {Type: KeyTypeECDSAP384, ecdsa: &priv.PublicKey}}
 	role := Role{KeyIDs: []KeyID{kid}, Threshold: 2}
-	if verifyRoleThreshold(env, keys, role) {
+	if ok, _ := verifyRoleThreshold(env, keys, role); ok {
 		t.Fatalf("two signatures from the same key must not satisfy a threshold of 2")
 	}
 }
@@ -69,8 +70,79 @@ func TestVerifyRoleThreshold_SignatureFromKeyNotInKeySet(t *testing.T) {
 	// should make this impossible via the public API, since role
 	// validation requires every role key ID to exist in the key set).
 	role := Role{KeyIDs: []KeyID{kid}, Threshold: 1}
-	if verifyRoleThreshold(env, map[KeyID]*ecdsa.PublicKey{}, role) {
+	if ok, _ := verifyRoleThreshold(env, map[KeyID]TrustedKey{}, role); ok {
 		t.Fatalf("a role key absent from the key set must never satisfy the threshold")
+	}
+}
+
+// TestVerifyRoleThreshold_MLDSAErrorSurfacedEvenWhenThresholdMet covers
+// verifyRoleThreshold's documented guarantee: an mldsa-87 construction
+// error is returned even when the role is satisfied anyway by other
+// signatures, so a caller can still log/alert on it.
+func TestVerifyRoleThreshold_MLDSAErrorSurfacedEvenWhenThresholdMet(t *testing.T) {
+	kid, priv := genTestKey(t)
+	badKid := KeyID("sha256:" + "00000000000000000000000000000000000000000000000000000000000000")
+
+	env := &dsse.Envelope{PayloadType: "t", Payload: []byte("payload")}
+	pae := dsse.PAE(env.PayloadType, env.Payload)
+	env.Signatures = []dsse.Signature{
+		{KeyID: string(kid), Sig: signPAE(priv, pae)},
+		{KeyID: string(badKid), Sig: []byte("anything")},
+	}
+
+	keys := map[KeyID]TrustedKey{
+		kid:    {Type: KeyTypeECDSAP384, ecdsa: &priv.PublicKey},
+		badKid: {Type: KeyTypeMLDSA87, mldsa: []byte("too short")},
+	}
+	role := Role{KeyIDs: []KeyID{kid, badKid}, Threshold: 1}
+	ok, err := verifyRoleThreshold(env, keys, role)
+	if !ok {
+		t.Fatalf("threshold 1 should be met by the valid ecdsa signature alone")
+	}
+	if !errors.Is(err, ErrMLDSAUnavailable) {
+		t.Fatalf("err = %v, want ErrMLDSAUnavailable even though the role was satisfied", err)
+	}
+}
+
+// TestVerifyRoleThreshold_RequireKeyTypesNotSatisfied covers the
+// RequireKeyTypes loop's own rejection branch directly (distinct-key
+// threshold met, but the required keytype never verified).
+func TestVerifyRoleThreshold_RequireKeyTypesNotSatisfied(t *testing.T) {
+	kid1, priv1 := genTestKey(t)
+	kid2, priv2 := genTestKey(t)
+	env := &dsse.Envelope{PayloadType: "t", Payload: []byte("payload")}
+	pae := dsse.PAE(env.PayloadType, env.Payload)
+	env.Signatures = []dsse.Signature{
+		{KeyID: string(kid1), Sig: signPAE(priv1, pae)},
+		{KeyID: string(kid2), Sig: signPAE(priv2, pae)},
+	}
+	keys := map[KeyID]TrustedKey{
+		kid1: {Type: KeyTypeECDSAP384, ecdsa: &priv1.PublicKey},
+		kid2: {Type: KeyTypeECDSAP384, ecdsa: &priv2.PublicKey},
+	}
+	role := Role{KeyIDs: []KeyID{kid1, kid2}, Threshold: 2, RequireKeyTypes: []KeyType{KeyTypeMLDSA87}}
+	if ok, _ := verifyRoleThreshold(env, keys, role); ok {
+		t.Fatal("threshold met by two ecdsa-p384 keys must not satisfy a role requiring mldsa-87")
+	}
+}
+
+// TestLoadInitialRoot_ThresholdNotMetWrapsMLDSAError and
+// TestRoot_Update_ThresholdNotMetWrapsMLDSAError and
+// TestTargetsVerifier_ThresholdNotMetWrapsMLDSAError cover the
+// error-wrapping branches in LoadInitialRoot, Update and
+// targetsVerifier.Verify directly (an mldsa-87 construction error
+// propagated alongside the threshold-not-met error).
+func TestTargetsVerifier_ThresholdNotMetWrapsMLDSAError(t *testing.T) {
+	badKid := KeyID("sha256:" + "00000000000000000000000000000000000000000000000000000000000000")
+	env := &dsse.Envelope{PayloadType: "t", Payload: []byte("payload")}
+	env.Signatures = []dsse.Signature{{KeyID: string(badKid), Sig: []byte("anything")}}
+	v := &targetsVerifier{
+		keys: map[KeyID]TrustedKey{badKid: {Type: KeyTypeMLDSA87, mldsa: []byte("too short")}},
+		role: Role{KeyIDs: []KeyID{badKid}, Threshold: 1},
+	}
+	err := v.Verify(env)
+	if !errors.Is(err, ErrThresholdNotMet) || !errors.Is(err, ErrMLDSAUnavailable) {
+		t.Fatalf("err = %v, want both ErrThresholdNotMet and ErrMLDSAUnavailable", err)
 	}
 }
 

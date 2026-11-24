@@ -3,6 +3,7 @@ package verify_test
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/mldsa"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/sha512"
@@ -206,6 +207,115 @@ func edgeRootManyTargets(t testing.TB, targetKeys []*edgeKey, expires time.Time)
 		t.Fatalf("marshal root payload: %v", err)
 	}
 	return edgeSignEnvelope(trust.RootPayloadType, payload, r1), r1
+}
+
+// edgeMLDSAKey is edgeKey's ML-DSA-87 counterpart (step 4 Part B4's
+// worst-case verify benchmark).
+type edgeMLDSAKey struct {
+	id   string
+	priv *mldsa.PrivateKey
+}
+
+func newEdgeMLDSAKey(t testing.TB) *edgeMLDSAKey {
+	t.Helper()
+	priv, err := mldsa.GenerateKey(mldsa.MLDSA87())
+	if err != nil {
+		t.Fatalf("generate mldsa-87 key: %v", err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(priv.PublicKey())
+	if err != nil {
+		t.Fatalf("marshal mldsa-87 public key: %v", err)
+	}
+	return &edgeMLDSAKey{id: string(trust.DeriveKeyIDFromDER(der)), priv: priv}
+}
+
+func (k *edgeMLDSAKey) publicB64() string {
+	der, _ := x509.MarshalPKIXPublicKey(k.priv.PublicKey())
+	return base64.StdEncoding.EncodeToString(der)
+}
+
+func (k *edgeMLDSAKey) sign(pae []byte) []byte {
+	sig, _ := k.priv.Sign(nil, pae, &mldsa.Options{Context: ""})
+	return sig
+}
+
+func edgeSignEnvelopeMLDSA(payloadType string, payload []byte, signers ...*edgeMLDSAKey) []byte {
+	pae := dsse.PAE(payloadType, payload)
+	sigs := make([]edgeWireSig, 0, len(signers))
+	for _, k := range signers {
+		sigs = append(sigs, edgeWireSig{KeyID: k.id, Sig: base64.StdEncoding.EncodeToString(k.sign(pae))})
+	}
+	env := edgeWireEnvelope{
+		PayloadType: payloadType,
+		Payload:     base64.StdEncoding.EncodeToString(payload),
+		Signatures:  sigs,
+	}
+	b, err := json.Marshal(env)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+// edgeRootManyMLDSATargets is edgeRootManyTargets's ML-DSA-87 counterpart:
+// a self-signed root (root/log roles ecdsa-p384, matching Part B5's
+// production shape) whose targets role lists every key in targetKeys, all
+// mldsa-87, require_keytypes ["mldsa-87"], threshold 1 (verifyRoleThreshold
+// attempts every signature in an envelope regardless of threshold; only
+// the final count is compared against it).
+func edgeRootManyMLDSATargets(t testing.TB, targetKeys []*edgeMLDSAKey, expires time.Time) []byte {
+	t.Helper()
+	r1 := newEdgeKey(t)
+	lk := newEdgeKey(t)
+
+	type keyEntry struct {
+		KeyType      string `json:"keytype"`
+		PublicKeyDER string `json:"public_key_der_b64"`
+	}
+	type role struct {
+		KeyIDs          []string `json:"keyids"`
+		Threshold       int      `json:"threshold"`
+		RequireKeyTypes []string `json:"require_keytypes,omitempty"`
+	}
+	type roles struct {
+		Root    role `json:"root"`
+		Targets role `json:"targets"`
+		Log     role `json:"log"`
+	}
+	type rootPayload struct {
+		Schema  string              `json:"schema"`
+		Version uint64              `json:"version"`
+		Expires time.Time           `json:"expires"`
+		Keys    map[string]keyEntry `json:"keys"`
+		Roles   roles               `json:"roles"`
+	}
+
+	keys := map[string]keyEntry{
+		r1.id: {KeyType: "ecdsa-p384", PublicKeyDER: r1.publicB64()},
+		lk.id: {KeyType: "ecdsa-p384", PublicKeyDER: lk.publicB64()},
+	}
+	targetIDs := make([]string, 0, len(targetKeys))
+	for _, k := range targetKeys {
+		keys[k.id] = keyEntry{KeyType: "mldsa-87", PublicKeyDER: k.publicB64()}
+		targetIDs = append(targetIDs, k.id)
+	}
+
+	rp := rootPayload{
+		Schema:  "relay.root.v1",
+		Version: 1,
+		Expires: expires,
+		Keys:    keys,
+		Roles: roles{
+			Root:    role{KeyIDs: []string{r1.id}, Threshold: 1},
+			Targets: role{KeyIDs: targetIDs, Threshold: 1, RequireKeyTypes: []string{"mldsa-87"}},
+			Log:     role{KeyIDs: []string{lk.id}, Threshold: 1},
+		},
+	}
+	payload, err := json.Marshal(rp)
+	if err != nil {
+		t.Fatalf("marshal root payload: %v", err)
+	}
+	return edgeSignEnvelope(trust.RootPayloadType, payload, r1)
 }
 
 func hashHex(s string) string {

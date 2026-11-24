@@ -20,17 +20,21 @@ func mustB64Decode(t *testing.T, s string) []byte {
 }
 
 var trustErrorsByName = map[string]error{
-	"ErrUnsupportedKeyType":    trust.ErrUnsupportedKeyType,
-	"ErrKeyIDMismatch":         trust.ErrKeyIDMismatch,
-	"ErrThresholdNotMet":       trust.ErrThresholdNotMet,
-	"ErrOldThresholdNotMet":    trust.ErrOldThresholdNotMet,
-	"ErrNewThresholdNotMet":    trust.ErrNewThresholdNotMet,
-	"ErrVersionRollback":       trust.ErrVersionRollback,
-	"ErrVersionSkip":           trust.ErrVersionSkip,
-	"ErrExpiredMetadata":       trust.ErrExpiredMetadata,
-	"ErrMalformedMetadata":     trust.ErrMalformedMetadata,
-	"ErrInvalidRoleDefinition": trust.ErrInvalidRoleDefinition,
-	"ErrRootValidityTooLong":   trust.ErrRootValidityTooLong,
+	"ErrUnsupportedKeyType":     trust.ErrUnsupportedKeyType,
+	"ErrKeyIDMismatch":          trust.ErrKeyIDMismatch,
+	"ErrThresholdNotMet":        trust.ErrThresholdNotMet,
+	"ErrOldThresholdNotMet":     trust.ErrOldThresholdNotMet,
+	"ErrNewThresholdNotMet":     trust.ErrNewThresholdNotMet,
+	"ErrVersionRollback":        trust.ErrVersionRollback,
+	"ErrVersionSkip":            trust.ErrVersionSkip,
+	"ErrExpiredMetadata":        trust.ErrExpiredMetadata,
+	"ErrMalformedMetadata":      trust.ErrMalformedMetadata,
+	"ErrInvalidRoleDefinition":  trust.ErrInvalidRoleDefinition,
+	"ErrRootValidityTooLong":    trust.ErrRootValidityTooLong,
+	"ErrUnknownKeyType":         trust.ErrUnknownKeyType,
+	"ErrKeytypeSPKIMismatch":    trust.ErrKeytypeSPKIMismatch,
+	"ErrMLDSAUnavailable":       trust.ErrMLDSAUnavailable,
+	"ErrInvalidRequireKeyTypes": trust.ErrInvalidRequireKeyTypes,
 }
 
 func trustErr(t *testing.T, name string) error {

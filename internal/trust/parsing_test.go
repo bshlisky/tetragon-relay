@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"testing"
@@ -172,7 +173,7 @@ func TestRoot_Update_MalformedAndWrongPayloadType(t *testing.T) {
 	}
 }
 
-func TestLoadInitialRoot_DeclaredNonP384KeyType(t *testing.T) {
+func TestLoadInitialRoot_UnknownKeyType(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	r1, r2 := mustKey(t), mustKey(t)
 	badDER := base64.StdEncoding.EncodeToString(mustMarshalP384Pub(t))
@@ -180,8 +181,68 @@ func TestLoadInitialRoot_DeclaredNonP384KeyType(t *testing.T) {
 		`","keys":{"sha256:deadbeef":{"keytype":"ecdsa-p256","public_key_der_b64":"` + badDER + `"}},` +
 		`"roles":{"root":{"keyids":[],"threshold":1},"targets":{"keyids":[],"threshold":1},"log":{"keyids":[],"threshold":1}}}`
 	env := signEnvelope(trust.RootPayloadType, []byte(payload), r1, r2)
-	if _, err := trust.LoadInitialRoot(env); !errors.Is(err, trust.ErrUnsupportedKeyType) {
-		t.Fatalf("err = %v, want ErrUnsupportedKeyType", err)
+	if _, err := trust.LoadInitialRoot(env); !errors.Is(err, trust.ErrUnknownKeyType) {
+		t.Fatalf("err = %v, want ErrUnknownKeyType", err)
+	}
+}
+
+// TestLoadInitialRoot_DeclaredKeyTypeDoesNotMatchSPKI covers step 4 prompt
+// Part B1: a key declared "ecdsa-p384" whose SPKI is genuinely P-384 DER
+// but relabeled (e.g. actually some other OID) is malformed metadata, not
+// silently accepted or silently rejected as "unsupported".
+func TestLoadInitialRoot_DeclaredKeyTypeDoesNotMatchSPKI(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	r1, r2 := mustKey(t), mustKey(t)
+	p256, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate P-256 key: %v", err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(&p256.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal P-256 key: %v", err)
+	}
+	badDER := base64.StdEncoding.EncodeToString(der)
+	payload := `{"schema":"relay.root.v1","version":1,"expires":"` + now.Add(24*time.Hour).Format(time.RFC3339) +
+		`","keys":{"sha256:deadbeef":{"keytype":"ecdsa-p384","public_key_der_b64":"` + badDER + `"}},` +
+		`"roles":{"root":{"keyids":[],"threshold":1},"targets":{"keyids":[],"threshold":1},"log":{"keyids":[],"threshold":1}}}`
+	env := signEnvelope(trust.RootPayloadType, []byte(payload), r1, r2)
+	if _, err := trust.LoadInitialRoot(env); !errors.Is(err, trust.ErrKeytypeSPKIMismatch) {
+		t.Fatalf("err = %v, want ErrKeytypeSPKIMismatch", err)
+	}
+}
+
+// TestLoadInitialRoot_InvalidRequireKeyTypes covers step 4 prompt Part
+// B3's require_keytypes validation: present-but-empty, an unknown
+// keytype, a duplicate keytype, and a keytype the role has no key of.
+func TestLoadInitialRoot_InvalidRequireKeyTypes(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	r1, r2 := mustKey(t), mustKey(t)
+	tk := mustKey(t)
+	lk := mustKey(t)
+	keysJSON := func() string {
+		return `"` + r1.id + `":{"keytype":"ecdsa-p384","public_key_der_b64":"` + r1.publicB64() + `"},` +
+			`"` + r2.id + `":{"keytype":"ecdsa-p384","public_key_der_b64":"` + r2.publicB64() + `"},` +
+			`"` + tk.id + `":{"keytype":"ecdsa-p384","public_key_der_b64":"` + tk.publicB64() + `"},` +
+			`"` + lk.id + `":{"keytype":"ecdsa-p384","public_key_der_b64":"` + lk.publicB64() + `"}`
+	}
+	cases := map[string]string{
+		"present but empty": `[]`,
+		"unknown keytype":   `["dilithium3"]`,
+		"duplicate keytype": `["ecdsa-p384","ecdsa-p384"]`,
+		"type has no key":   `["mldsa-87"]`,
+	}
+	for name, requireKeyTypes := range cases {
+		t.Run(name, func(t *testing.T) {
+			payload := `{"schema":"relay.root.v1","version":1,"expires":"` + now.Add(24*time.Hour).Format(time.RFC3339) +
+				`","keys":{` + keysJSON() + `},` +
+				`"roles":{"root":{"keyids":["` + r1.id + `","` + r2.id + `"],"threshold":2},` +
+				`"targets":{"keyids":["` + tk.id + `"],"threshold":1,"require_keytypes":` + requireKeyTypes + `},` +
+				`"log":{"keyids":["` + lk.id + `"],"threshold":1}}}`
+			env := signEnvelope(trust.RootPayloadType, []byte(payload), r1, r2)
+			if _, err := trust.LoadInitialRoot(env); !errors.Is(err, trust.ErrInvalidRequireKeyTypes) {
+				t.Fatalf("err = %v, want ErrInvalidRequireKeyTypes", err)
+			}
+		})
 	}
 }
 

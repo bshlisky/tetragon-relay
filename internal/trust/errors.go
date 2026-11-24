@@ -60,4 +60,32 @@ var (
 	// time Update is called. The initial root loaded by LoadInitialRoot
 	// is exempt (there is no "now" to compare against at build time).
 	ErrRootValidityTooLong = errors.New("trust: root metadata validity window exceeds maximum")
+
+	// ErrUnknownKeyType is returned when a key entry's keytype string
+	// (or a role's require_keytypes entry) is not one of the known
+	// values ("ecdsa-p384", "mldsa-87"). Step 4 prompt Part B1: unknown
+	// keytype values are malformed metadata, never ignored.
+	ErrUnknownKeyType = errors.New("trust: unknown key type")
+
+	// ErrKeytypeSPKIMismatch is returned when a key entry's declared
+	// keytype does not match its SubjectPublicKeyInfo's actual algorithm
+	// OID (or curve, for ecdsa-p384; or size, for mldsa-87). Step 4
+	// prompt Part B1.
+	ErrKeytypeSPKIMismatch = errors.New("trust: declared keytype does not match SPKI algorithm")
+
+	// ErrMLDSAUnavailable is returned when an mldsa-87 signature cannot
+	// be evaluated because this build lacks crypto/mldsa support (the
+	// FIPS 140-3 Go Cryptographic Module v1.0.0; ADR 0021) or, defensively,
+	// any other failure constructing the key at verification time. Every
+	// mldsa-87 signature fails verification (fail closed) when this
+	// occurs; it is never treated as "skip this key". Step 4 prompt Part
+	// B2.
+	ErrMLDSAUnavailable = errors.New("trust: ML-DSA is unavailable in this build")
+
+	// ErrInvalidRequireKeyTypes is returned when a role's
+	// require_keytypes list is empty-but-present-in-JSON (as opposed to
+	// omitted), contains an unknown or duplicate keytype, or lists a
+	// keytype with no key of that type present in the role. Step 4
+	// prompt Part B3.
+	ErrInvalidRequireKeyTypes = errors.New("trust: invalid require_keytypes")
 )

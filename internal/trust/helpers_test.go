@@ -3,6 +3,7 @@ package trust_test
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/mldsa"
 	"crypto/rand"
 	"crypto/sha512"
 	"crypto/x509"
@@ -24,8 +25,10 @@ import (
 // wrong in the same way for a bug to hide, which is unlikely.
 
 type genKey struct {
-	id   string
-	priv *ecdsa.PrivateKey
+	id        string
+	priv      *ecdsa.PrivateKey
+	mldsaPriv *mldsa.PrivateKey
+	keyType   string
 }
 
 func mustKey(t testingT) *genKey {
@@ -38,18 +41,47 @@ func mustKey(t testingT) *genKey {
 	if err != nil {
 		t.Fatalf("derive key id: %v", err)
 	}
-	return &genKey{id: string(id), priv: priv}
+	return &genKey{id: string(id), priv: priv, keyType: "ecdsa-p384"}
+}
+
+// mustMLDSAKey generates an ML-DSA-87 test key (step 4 prompt Part B6).
+func mustMLDSAKey(t testingT) *genKey {
+	t.Helper()
+	priv, err := mldsa.GenerateKey(mldsa.MLDSA87())
+	if err != nil {
+		t.Fatalf("generate mldsa-87 key: %v", err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(priv.PublicKey())
+	if err != nil {
+		t.Fatalf("marshal mldsa-87 public key: %v", err)
+	}
+	id := trust.DeriveKeyIDFromDER(der)
+	return &genKey{id: string(id), mldsaPriv: priv, keyType: "mldsa-87"}
 }
 
 func (k *genKey) publicB64() string {
-	der, _ := x509.MarshalPKIXPublicKey(&k.priv.PublicKey)
+	var der []byte
+	switch {
+	case k.priv != nil:
+		der, _ = x509.MarshalPKIXPublicKey(&k.priv.PublicKey)
+	case k.mldsaPriv != nil:
+		der, _ = x509.MarshalPKIXPublicKey(k.mldsaPriv.PublicKey())
+	}
 	return base64.StdEncoding.EncodeToString(der)
 }
 
 func (k *genKey) sign(pae []byte) []byte {
-	digest := sha512.Sum384(pae)
-	sig, _ := ecdsa.SignASN1(rand.Reader, k.priv, digest[:])
-	return sig
+	switch {
+	case k.priv != nil:
+		digest := sha512.Sum384(pae)
+		sig, _ := ecdsa.SignASN1(rand.Reader, k.priv, digest[:])
+		return sig
+	case k.mldsaPriv != nil:
+		sig, _ := k.mldsaPriv.Sign(nil, pae, &mldsa.Options{Context: ""})
+		return sig
+	default:
+		return nil
+	}
 }
 
 type wireKeyEntry struct {
@@ -57,8 +89,9 @@ type wireKeyEntry struct {
 	PublicKeyDER string `json:"public_key_der_b64"`
 }
 type wireRole struct {
-	KeyIDs    []string `json:"keyids"`
-	Threshold int      `json:"threshold"`
+	KeyIDs          []string `json:"keyids"`
+	Threshold       int      `json:"threshold"`
+	RequireKeyTypes []string `json:"require_keytypes,omitempty"`
 }
 type wireRoles struct {
 	Root    wireRole `json:"root"`
@@ -91,10 +124,18 @@ func roleOf(keys []*genKey, threshold int) wireRole {
 	return wireRole{KeyIDs: ids, Threshold: threshold}
 }
 
+// roleWithKeyTypes is roleOf plus an explicit require_keytypes list (step
+// 4 prompt Part B3).
+func roleWithKeyTypes(keys []*genKey, threshold int, requireKeyTypes ...string) wireRole {
+	r := roleOf(keys, threshold)
+	r.RequireKeyTypes = requireKeyTypes
+	return r
+}
+
 func buildRootPayload(version int, expires time.Time, allKeys []*genKey, root, targets, log wireRole) []byte {
 	keys := make(map[string]wireKeyEntry, len(allKeys))
 	for _, k := range allKeys {
-		keys[k.id] = wireKeyEntry{KeyType: "ecdsa-p384", PublicKeyDER: k.publicB64()}
+		keys[k.id] = wireKeyEntry{KeyType: k.keyType, PublicKeyDER: k.publicB64()}
 	}
 	p := wireRootPayload{
 		Schema:  "relay.root.v1",

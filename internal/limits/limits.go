@@ -11,12 +11,15 @@ const (
 	// Architecture doc section 7.4 step 1.
 	MaxEnvelopeBytes = 1 << 20 // 1 MiB
 
-	// MaxRootMetadataBytes bounds a trust-root DSSE envelope. Root
-	// metadata is small (a handful of P-384 keys and role lists), so a
-	// much lower cap than MaxEnvelopeBytes is used; this is not specified
-	// numerically in the architecture doc and is a reviewable choice
-	// (see docs/decisions/0002-root-metadata-size-cap.md).
-	MaxRootMetadataBytes = 64 << 10 // 64 KiB
+	// MaxRootMetadataBytes bounds a trust-root DSSE envelope. Raised from
+	// 64 KiB to 256 KiB in step 4 Part B4 for ML-DSA-87 (FIPS 204)
+	// support: an ML-DSA-87 public key's base64-encoded SPKI DER is
+	// ~3.5 KiB and its signature ~6.2 KiB, both far larger than ECDSA
+	// P-384's equivalents (~0.16 KiB and ~0.14 KiB) — see
+	// docs/decisions/0002-root-metadata-size-cap.md's amendment for the
+	// full worst-case arithmetic (16 ML-DSA-87 signatures plus a hybrid
+	// key set).
+	MaxRootMetadataBytes = 256 << 10 // 256 KiB
 
 	// MaxJSONDepth is the maximum nesting depth accepted by the strict
 	// JSON decoder. Architecture doc section 7.4 step 5.

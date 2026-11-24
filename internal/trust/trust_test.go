@@ -197,6 +197,15 @@ func TestVectors_TrustUpdate(t *testing.T) {
 			t.Fatalf("parse now: %v", err)
 		}
 		_, err = root.Update(newBytes, now)
+		if v.ExpectedError == "" {
+			// step 4 prompt Part B6: an empty expected_error asserts
+			// Update SUCCEEDS (e.g. a hybrid root rotation satisfying
+			// both the old and new root roles' require_keytypes).
+			if err != nil {
+				t.Fatalf("Update error = %v, want success", err)
+			}
+			return
+		}
 		want := trustErr(t, v.ExpectedError)
 		if !errors.Is(err, want) {
 			t.Fatalf("Update error = %v, want %v", err, want)
