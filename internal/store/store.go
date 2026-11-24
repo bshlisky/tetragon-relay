@@ -64,7 +64,7 @@ func openWithFS(dir string, sealer KeySealer, counter MonotonicCounter, fsys FS)
 		return nil, fmt.Errorf("%w: %s is not a directory", ErrTampered, dir)
 	}
 	if err := checkOwnerAndMode(dfi, 0o700); err != nil {
-		return nil, fmt.Errorf("%w: %s: %v", ErrTampered, dir, err)
+		return nil, fmt.Errorf("%w: %s: %w", ErrTampered, dir, err)
 	}
 
 	blobsDir := filepath.Join(dir, "blobs")
@@ -78,7 +78,7 @@ func openWithFS(dir string, sealer KeySealer, counter MonotonicCounter, fsys FS)
 			return nil, fmt.Errorf("store: create blobs dir: %w", err)
 		}
 	default:
-		return nil, fmt.Errorf("%w: stat %s: %v", ErrTampered, blobsDir, berr)
+		return nil, fmt.Errorf("%w: stat %s: %w", ErrTampered, blobsDir, berr)
 	}
 
 	lockPath := filepath.Join(dir, "lock")
@@ -88,7 +88,7 @@ func openWithFS(dir string, sealer KeySealer, counter MonotonicCounter, fsys FS)
 	}
 	if err := fsys.Flock(lockFile); err != nil {
 		_ = lockFile.Close()
-		return nil, fmt.Errorf("%w: %v", ErrAlreadyOpen, err)
+		return nil, fmt.Errorf("%w: %w", ErrAlreadyOpen, err)
 	}
 
 	s := &Store{dir: dir, fs: fsys, sealer: sealer, counter: counter, lockFile: lockFile}
@@ -112,7 +112,7 @@ func openWithFS(dir string, sealer KeySealer, counter MonotonicCounter, fsys FS)
 		raw, rerr := fsys.ReadFile(indexPath)
 		if rerr != nil {
 			_ = lockFile.Close()
-			return nil, fmt.Errorf("%w: read index: %v", ErrTampered, rerr)
+			return nil, fmt.Errorf("%w: read index: %w", ErrTampered, rerr)
 		}
 		payload, verr := s.loadAndValidateIndex(raw)
 		if verr != nil {
@@ -129,7 +129,7 @@ func openWithFS(dir string, sealer KeySealer, counter MonotonicCounter, fsys FS)
 		}
 	default:
 		_ = lockFile.Close()
-		return nil, fmt.Errorf("%w: stat index: %v", ErrTampered, statErr)
+		return nil, fmt.Errorf("%w: stat index: %w", ErrTampered, statErr)
 	}
 	return s, nil
 }
@@ -161,18 +161,18 @@ func checkOwnerAndMode(fi os.FileInfo, want os.FileMode) error {
 func (s *Store) loadAndValidateIndex(raw []byte) (indexPayload, error) {
 	idx, err := decodeIndexFile(raw)
 	if err != nil {
-		return indexPayload{}, fmt.Errorf("%w: %v", ErrTampered, err)
+		return indexPayload{}, fmt.Errorf("%w: %w", ErrTampered, err)
 	}
 	if idx.Payload.Generation == 0 {
 		return indexPayload{}, fmt.Errorf("%w: generation is zero", ErrTampered)
 	}
 	key, err := s.sealer.Unseal()
 	if err != nil {
-		return indexPayload{}, fmt.Errorf("%w: %v", ErrSealerUnavailable, err)
+		return indexPayload{}, fmt.Errorf("%w: %w", ErrSealerUnavailable, err)
 	}
 	wantMAC, err := computeHMAC(key, idx.Payload)
 	if err != nil {
-		return indexPayload{}, fmt.Errorf("%w: %v", ErrTampered, err)
+		return indexPayload{}, fmt.Errorf("%w: %w", ErrTampered, err)
 	}
 	if !hmac.Equal([]byte(wantMAC), []byte(idx.HMAC)) {
 		return indexPayload{}, fmt.Errorf("%w: HMAC mismatch", ErrTampered)
@@ -183,19 +183,19 @@ func (s *Store) loadAndValidateIndex(raw []byte) (indexPayload, error) {
 
 	counterVal, cerr := s.counter.Read()
 	if cerr != nil {
-		return indexPayload{}, fmt.Errorf("%w: %v", ErrCounterUnavailable, cerr)
+		return indexPayload{}, fmt.Errorf("%w: %w", ErrCounterUnavailable, cerr)
 	}
-	switch {
-	case idx.Payload.Generation == counterVal:
+	switch idx.Payload.Generation {
+	case counterVal:
 		// Ordinary case.
-	case idx.Payload.Generation == counterVal+1:
+	case counterVal + 1:
 		// Part C5: the crash window between the index rename and the
 		// counter increment. Accepted exactly once, then the counter
 		// is caught up so a second restore of the same disk state
 		// (now with a current counter) is not re-accepted as this
 		// same window a second time.
 		if _, ierr := s.counter.Increment(); ierr != nil {
-			return indexPayload{}, fmt.Errorf("%w: %v", ErrCounterUnavailable, ierr)
+			return indexPayload{}, fmt.Errorf("%w: %w", ErrCounterUnavailable, ierr)
 		}
 	default:
 		return indexPayload{}, fmt.Errorf("%w: index generation %d does not match counter %d", ErrTampered, idx.Payload.Generation, counterVal)
@@ -229,7 +229,7 @@ func (s *Store) loadAndValidateIndex(raw []byte) (indexPayload, error) {
 func (s *Store) firstBoot() (indexPayload, error) {
 	counterVal, err := s.counter.Read()
 	if err != nil {
-		return indexPayload{}, fmt.Errorf("%w: %v", ErrCounterUnavailable, err)
+		return indexPayload{}, fmt.Errorf("%w: %w", ErrCounterUnavailable, err)
 	}
 	if counterVal != 0 {
 		return indexPayload{}, fmt.Errorf("%w: index is missing but the monotonic counter is already at %d (not a fresh install)", ErrTampered, counterVal)
@@ -265,7 +265,7 @@ func (s *Store) commitLocked(next indexPayload) error {
 		// now is exactly Part C5's recovery window, handled by the
 		// next Open. Report the failure so the caller knows this
 		// Increment itself did not take effect yet.
-		return fmt.Errorf("%w: %v", ErrCounterUnavailable, err)
+		return fmt.Errorf("%w: %w", ErrCounterUnavailable, err)
 	}
 	referenced := map[string]struct{}{}
 	for _, e := range next.LKG {
@@ -283,7 +283,7 @@ func (s *Store) commitLocked(next indexPayload) error {
 func (s *Store) writeIndexFile(payload indexPayload) error {
 	key, err := s.sealer.Unseal()
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrSealerUnavailable, err)
+		return fmt.Errorf("%w: %w", ErrSealerUnavailable, err)
 	}
 	mac, err := computeHMAC(key, payload)
 	if err != nil {
@@ -345,7 +345,7 @@ func (s *Store) cloneCommitted() indexPayload {
 
 func (s *Store) markTamperedLocked(err error) {
 	if s.tamperErr == nil {
-		s.tamperErr = fmt.Errorf("%w: %v", ErrTampered, err)
+		s.tamperErr = fmt.Errorf("%w: %w", ErrTampered, err)
 	}
 }
 

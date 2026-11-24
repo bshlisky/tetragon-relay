@@ -59,7 +59,7 @@ func TestOpen_ReopenIsNotFirstBoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second Open: %v", err)
 	}
-	defer s2.Close()
+	defer func() { _ = s2.Close() }()
 	if s2.FirstBoot() {
 		t.Fatalf("FirstBoot() = true on a re-open, want false")
 	}
@@ -67,7 +67,7 @@ func TestOpen_ReopenIsNotFirstBoot(t *testing.T) {
 
 func TestEpoch_RoundTripsAndPersistsAcrossReopen(t *testing.T) {
 	dir := t.TempDir()
-	os.Chmod(dir, 0o700)
+	_ = os.Chmod(dir, 0o700)
 	sealer := &store.FakeKeySealer{Key: []byte("test-hmac-key-0123456789abcdef")}
 	counter := store.NewFakeMonotonicCounter()
 
@@ -99,7 +99,7 @@ func TestEpoch_RoundTripsAndPersistsAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	defer s2.Close()
+	defer func() { _ = s2.Close() }()
 	if e, err := s2.Current("prod-db"); err != nil || e != 10 {
 		t.Fatalf("Current after reopen = (%d, %v), want (10, nil)", e, err)
 	}
@@ -186,14 +186,14 @@ func TestTrustRoot_PersistAndDowngradeProtection(t *testing.T) {
 
 func TestOpen_AlreadyOpenByAnotherHandle(t *testing.T) {
 	dir := t.TempDir()
-	os.Chmod(dir, 0o700)
+	_ = os.Chmod(dir, 0o700)
 	sealer := &store.FakeKeySealer{Key: []byte("k")}
 	counter := store.NewFakeMonotonicCounter()
 	s1, err := store.Open(dir, sealer, counter)
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
 	}
-	defer s1.Close()
+	defer func() { _ = s1.Close() }()
 
 	if _, err := store.Open(dir, sealer, store.NewFakeMonotonicCounter()); !errors.Is(err, store.ErrAlreadyOpen) {
 		t.Fatalf("second concurrent Open: err = %v, want ErrAlreadyOpen", err)

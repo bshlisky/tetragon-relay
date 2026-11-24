@@ -41,36 +41,51 @@ type FS interface {
 }
 
 // OSFS is the real filesystem: every method is a thin, directly-mockable
-// wrapper around the matching os/golang.org/x/sys/unix call.
+// wrapper around the matching os/golang.org/x/sys/unix call. Every path
+// this package passes to these methods is built internally from the
+// store's own configured directory (never directly from untrusted input),
+// so the dynamic path each method opens is not attacker-controlled.
 type OSFS struct{}
 
+// OpenFile implements FS.
 func (OSFS) OpenFile(name string, flag int, perm fs.FileMode) (File, error) {
-	return os.OpenFile(name, flag, perm)
+	return os.OpenFile(name, flag, perm) //nolint:gosec // G304: name is always built from this package's own configured store directory, never untrusted input
 }
 
+// Mkdir implements FS.
 func (OSFS) Mkdir(name string, perm fs.FileMode) error { return os.Mkdir(name, perm) }
 
+// Remove implements FS.
 func (OSFS) Remove(name string) error { return os.Remove(name) }
 
+// Rename implements FS.
 func (OSFS) Rename(oldpath, newpath string) error { return os.Rename(oldpath, newpath) }
 
+// Stat implements FS.
 func (OSFS) Stat(name string) (fs.FileInfo, error) { return os.Stat(name) }
 
+// Lstat implements FS.
 func (OSFS) Lstat(name string) (fs.FileInfo, error) { return os.Lstat(name) }
 
-func (OSFS) ReadFile(name string) ([]byte, error) { return os.ReadFile(name) }
+// ReadFile implements FS.
+func (OSFS) ReadFile(name string) ([]byte, error) {
+	return os.ReadFile(name) //nolint:gosec // G304: see OSFS's doc comment
+}
 
+// ReadDir implements FS.
 func (OSFS) ReadDir(name string) ([]fs.DirEntry, error) { return os.ReadDir(name) }
 
+// FsyncDir implements FS.
 func (OSFS) FsyncDir(name string) error {
-	d, err := os.Open(name)
+	d, err := os.Open(name) //nolint:gosec // G304: see OSFS's doc comment
 	if err != nil {
 		return err
 	}
-	defer d.Close()
+	defer func() { _ = d.Close() }()
 	return d.Sync()
 }
 
+// Flock implements FS.
 func (OSFS) Flock(f File) error {
 	osf, ok := f.(*os.File)
 	if !ok {

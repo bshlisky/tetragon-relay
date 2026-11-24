@@ -168,7 +168,7 @@ func establishTrustRoot(st *store.Store, initialRootBytes []byte, now time.Time,
 	candidate, err := trust.LoadInitialRoot(initialRootBytes)
 	if err != nil {
 		auditor.Record(AuditEvent{Step: "trust_root", Detail: "RPM-shipped root failed to parse; keeping persisted root", Err: err})
-		return persistedRoot, nil
+		return persistedRoot, nil //nolint:nilerr // Part C7: an unusable RPM root is logged and ignored, never a Startup-level error; the persisted root remains authoritative
 	}
 	switch {
 	case candidate.Version <= persistedRoot.Version:
@@ -184,7 +184,7 @@ func establishTrustRoot(st *store.Store, initialRootBytes []byte, now time.Time,
 			// chain-verification failure. Either way: never accept,
 			// keep the persisted root, log it.
 			auditor.Record(AuditEvent{Step: "trust_root", Detail: fmt.Sprintf("RPM-shipped root version %d did not chain from persisted version %d; keeping persisted root", candidate.Version, persistedRoot.Version), Err: err})
-			return persistedRoot, nil
+			return persistedRoot, nil //nolint:nilerr // Part C7: a chain-verification failure is logged and ignored, never a Startup-level error; the persisted root remains authoritative
 		}
 		if err := st.PersistTrustRoot(initialRootBytes, updated.Version); err != nil {
 			return nil, fmt.Errorf("agent: persist updated trust root: %w", err)

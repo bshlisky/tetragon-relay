@@ -110,7 +110,7 @@ func TestCrashMatrix_RecordEpoch(t *testing.T) {
 	crashMatrix(t,
 		func(s *Store) error { return s.RecordEpoch("prod-db", 5) },
 		func(t *testing.T, s *Store) {
-			defer s.Close()
+			defer func() { _ = s.Close() }()
 			epoch, err := s.Current("prod-db")
 			if err != nil {
 				t.Fatalf("Current: %v", err)
@@ -129,7 +129,7 @@ func TestCrashMatrix_Put(t *testing.T) {
 	crashMatrix(t,
 		func(s *Store) error { return s.Put("prod-db", set) },
 		func(t *testing.T, s *Store) {
-			defer s.Close()
+			defer func() { _ = s.Close() }()
 			got, ok := s.Get("prod-db")
 			if !ok {
 				return // old state: nothing persisted yet.
@@ -145,7 +145,7 @@ func TestCrashMatrix_PersistTrustRoot(t *testing.T) {
 	crashMatrix(t,
 		func(s *Store) error { return s.PersistTrustRoot([]byte("root-v1-bytes"), 1) },
 		func(t *testing.T, s *Store) {
-			defer s.Close()
+			defer func() { _ = s.Close() }()
 			raw, version, ok, err := s.TrustRoot()
 			if err != nil {
 				t.Fatalf("TrustRoot: %v", err)
@@ -194,7 +194,7 @@ func TestCrashMatrix_RecordEpochTwice(t *testing.T) {
 			if err != nil {
 				t.Fatalf("recovery Open after crashAfter=%d: %v", crashAfter, err)
 			}
-			defer reopened.Close()
+			defer func() { _ = reopened.Close() }()
 			epoch, err := reopened.Current("prod-db")
 			if err != nil {
 				t.Fatalf("Current: %v", err)
@@ -222,14 +222,14 @@ func TestCrashMatrix_FirstBoot(t *testing.T) {
 					t.Fatalf("Open returned an unexpected error: %v", err)
 				}
 			} else {
-				faulted.Close()
+				_ = faulted.Close()
 			}
 
 			reopened, err := Open(dir, sealer, counter)
 			if err != nil {
 				t.Fatalf("recovery Open after crashAfter=%d (first attempt err=%v): %v", crashAfter, err, err)
 			}
-			defer reopened.Close()
+			defer func() { _ = reopened.Close() }()
 			// Either the crash landed before the rename took effect
 			// (recovery performs first boot itself, generation 1,
 			// FirstBoot()==true) or after (recovery sees an

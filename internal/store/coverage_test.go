@@ -102,7 +102,7 @@ func TestMarkTampered_ViaGetAfterDiskCorruption(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	if err := s.Put("prod-db", apply.LKGSet{Mode: "enforce"}); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestMarkTampered_ViaTrustRootAfterDiskCorruption(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	if err := s.PersistTrustRoot([]byte("root-bytes"), 1); err != nil {
 		t.Fatalf("PersistTrustRoot: %v", err)
 	}
@@ -171,12 +171,12 @@ func TestFsyncDir_MissingDirectory(t *testing.T) {
 
 func TestWriteBlobIfMissing_TooLarge(t *testing.T) {
 	dir := t.TempDir()
-	os.Chmod(dir, 0o700)
+	_ = os.Chmod(dir, 0o700)
 	s, err := Open(dir, newTestSealer(), NewFakeMonotonicCounter())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	big := make([]byte, limits.MaxStoreBlobBytes+1)
 	if _, err := s.writeBlobIfMissing(big); !errors.Is(err, ErrLimitExceeded) {
 		t.Fatalf("err = %v, want ErrLimitExceeded", err)
@@ -185,12 +185,12 @@ func TestWriteBlobIfMissing_TooLarge(t *testing.T) {
 
 func TestReadBlob_TooLargeOnDisk(t *testing.T) {
 	dir := t.TempDir()
-	os.Chmod(dir, 0o700)
+	_ = os.Chmod(dir, 0o700)
 	s, err := Open(dir, newTestSealer(), NewFakeMonotonicCounter())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	if err := os.MkdirAll(filepath.Join(dir, "blobs"), 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -206,12 +206,12 @@ func TestReadBlob_TooLargeOnDisk(t *testing.T) {
 
 func TestGCBlobs_MissingDirIsHarmless(t *testing.T) {
 	dir := t.TempDir()
-	os.Chmod(dir, 0o700)
+	_ = os.Chmod(dir, 0o700)
 	s, err := Open(dir, newTestSealer(), NewFakeMonotonicCounter())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	if err := os.RemoveAll(filepath.Join(dir, "blobs")); err != nil {
 		t.Fatalf("remove blobs dir: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestGCBlobs_MissingDirIsHarmless(t *testing.T) {
 
 func TestOpen_CounterUnavailableAtFirstBoot(t *testing.T) {
 	dir := t.TempDir()
-	os.Chmod(dir, 0o700)
+	_ = os.Chmod(dir, 0o700)
 	failing := &failingCounter{err: errCounterBroken}
 	if _, err := Open(dir, newTestSealer(), failing); !errors.Is(err, ErrCounterUnavailable) {
 		t.Fatalf("err = %v, want ErrCounterUnavailable", err)
@@ -230,7 +230,7 @@ func TestOpen_CounterUnavailableAtFirstBoot(t *testing.T) {
 
 func TestOpen_FirstBootWithNonzeroCounterIsTampered(t *testing.T) {
 	dir := t.TempDir()
-	os.Chmod(dir, 0o700)
+	_ = os.Chmod(dir, 0o700)
 	counter := NewFakeMonotonicCounter()
 	counter.Set(5)
 	if _, err := Open(dir, newTestSealer(), counter); !errors.Is(err, ErrTampered) {
@@ -254,7 +254,7 @@ func TestOpen_NonexistentDirectory(t *testing.T) {
 
 func TestOpen_IndexIsADirectoryNotAFile(t *testing.T) {
 	dir := t.TempDir()
-	os.Chmod(dir, 0o700)
+	_ = os.Chmod(dir, 0o700)
 	if err := os.Mkdir(filepath.Join(dir, "index"), 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -265,12 +265,12 @@ func TestOpen_IndexIsADirectoryNotAFile(t *testing.T) {
 
 func TestWriteBlobIfMissing_AlreadyPresentWithMatchingContent(t *testing.T) {
 	dir := t.TempDir()
-	os.Chmod(dir, 0o700)
+	_ = os.Chmod(dir, 0o700)
 	s, err := Open(dir, newTestSealer(), NewFakeMonotonicCounter())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	b := []byte("some blob content")
 	d1, err := s.writeBlobIfMissing(b)
 	if err != nil {
@@ -287,12 +287,12 @@ func TestWriteBlobIfMissing_AlreadyPresentWithMatchingContent(t *testing.T) {
 
 func TestGCBlobs_SkipsSubdirectories(t *testing.T) {
 	dir := t.TempDir()
-	os.Chmod(dir, 0o700)
+	_ = os.Chmod(dir, 0o700)
 	s, err := Open(dir, newTestSealer(), NewFakeMonotonicCounter())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	if err := os.Mkdir(filepath.Join(dir, "blobs", "a-subdirectory"), 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -306,13 +306,13 @@ func TestGCBlobs_SkipsSubdirectories(t *testing.T) {
 
 func TestCommitLocked_CounterIncrementFailsAfterDurableWrite(t *testing.T) {
 	dir := t.TempDir()
-	os.Chmod(dir, 0o700)
+	_ = os.Chmod(dir, 0o700)
 	counter := NewFakeMonotonicCounter()
 	s, err := Open(dir, newTestSealer(), counter)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	s.counter = &failingCounter{err: errCounterBroken}
 	if err := s.RecordEpoch("prod-db", 5); !errors.Is(err, ErrCounterUnavailable) {
@@ -332,12 +332,12 @@ func TestCommitLocked_CounterIncrementFailsAfterDurableWrite(t *testing.T) {
 
 func TestGet_DecodeFailureMarksTampered(t *testing.T) {
 	dir := t.TempDir()
-	os.Chmod(dir, 0o700)
+	_ = os.Chmod(dir, 0o700)
 	s, err := Open(dir, newTestSealer(), NewFakeMonotonicCounter())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	notJSON := []byte("this is not json at all")
 	digest, err := s.writeBlobIfMissing(notJSON)
@@ -356,12 +356,12 @@ func TestGet_DecodeFailureMarksTampered(t *testing.T) {
 
 func TestCloneCommitted_CopiesExistingLKGEntries(t *testing.T) {
 	dir := t.TempDir()
-	os.Chmod(dir, 0o700)
+	_ = os.Chmod(dir, 0o700)
 	s, err := Open(dir, newTestSealer(), NewFakeMonotonicCounter())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	if err := s.Put("domain-a", apply.LKGSet{Mode: "enforce"}); err != nil {
 		t.Fatalf("Put domain-a: %v", err)
 	}
@@ -376,12 +376,12 @@ func TestCloneCommitted_CopiesExistingLKGEntries(t *testing.T) {
 
 func TestWriteIndexFile_TooLargeAfterLimitsPass(t *testing.T) {
 	dir := t.TempDir()
-	os.Chmod(dir, 0o700)
+	_ = os.Chmod(dir, 0o700)
 	s, err := Open(dir, newTestSealer(), NewFakeMonotonicCounter())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	next := s.cloneCommitted()
 	// Within every per-field cardinality limit individually, but their
@@ -412,7 +412,7 @@ func TestOpen_PathIsAFileNotADirectory(t *testing.T) {
 
 func TestOpen_BlobsPathIsAFileNotADirectory(t *testing.T) {
 	dir := t.TempDir()
-	os.Chmod(dir, 0o700)
+	_ = os.Chmod(dir, 0o700)
 	if err := os.WriteFile(filepath.Join(dir, "blobs"), []byte("x"), 0o600); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
@@ -423,7 +423,7 @@ func TestOpen_BlobsPathIsAFileNotADirectory(t *testing.T) {
 
 func TestOpen_CounterUnavailableOnReopen(t *testing.T) {
 	dir := t.TempDir()
-	os.Chmod(dir, 0o700)
+	_ = os.Chmod(dir, 0o700)
 	counter := NewFakeMonotonicCounter()
 	s, err := Open(dir, newTestSealer(), counter)
 	if err != nil {
@@ -439,7 +439,7 @@ func TestOpen_CounterUnavailableOnReopen(t *testing.T) {
 
 func TestLoadAndValidateIndex_GenerationZeroIsTampered(t *testing.T) {
 	dir := t.TempDir()
-	os.Chmod(dir, 0o700)
+	_ = os.Chmod(dir, 0o700)
 	sealer := newTestSealer()
 	counter := NewFakeMonotonicCounter()
 	s, err := Open(dir, sealer, counter)
@@ -455,19 +455,19 @@ func TestLoadAndValidateIndex_GenerationZeroIsTampered(t *testing.T) {
 	if _, err := s.loadAndValidateIndex(mustMarshalIndexFile(t, indexFile{Payload: payload, HMAC: mac})); !errors.Is(err, ErrTampered) {
 		t.Fatalf("err = %v, want ErrTampered", err)
 	}
-	s.Close()
+	_ = s.Close()
 }
 
 func TestLoadAndValidateIndex_TotalBlobBytesExceeded(t *testing.T) {
 	dir := t.TempDir()
-	os.Chmod(dir, 0o700)
+	_ = os.Chmod(dir, 0o700)
 	sealer := newTestSealer()
 	counter := NewFakeMonotonicCounter()
 	s, err := Open(dir, sealer, counter)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	// Write enough blobs, each just under the per-blob cap, that their
 	// sum exceeds the total cap, and reference every one from a
@@ -501,12 +501,12 @@ func TestLoadAndValidateIndex_TotalBlobBytesExceeded(t *testing.T) {
 
 func TestCommitLocked_LimitExceededViaRecordMonitorNames(t *testing.T) {
 	dir := t.TempDir()
-	os.Chmod(dir, 0o700)
+	_ = os.Chmod(dir, 0o700)
 	s, err := Open(dir, newTestSealer(), NewFakeMonotonicCounter())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	names := make([]string, limits.MaxStoreHistoryNamesPerScope+1)
 	for i := range names {
 		names[i] = "name" + strconv.Itoa(i)
@@ -537,13 +537,13 @@ var errSealerBroken = errors.New("sealer broken")
 
 func TestWriteIndexFile_SealerFailsDuringWrite(t *testing.T) {
 	dir := t.TempDir()
-	os.Chmod(dir, 0o700)
+	_ = os.Chmod(dir, 0o700)
 	sealer := &flakySealer{key: []byte("k"), failAfter: 1} // succeeds once (Open's validation is skipped at first boot, but firstBoot's own commitLocked->writeIndexFile call is the first Unseal)
 	s, err := Open(dir, sealer, NewFakeMonotonicCounter())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	if err := s.RecordEpoch("prod-db", 1); !errors.Is(err, ErrSealerUnavailable) {
 		t.Fatalf("err = %v, want ErrSealerUnavailable", err)
 	}

@@ -46,7 +46,7 @@ func TestStartup_FirstBoot_AdoptsInitialRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Startup: %v", err)
 	}
-	defer res.Store.Close()
+	defer func() { _ = res.Store.Close() }()
 	if !res.FirstBoot {
 		t.Fatalf("FirstBoot = false, want true")
 	}
@@ -85,7 +85,7 @@ func TestStartup_Reopen_UsesPersistedRootWhenNoInitialRootConfigured(t *testing.
 	if err != nil {
 		t.Fatalf("second Startup: %v", err)
 	}
-	defer res2.Store.Close()
+	defer func() { _ = res2.Store.Close() }()
 	if res2.FirstBoot {
 		t.Fatalf("FirstBoot = true on a reopen, want false")
 	}
@@ -115,7 +115,7 @@ func TestStartup_ForwardChain_AdoptsNewerRPMRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second Startup: %v", err)
 	}
-	defer res2.Store.Close()
+	defer func() { _ = res2.Store.Close() }()
 	if res2.FirstBoot {
 		t.Fatalf("FirstBoot = true, want false")
 	}
@@ -152,7 +152,7 @@ func TestStartup_IgnoresOlderOrEqualRPMRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second Startup: %v", err)
 	}
-	defer res2.Store.Close()
+	defer func() { _ = res2.Store.Close() }()
 	if res2.TrustRoot.Version != 2 {
 		t.Fatalf("TrustRoot.Version = %d, want 2 (the older RPM root must be ignored)", res2.TrustRoot.Version)
 	}
@@ -224,7 +224,7 @@ func TestStartup_MalformedRPMRootOnReopenIsIgnored(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second Startup with a malformed RPM root: %v", err)
 	}
-	defer res2.Store.Close()
+	defer func() { _ = res2.Store.Close() }()
 	if res2.TrustRoot.Version != 1 {
 		t.Fatalf("TrustRoot.Version = %d, want 1 (persisted, malformed RPM root ignored)", res2.TrustRoot.Version)
 	}
@@ -251,7 +251,7 @@ func TestStartup_RPMRootMoreThanOneVersionAheadIsIgnored(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second Startup: %v", err)
 	}
-	defer res2.Store.Close()
+	defer func() { _ = res2.Store.Close() }()
 	if res2.TrustRoot.Version != 1 {
 		t.Fatalf("TrustRoot.Version = %d, want 1 (version-skip RPM root ignored, not chained)", res2.TrustRoot.Version)
 	}
@@ -280,7 +280,7 @@ func TestStartup_HandsStoreToApplyLKGStoreInterface(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Startup: %v", err)
 	}
-	defer res.Store.Close()
+	defer func() { _ = res.Store.Close() }()
 
 	var lkg apply.LKGStore = res.Store
 	if err := lkg.Put("prod-db", apply.LKGSet{Mode: "enforce"}); err != nil {

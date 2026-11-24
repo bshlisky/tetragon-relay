@@ -47,7 +47,7 @@ func reopenExpectTampered(t *testing.T, dir string, sealer *store.FakeKeySealer,
 	t.Helper()
 	s, err := store.Open(dir, sealer, counter)
 	if err == nil {
-		s.Close()
+		_ = s.Close()
 		t.Fatalf("Open succeeded, want ErrTampered")
 	}
 	if !errors.Is(err, store.ErrTampered) {
@@ -121,7 +121,7 @@ func TestTamper_DeleteABlob(t *testing.T) {
 
 func TestTamper_RestoreOlderIndexAndBlobs_Rollback(t *testing.T) {
 	dir := t.TempDir()
-	os.Chmod(dir, 0o700)
+	_ = os.Chmod(dir, 0o700)
 	sealer := &store.FakeKeySealer{Key: []byte("test-hmac-key-0123456789abcdef")}
 	counter := store.NewFakeMonotonicCounter()
 
@@ -182,7 +182,7 @@ func restoreBlobs(t *testing.T, dir string, snap map[string][]byte) {
 	// snapshot was taken).
 	for _, e := range entries {
 		if _, ok := snap[e.Name()]; !ok {
-			os.Remove(filepath.Join(blobsDir, e.Name()))
+			_ = os.Remove(filepath.Join(blobsDir, e.Name()))
 		}
 	}
 	for name, b := range snap {
@@ -210,14 +210,14 @@ func TestTamper_WrongIndexFilePermissions(t *testing.T) {
 
 func TestTamper_SymlinkInsteadOfDirectory(t *testing.T) {
 	realDir := t.TempDir()
-	os.Chmod(realDir, 0o700)
+	_ = os.Chmod(realDir, 0o700)
 	sealer := &store.FakeKeySealer{Key: []byte("k")}
 	counter := store.NewFakeMonotonicCounter()
 	s, err := store.Open(realDir, sealer, counter)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	s.Close()
+	_ = s.Close()
 
 	parent := t.TempDir()
 	linkPath := filepath.Join(parent, "store-link")

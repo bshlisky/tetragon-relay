@@ -43,11 +43,11 @@ func (s *Store) writeBlobIfMissing(b []byte) (digest string, err error) {
 		return "", fmt.Errorf("store: create blob %s: %w", digest, err)
 	}
 	if _, err := f.Write(b); err != nil {
-		f.Close()
+		_ = f.Close()
 		return "", fmt.Errorf("store: write blob %s: %w", digest, err)
 	}
 	if err := f.Sync(); err != nil {
-		f.Close()
+		_ = f.Close()
 		return "", fmt.Errorf("store: fsync blob %s: %w", digest, err)
 	}
 	if err := f.Close(); err != nil {
@@ -64,7 +64,7 @@ func (s *Store) writeBlobIfMissing(b []byte) (digest string, err error) {
 func (s *Store) readBlob(digest string) ([]byte, error) {
 	b, err := s.fs.ReadFile(s.blobPath(digest))
 	if err != nil {
-		return nil, fmt.Errorf("%w: read blob %s: %v", ErrTampered, digest, err)
+		return nil, fmt.Errorf("%w: read blob %s: %w", ErrTampered, digest, err)
 	}
 	if len(b) > limits.MaxStoreBlobBytes {
 		return nil, fmt.Errorf("%w: blob %s is %d bytes, max %d", ErrTampered, digest, len(b), limits.MaxStoreBlobBytes)
