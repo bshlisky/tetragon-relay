@@ -113,6 +113,15 @@ func pendingErrIsTimeout(errc <-chan error) bool {
 	}
 }
 
+// withinHealthWindowDeadlineTolerance implements step-03a-review.md R3B-2:
+// a stream timeout is only ever the window's own GetEvents(windowCtx, ...)
+// deadline (as opposed to some earlier, independent timeout a Tetragon or
+// anything else at the other end of the socket chose to return) if the
+// window has at most limits.HealthWindowDeadlineTolerance left to run.
+func withinHealthWindowDeadlineTolerance(windowDeadline time.Time) bool {
+	return time.Until(windowDeadline) <= limits.HealthWindowDeadlineTolerance
+}
+
 func runHealthWindow(
 	ctx context.Context,
 	client TetragonClient,
@@ -122,6 +131,12 @@ func runHealthWindow(
 ) (healthFailureReason, bool) {
 	windowCtx, cancel := context.WithTimeout(ctx, cfg.window())
 	defer cancel()
+	// windowDeadline is fixed at construction (context.WithTimeout sets
+	// it once); reading it back here, rather than recomputing
+	// time.Now().Add(cfg.window()), guarantees withinHealthWindowDeadlineTolerance
+	// below measures against the exact same deadline windowCtx itself
+	// expires at.
+	windowDeadline, _ := windowCtx.Deadline()
 
 	events, errc := client.GetEvents(windowCtx, policyNames)
 	eventTimes := newSlidingEventCounter(time.Minute)
@@ -193,6 +208,20 @@ func runHealthWindow(
 					// before ever reading errc's already-buffered
 					// tetra.ErrTimeout value, even though
 					// windowCtx.Err() has not flipped non-nil yet.
+					//
+					// step-03b-review.md R3B-2: windowCtx.Err() != nil
+					// means the deadline has truly already passed
+					// locally (time.Until would be <= 0, always within
+					// tolerance), but pendingErrIsTimeout(errc) alone
+					// does not — only accept it as "the window ended"
+					// if the window had at most
+					// limits.HealthWindowDeadlineTolerance left to run;
+					// otherwise an independent early timeout from
+					// Tetragon must not be read as a healthy, completed
+					// window.
+					if !withinHealthWindowDeadlineTolerance(windowDeadline) {
+						return reasonHealthNotServing, false
+					}
 					if !everReachable {
 						return reasonControlPlaneDown, false
 					}
@@ -238,6 +267,19 @@ func runHealthWindow(
 					// problem). internal/tetra.GetEvents no longer sends
 					// this once ctx.Err() is locally observed non-nil
 					// either, but this closes the remaining gap.
+					//
+					// step-03b-review.md R3B-2: that reasoning only
+					// holds this close to the window's own deadline.
+					// errors.Is(err, tetra.ErrTimeout) alone, far from
+					// windowDeadline, means something else returned
+					// DeadlineExceeded early (a misbehaving or
+					// compromised Tetragon, or a shorter deadline
+					// introduced upstream later) — a real health failure,
+					// not a scheduling race, so it must not shorten the
+					// window's effective safety margin silently.
+					if !withinHealthWindowDeadlineTolerance(windowDeadline) {
+						return reasonHealthNotServing, false
+					}
 					if !everReachable {
 						return reasonControlPlaneDown, false
 					}

@@ -145,6 +145,19 @@ const (
 	// minute rollback threshold (step 3 prompt Part D5).
 	DefaultApplySurgeThreshold = 500
 
+	// HealthWindowDeadlineTolerance bounds how early a stream timeout
+	// (tetra.ErrTimeout, on either runHealthWindow select branch that
+	// observes one) may be treated as "the health window's own deadline
+	// arrived" rather than a real, independent timeout from Tetragon
+	// (step-03b-review.md R3B-2). A timeout observed with more than this
+	// much of the window still remaining is never the window's own
+	// GetEvents(windowCtx, ...) deadline — internal/tetra.GetEvents
+	// applies windowCtx directly with no shorter timeout of its own
+	// (Part B3) — so treating it as "the window completed" would let a
+	// misbehaving or compromised Tetragon shorten a 60s window to
+	// seconds without the health check ever noticing.
+	HealthWindowDeadlineTolerance = 2 * time.Second
+
 	// MaxLoadedPolicyNameBytes is Tetragon v1.8.0's own name limit
 	// (RFC 1123 DNS subdomain, apivalidation.NameIsDNSSubdomain; ADR
 	// 0016), restated here as a defensive invariant: PolicyNamePattern

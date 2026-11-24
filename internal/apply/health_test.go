@@ -250,18 +250,48 @@ func TestRunHealthWindow_StreamClosesEarly_Fails(t *testing.T) {
 	}
 }
 
-// TestRunHealthWindow_ErrTimeoutBeforeWindowCtxErrObserved_Passes covers a
-// real race found running TestApply_HappyPath_Enforce -count=200 -race
+// TestRunHealthWindow_ErrTimeoutNearDeadline_Passes covers a real race
+// found running TestApply_HappyPath_Enforce -count=200 -race
 // (step-03a-review.md R3-4's required stress run): internal/tetra.
 // GetEvents has no timeout of its own separate from windowCtx (Part B3;
 // unlike every other RPC method), so a gRPC DeadlineExceeded status for
 // it — even one that arrives, under scheduling load, before this
 // goroutine's own windowCtx.Err() happens to have been set yet — can only
-// ever mean windowCtx's own deadline. This sends a tetra.ErrTimeout-
-// wrapped error on errc immediately, before the window's local deadline,
-// confirming the window still passes without relying on windowCtx.Err()
-// being observably non-nil yet.
-func TestRunHealthWindow_ErrTimeoutBeforeWindowCtxErrObserved_Passes(t *testing.T) {
+// ever mean windowCtx's own deadline, PROVIDED the window actually has
+// little time left (step-03b-review.md R3B-2: within
+// limits.HealthWindowDeadlineTolerance). The window here is short enough
+// that "immediately" is within tolerance, confirming the window still
+// passes without relying on windowCtx.Err() being observably non-nil yet.
+func TestRunHealthWindow_ErrTimeoutNearDeadline_Passes(t *testing.T) {
+	c := &ctxControlledClient{
+		healthy: true,
+		getEvents: func(context.Context) (<-chan tetra.Event, <-chan error) {
+			events := make(chan tetra.Event)
+			errc := make(chan error, 1)
+			go func() {
+				defer close(events)
+				defer close(errc)
+				errc <- fmt.Errorf("%w: GetEvents", tetra.ErrTimeout)
+			}()
+			return events, errc
+		},
+	}
+	reach := &FakeReachabilityChecker{ReachableValue: true}
+	reason, ok := runHealthWindow(context.Background(), c, reach, HealthWindowConfig{Window: time.Second, PollInterval: time.Hour}, nil)
+	if !ok {
+		t.Fatalf("reason=%s ok=%v, want ok=true (a tetra.ErrTimeout from GetEvents within HealthWindowDeadlineTolerance of the deadline can only mean windowCtx's own deadline)", reason, ok)
+	}
+}
+
+// TestRunHealthWindow_ErrTimeoutWellBeforeDeadline_Fails is
+// step-03b-review.md R3B-2's required deterministic test: a
+// tetra.ErrTimeout arriving when the window has far more than
+// limits.HealthWindowDeadlineTolerance left to run must never be read as
+// "the window completed healthily" — a Tetragon (or anything else at the
+// other end of the socket) returning DeadlineExceeded early must not be
+// able to shorten a long health window to a fraction of its configured
+// length without the agent noticing.
+func TestRunHealthWindow_ErrTimeoutWellBeforeDeadline_Fails(t *testing.T) {
 	c := &ctxControlledClient{
 		healthy: true,
 		getEvents: func(context.Context) (<-chan tetra.Event, <-chan error) {
@@ -277,8 +307,57 @@ func TestRunHealthWindow_ErrTimeoutBeforeWindowCtxErrObserved_Passes(t *testing.
 	}
 	reach := &FakeReachabilityChecker{ReachableValue: true}
 	reason, ok := runHealthWindow(context.Background(), c, reach, HealthWindowConfig{Window: time.Hour, PollInterval: time.Hour}, nil)
+	if ok || reason != reasonHealthNotServing {
+		t.Fatalf("reason=%s ok=%v, want reasonHealthNotServing/false (a tetra.ErrTimeout 1 hour before the deadline must not shorten the window)", reason, ok)
+	}
+}
+
+// TestRunHealthWindow_EventsClosedPendingTimeoutNearDeadline_Passes
+// exercises the events-closed branch's pendingErrIsTimeout path (R3-4's
+// second race instance) under step-03b-review.md R3B-2's same tolerance
+// rule: events closes (ok=false) with an already-buffered tetra.ErrTimeout
+// sitting in errc, and the window is short enough that this is within
+// tolerance of its own deadline.
+func TestRunHealthWindow_EventsClosedPendingTimeoutNearDeadline_Passes(t *testing.T) {
+	c := &ctxControlledClient{
+		healthy: true,
+		getEvents: func(context.Context) (<-chan tetra.Event, <-chan error) {
+			events := make(chan tetra.Event)
+			errc := make(chan error, 1)
+			errc <- fmt.Errorf("%w: GetEvents", tetra.ErrTimeout)
+			close(events)
+			close(errc)
+			return events, errc
+		},
+	}
+	reach := &FakeReachabilityChecker{ReachableValue: true}
+	reason, ok := runHealthWindow(context.Background(), c, reach, HealthWindowConfig{Window: time.Second, PollInterval: time.Hour}, nil)
 	if !ok {
-		t.Fatalf("reason=%s ok=%v, want ok=true (a tetra.ErrTimeout from GetEvents can only mean windowCtx's own deadline)", reason, ok)
+		t.Fatalf("reason=%s ok=%v, want ok=true (events closed with a pending tetra.ErrTimeout within tolerance of the deadline)", reason, ok)
+	}
+}
+
+// TestRunHealthWindow_EventsClosedPendingTimeoutWellBeforeDeadline_Fails
+// is the events-closed branch's counterpart to
+// TestRunHealthWindow_ErrTimeoutWellBeforeDeadline_Fails: the same
+// already-buffered tetra.ErrTimeout, but with the window far from its
+// deadline, must fail health rather than pass it.
+func TestRunHealthWindow_EventsClosedPendingTimeoutWellBeforeDeadline_Fails(t *testing.T) {
+	c := &ctxControlledClient{
+		healthy: true,
+		getEvents: func(context.Context) (<-chan tetra.Event, <-chan error) {
+			events := make(chan tetra.Event)
+			errc := make(chan error, 1)
+			errc <- fmt.Errorf("%w: GetEvents", tetra.ErrTimeout)
+			close(events)
+			close(errc)
+			return events, errc
+		},
+	}
+	reach := &FakeReachabilityChecker{ReachableValue: true}
+	reason, ok := runHealthWindow(context.Background(), c, reach, HealthWindowConfig{Window: time.Hour, PollInterval: time.Hour}, nil)
+	if ok || reason != reasonHealthNotServing {
+		t.Fatalf("reason=%s ok=%v, want reasonHealthNotServing/false (a pending tetra.ErrTimeout 1 hour before the deadline must not shorten the window)", reason, ok)
 	}
 }
 
