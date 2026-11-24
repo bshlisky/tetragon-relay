@@ -171,6 +171,106 @@ func TestPersistDir_NoSiblingTempDirectories(t *testing.T) {
 	}
 }
 
+// TestPersistDir_RestartReadIsAlwaysSupersetOfOldOrNew implements
+// step-03b-review.md R3B-4's required test: it simulates a Tetragon
+// restart (a directory read using the same tpMaxDepth := 1 rule ADR 0016
+// cites — top-level files only, stagingDirName itself skipped) at every
+// step of PersistDir's update sequence, and asserts the observed set is
+// always a superset of the old set, the new set, or both — never a
+// partial, neither-old-nor-new mix that would mean a policy briefly
+// disappears from what Tetragon would load on restart.
+func TestPersistDir_RestartReadIsAlwaysSupersetOfOldOrNew(t *testing.T) {
+	name1, _ := LoadedName("p1", 1, []byte("a"))
+	name2, _ := LoadedName("p2", 1, []byte("b"))
+	old := []PersistedPolicy{{LoadedName: name1, CanonicalJSON: []byte(`{"a":1}`)}}
+	target := []PersistedPolicy{{LoadedName: name2, CanonicalJSON: []byte(`{"b":2}`)}}
+	oldSet := map[string]bool{name1 + ".json": true}
+	newSet := map[string]bool{name2 + ".json": true}
+
+	dir := filepath.Join(t.TempDir(), "relay")
+	if err := PersistDir(dir, old, os.Getuid(), os.Getgid()); err != nil {
+		t.Fatal(err)
+	}
+
+	// simulateTetragonRead mirrors cmd/tetragon/main.go:694-726's loader
+	// (ADR 0016): top-level entries of dir only, skipping any directory
+	// (stagingDirName is the only one PersistDir ever creates, and it
+	// sits a second level down from Tetragon's --tracing-policy-dir root,
+	// below tpMaxDepth := 1).
+	simulateTetragonRead := func(t *testing.T) map[string]bool {
+		t.Helper()
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen := make(map[string]bool, len(entries))
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			seen[e.Name()] = true
+		}
+		return seen
+	}
+	isSupersetOf := func(got, want map[string]bool) bool {
+		for k := range want {
+			if !got[k] {
+				return false
+			}
+		}
+		return true
+	}
+
+	var snapshots []map[string]bool
+	record := func(t *testing.T) { snapshots = append(snapshots, simulateTetragonRead(t)) }
+
+	restoreRename, restoreRemove, restoreSyncDir := renameFunc, removeAllFunc, syncDirFunc
+	defer func() { renameFunc, removeAllFunc, syncDirFunc = restoreRename, restoreRemove, restoreSyncDir }()
+	stagingDir := filepath.Join(dir, stagingDirName)
+
+	renameFunc = func(src, dst string) error {
+		if err := restoreRename(src, dst); err != nil {
+			return err
+		}
+		record(t)
+		return nil
+	}
+	removeAllFunc = func(path string) error {
+		if err := restoreRemove(path); err != nil {
+			return err
+		}
+		if path != stagingDir { // the staging-directory clear/cleanup calls, not a real file removal
+			record(t)
+		}
+		return nil
+	}
+	syncDirFunc = func(path string) error {
+		if err := restoreSyncDir(path); err != nil {
+			return err
+		}
+		record(t)
+		return nil
+	}
+
+	if err := PersistDir(dir, target, os.Getuid(), os.Getgid()); err != nil {
+		t.Fatalf("PersistDir: %v", err)
+	}
+
+	if len(snapshots) == 0 {
+		t.Fatal("no restart-read snapshots were captured; the test hooks did not fire")
+	}
+	for i, snap := range snapshots {
+		if !isSupersetOf(snap, oldSet) && !isSupersetOf(snap, newSet) {
+			t.Fatalf("restart-read snapshot #%d = %v is neither a superset of the old set %v nor the new set %v", i, snap, oldSet, newSet)
+		}
+	}
+
+	final := simulateTetragonRead(t)
+	if len(final) != len(newSet) || !isSupersetOf(final, newSet) {
+		t.Fatalf("final directory contents = %v, want exactly %v", final, newSet)
+	}
+}
+
 // TestPersistDir_CrashRecovery implements step-03a-review.md R3-2's
 // "crash at every point in the update sequence" requirement: each
 // subtest injects a failure at a different point in PersistDir's

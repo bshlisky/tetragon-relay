@@ -31,12 +31,29 @@ stale files are then removed and `relay/` itself is fsynced.
 
 This sequence is accepted as **not atomic**: a crash between any two of its steps can
 leave `relay/` with a mix of old and new files, or a leftover `.staging` directory (which
-the next `PersistDir` call always clears before proceeding). This is acceptable because:
+the next `PersistDir` call always clears before proceeding). This is acceptable — **not**
+because the engine avoids racing Tetragon's own startup read (step-03b-review.md R3B-4:
+Tetragon can restart at any moment — crash, OOM, `systemctl restart` — including mid-update,
+and this engine has no way to prevent or detect that), but because the sequence is
+constructed so that whatever Tetragon's loader observes, at any point in it, is still a
+safe set to load:
 
-- Tetragon reads `relay/` only at its own process startup (ADR 0016's
-  `cmd/tetragon/main.go:694-726` citation); this engine never races that read against an
-  in-progress `PersistDir` call, so a non-atomic intermediate state on disk is never
-  observed by Tetragon mid-update.
+- Tetragon's loader only ever sees `relay/`'s top-level entries (ADR 0016's
+  `cmd/tetragon/main.go:694-726` citation, `tpMaxDepth := 1`): `.staging` sits a second
+  level down (a child of `relay/`, which is itself one level below Tetragon's
+  `--tracing-policy-dir` root) and is always skipped by `fs.WalkDir`, so a restart during
+  the staging-write/fsync steps sees exactly the old set, untouched — nothing has been
+  renamed into `relay/` yet.
+- The rename-then-remove order means a restart during the addition phase (each new file
+  renamed from `.staging` directly into `relay/`) sees the old set plus however many new
+  files have been renamed in so far — a superset of the old set, never missing anything
+  that was loaded before. Only once every addition has landed does removal of stale
+  entries begin, so a restart during the removal phase sees the new set plus however many
+  stale entries have not yet been removed — a superset of the new set. At every point in
+  the sequence, the on-disk set Tetragon could read is a superset of the old set or a
+  superset of the new set (`TestPersistDir_RestartReadIsAlwaysSupersetOfOldOrNew` asserts
+  this directly, simulating a restart's directory read at every rename, removal and fsync
+  step).
 - The relay's `Reconcile` (`internal/apply/reconcile.go`) compares Tetragon's actually
   loaded policies against the LKG set on every cycle and after every control-stream
   reconnect, and re-asserts LKG (calling `Apply`'s same add-before-remove procedure,
@@ -44,7 +61,9 @@ the next `PersistDir` call always clears before proceeding). This is acceptable 
   Tetragon restart that picked up a stale or partially-updated `relay/` directory from a
   crash during a previous `PersistDir` call. A crash here therefore converges to the
   correct final state on the next successful `PersistDir` call, not through atomicity of
-  any single call.
+  any single call; the superset property above is what keeps the window between the crash
+  and that convergence safe (never under-enforcing relative to either the old or the new
+  set), not freedom from the race itself.
 
 `.staging`'s own nesting (two directory levels below Tetragon's
 `--tracing-policy-dir` root, vs. `relay/`'s one) is itself what keeps Tetragon's loader

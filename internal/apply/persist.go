@@ -71,17 +71,23 @@ var (
 // Atomicity: unlike the sibling-directory swap this replaced, this
 // sequence is NOT atomic — a crash partway through can leave dir with a
 // mix of old and new files, or a leftover stagingDirName. This is an
-// accepted, documented trade-off (ADR 0019, Proposed): Tetragon only
-// reads this directory at its own startup (ADR 0016), which this engine
-// does not race against, so a non-atomic intermediate state is never
-// observed by Tetragon mid-update; and the relay's own Reconcile re-
-// asserts the LKG set (calling PersistDir again) whenever Tetragon's
+// accepted, documented trade-off (ADR 0019): Tetragon CAN restart at any
+// moment, including mid-update (step-03b-review.md R3B-4 — this engine
+// has no way to prevent or detect that), but the sequence is constructed
+// so that whatever Tetragon's startup read (ADR 0016's
+// cmd/tetragon/main.go:694-726, tpMaxDepth := 1) observes at any point is
+// always a superset of the old set or the new set: stagingDirName sits
+// below tpMaxDepth and is never read mid-update; the rename-then-remove
+// order means additions land (superset of old) before any removal
+// starts (superset of new). The relay's own Reconcile additionally
+// re-asserts the LKG set (calling PersistDir again) whenever Tetragon's
 // loaded policies drift from LKG, including after any restart, so a
 // crash here converges to the correct final state on the very next
 // PersistDir call for the same (or any subsequent) target set — it does
-// not need to be atomic to be eventually correct. Any stale
-// stagingDirName left behind by a previous crashed call is removed
-// before a new one is created.
+// not need to be atomic to be eventually correct, only to never be a
+// strict subset of both sets while non-atomic. Any stale stagingDirName
+// left behind by a previous crashed call is removed before a new one is
+// created.
 func PersistDir(dir string, policies []PersistedPolicy, uid, gid int) error {
 	wantNames := make(map[string]bool, len(policies))
 	for _, p := range policies {
