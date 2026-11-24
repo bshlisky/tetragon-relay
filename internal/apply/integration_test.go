@@ -83,6 +83,21 @@ func dialIntegration(t *testing.T) *tetra.Client {
 	// this test suite, so deleting every loaded policy after each test
 	// function returns is safe and simpler than tracking exactly which
 	// policy each test loaded.
+	//
+	// t.Cleanup funcs registered on the same *testing.T run in LIFO
+	// order, same as defer, and ALL of them run only after the test
+	// function (and its own defers) has already returned — registering
+	// "close the client" here first and "clean up policies" second means
+	// the policy cleanup (which needs a live connection) runs before the
+	// close, every time, regardless of what the calling test itself does
+	// or does not defer. Earlier versions of this file additionally had
+	// each test `defer client.Close()` directly, which ran before any
+	// t.Cleanup func at all and made cleanupAllTracingPolicies run
+	// against an already-closing connection (observed for real in CI:
+	// "ListTracingPolicies: ... grpc: the client connection is
+	// closing") — callers of dialIntegration must not also close the
+	// client themselves.
+	t.Cleanup(func() { _ = c.Close() })
 	t.Cleanup(func() { cleanupAllTracingPolicies(t, c) })
 	return c
 }
@@ -140,7 +155,6 @@ func newIntegrationEngineWithAuditor(t *testing.T, client *tetra.Client) (*Engin
 // upgrade it to enforce, against a real Tetragon.
 func TestIntegration_LoadMonitorBundle_ThenUpgradeToEnforce(t *testing.T) {
 	client := dialIntegration(t)
-	defer func() { _ = client.Close() }()
 
 	e := newIntegrationEngine(t, client)
 
@@ -164,7 +178,6 @@ func TestIntegration_LoadMonitorBundle_ThenUpgradeToEnforce(t *testing.T) {
 // /usr/bin/bash running a harmless command survives.
 func TestIntegration_EnforcementKillsCanary_AdminPathSurvives(t *testing.T) {
 	client := dialIntegration(t)
-	defer func() { _ = client.Close() }()
 
 	canaryPath := buildCanaryBinary(t, "/tmp/testbin-canary")
 	e := newIntegrationEngine(t, client)
@@ -241,7 +254,6 @@ spec:
 // before ever calling security_bprm_check again as a distinct caller.
 func TestIntegration_RollbackOnAdminPathKill(t *testing.T) {
 	client := dialIntegration(t)
-	defer func() { _ = client.Close() }()
 
 	e, auditor := newIntegrationEngineWithAuditor(t, client)
 
@@ -398,7 +410,6 @@ func TestIntegration_RollbackOnAdminPathKill(t *testing.T) {
 // manual procedure, not automated here.
 func TestIntegration_RestartReloadsPersistedSet(t *testing.T) {
 	client := dialIntegration(t)
-	defer func() { _ = client.Close() }()
 
 	dir := "/etc/tetragon/tetragon.tp.d/relay"
 	e := newIntegrationEngineWithPersistDir(t, client, dir)
@@ -417,13 +428,11 @@ func TestIntegration_RestartReloadsPersistedSet(t *testing.T) {
 // Apply never deletes it.
 func TestIntegration_ForeignPolicyLeftUntouched(t *testing.T) {
 	foreignClient := dialIntegration(t)
-	defer func() { _ = foreignClient.Close() }()
 	if err := foreignClient.AddTracingPolicy(context.Background(), canaryPolicyYAML("itest-foreign", "Post"), ""); err != nil {
 		t.Fatalf("load foreign policy: %v", err)
 	}
 
 	client := dialIntegration(t)
-	defer func() { _ = client.Close() }()
 	e := newIntegrationEngine(t, client)
 	if res, err := e.Apply(context.Background(), acceptedBundleYAML("enforce", "itest-managed", 1, canaryPolicyYAML("itest-managed", "Post"))); err != nil || res.Status != StatusApplied {
 		t.Fatalf("apply: res=%+v err=%v", res, err)
