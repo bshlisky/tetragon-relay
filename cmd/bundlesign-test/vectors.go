@@ -226,17 +226,21 @@ func guardrailsForVector(v testvectors.Vector) verify.Guardrails {
 }
 
 var trustErrorsByName = map[string]error{
-	"ErrUnsupportedKeyType":    trust.ErrUnsupportedKeyType,
-	"ErrKeyIDMismatch":         trust.ErrKeyIDMismatch,
-	"ErrThresholdNotMet":       trust.ErrThresholdNotMet,
-	"ErrOldThresholdNotMet":    trust.ErrOldThresholdNotMet,
-	"ErrNewThresholdNotMet":    trust.ErrNewThresholdNotMet,
-	"ErrVersionRollback":       trust.ErrVersionRollback,
-	"ErrVersionSkip":           trust.ErrVersionSkip,
-	"ErrExpiredMetadata":       trust.ErrExpiredMetadata,
-	"ErrMalformedMetadata":     trust.ErrMalformedMetadata,
-	"ErrInvalidRoleDefinition": trust.ErrInvalidRoleDefinition,
-	"ErrRootValidityTooLong":   trust.ErrRootValidityTooLong,
+	"ErrUnsupportedKeyType":     trust.ErrUnsupportedKeyType,
+	"ErrKeyIDMismatch":          trust.ErrKeyIDMismatch,
+	"ErrThresholdNotMet":        trust.ErrThresholdNotMet,
+	"ErrOldThresholdNotMet":     trust.ErrOldThresholdNotMet,
+	"ErrNewThresholdNotMet":     trust.ErrNewThresholdNotMet,
+	"ErrVersionRollback":        trust.ErrVersionRollback,
+	"ErrVersionSkip":            trust.ErrVersionSkip,
+	"ErrExpiredMetadata":        trust.ErrExpiredMetadata,
+	"ErrMalformedMetadata":      trust.ErrMalformedMetadata,
+	"ErrInvalidRoleDefinition":  trust.ErrInvalidRoleDefinition,
+	"ErrRootValidityTooLong":    trust.ErrRootValidityTooLong,
+	"ErrUnknownKeyType":         trust.ErrUnknownKeyType,
+	"ErrKeytypeSPKIMismatch":    trust.ErrKeytypeSPKIMismatch,
+	"ErrMLDSAUnavailable":       trust.ErrMLDSAUnavailable,
+	"ErrInvalidRequireKeyTypes": trust.ErrInvalidRequireKeyTypes,
 }
 
 func checkTrustLoad(v testvectors.Vector) error {
@@ -273,6 +277,16 @@ func checkTrustUpdate(v testvectors.Vector) error {
 		return fmt.Errorf("%s: parse now: %w", v.Name, err)
 	}
 	_, err = root.Update(newBytes, now)
+	if v.ExpectedError == "" {
+		// An empty expected_error means this vector asserts Update
+		// SUCCEEDS (step 4 prompt Part B6: "root rotation from
+		// ECDSA-only to hybrid, accept when both old and new
+		// requirements are met").
+		if err != nil {
+			return fmt.Errorf("%s: Update error = %w, want success", v.Name, err)
+		}
+		return nil
+	}
 	want := trustErrorsByName[v.ExpectedError]
 	if want == nil {
 		return fmt.Errorf("%s: unknown expected_error %q", v.Name, v.ExpectedError)
@@ -1071,7 +1085,7 @@ func generateAll(dir string) error {
 		}
 		v := vector("non_p384_key", "Root metadata contains a key whose actual curve is P-256 even though it declares keytype ecdsa-p384.", testvectors.KindTrustLoad)
 		v.RootMetadataB64 = b64(env)
-		v.ExpectedError = "ErrUnsupportedKeyType"
+		v.ExpectedError = "ErrKeytypeSPKIMismatch"
 		if err := saveChecked(dir, v); err != nil {
 			return err
 		}
@@ -1248,6 +1262,10 @@ func generateAll(dir string) error {
 		if err := saveChecked(dir, v); err != nil {
 			return err
 		}
+	}
+
+	if err := generateHybridVectors(dir); err != nil {
+		return err
 	}
 
 	return writeVectorsReadme(dir)

@@ -16,8 +16,9 @@ type keyEntry struct {
 }
 
 type rolePayload struct {
-	KeyIDs    []string `json:"keyids"`
-	Threshold int      `json:"threshold"`
+	KeyIDs          []string `json:"keyids"`
+	Threshold       int      `json:"threshold"`
+	RequireKeyTypes []string `json:"require_keytypes,omitempty"`
 }
 
 type rolesPayload struct {
@@ -74,4 +75,12 @@ func roleOf(keys []*testKey, threshold int) rolePayload {
 		ids = append(ids, k.id)
 	}
 	return rolePayload{KeyIDs: ids, Threshold: threshold}
+}
+
+// roleWithKeyTypes is roleOf plus an explicit require_keytypes list (step
+// 4 prompt Part B3), e.g. ["ecdsa-p384", "mldsa-87"] for a hybrid role.
+func roleWithKeyTypes(keys []*testKey, threshold int, requireKeyTypes ...string) rolePayload {
+	r := roleOf(keys, threshold)
+	r.RequireKeyTypes = requireKeyTypes
+	return r
 }
