@@ -1,10 +1,12 @@
 package trust_test
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/asn1"
 	"encoding/base64"
 	"errors"
 	"testing"
@@ -328,23 +330,19 @@ func TestLoadInitialRoot_KeyBadDER(t *testing.T) {
 	}
 }
 
-// TestLoadInitialRoot_NonMinimalLengthSPKIRejected is step-04a-review.md
-// R4A-2's required test: a hand-built non-canonical DER encoding of a real
-// ECDSA P-384 key, re-encoding the outer SubjectPublicKeyInfo SEQUENCE's
-// length in long form (0x81 0xNN) where the canonical encoding
-// crypto/x509.MarshalPKIXPublicKey always produces uses short form. This is
-// the classic BER/DER confusion R4A-2 is concerned with (two byte-distinct
-// encodings of the same key deriving two different key IDs). No such
-// encoding was found that this package's parser (encoding/asn1, used both
-// directly and via crypto/x509.ParsePKIXPublicKey) actually accepts: Go's
-// asn1 decoder enforces minimal length encoding and rejects this one
-// outright ("asn1: structure error: non-minimal length"), so it is
+// TestLoadInitialRoot_NonMinimalLengthSPKIRejected tries the most classic
+// BER/DER confusion for step-04a-review.md R4A-2: re-encoding the outer
+// SubjectPublicKeyInfo SEQUENCE's length in long form (0x81 0xNN) where the
+// canonical encoding crypto/x509.MarshalPKIXPublicKey always produces uses
+// short form. This particular encoding is NOT accepted by this package's
+// parser: Go's asn1 decoder enforces minimal length encoding and rejects
+// it outright ("asn1: structure error: non-minimal length"), so it is
 // rejected as ErrMalformedMetadata at the structural-parsing stage, never
-// reaching (and therefore never needing) the canonical re-encoding
-// equality check in parseTrustedKey. That check (ErrNonCanonicalSPKI)
-// remains a defensive invariant: every attempt to construct an alternate
-// DER encoding this parser accepts failed at an earlier, independent
-// layer, consistent with ADR 0022's note that Go's DER parsing is strict.
+// reaching the canonical re-encoding equality check in parseTrustedKey.
+// (A different non-canonical encoding — trailing content inside the
+// AlgorithmIdentifier SEQUENCE — IS accepted by this parser; see
+// TestLoadInitialRoot_NonCanonicalSPKIWithTrailingAlgorithmIdentifierContentRejected
+// below, which is what ErrNonCanonicalSPKI actually catches in practice.)
 func TestLoadInitialRoot_NonMinimalLengthSPKIRejected(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	r1, r2 := mustKey(t), mustKey(t)
@@ -376,5 +374,100 @@ func TestLoadInitialRoot_NonMinimalLengthSPKIRejected(t *testing.T) {
 	env := signEnvelope(trust.RootPayloadType, []byte(payload), r1, r2)
 	if _, err := trust.LoadInitialRoot(env); !errors.Is(err, trust.ErrMalformedMetadata) {
 		t.Fatalf("err = %v, want ErrMalformedMetadata (non-minimal length rejected by encoding/asn1 itself)", err)
+	}
+}
+
+// injectTrailingElementInAlgorithmIdentifier splices extra (a complete DER
+// TLV, e.g. a NULL) into der's AlgorithmIdentifier SEQUENCE, after its
+// existing content. This is a REAL non-canonical encoding this package's
+// own parser accepts (step-04a-review.md R4A-2's "if one exists" case,
+// found while writing this test): encoding/asn1's struct-based decoding
+// only checks for trailing content after the OUTERMOST value it is asked
+// to parse; it does not check for trailing content left over inside a
+// nested SEQUENCE once every field of the Go struct describing it
+// (pkixAlgorithmIdentifier: Algorithm, optional Parameters) has already
+// been consumed. For ecdsa-p384, both fields are always populated (the OID
+// and the P-384 curve OID), so a third, extra element here is silently
+// ignored by both encoding/asn1 directly and by
+// crypto/x509.ParsePKIXPublicKey — the decoded key is identical, but the
+// bytes are not. (The equivalent injection for mldsa-87, which was also
+// tried, does not reach this far: a trailing element there is captured by
+// the optional Parameters field instead, which the pre-existing "mldsa-87
+// key has non-absent AlgorithmIdentifier parameters" check already
+// rejects — see ADR 0022.)
+func injectTrailingElementInAlgorithmIdentifier(t *testing.T, der []byte, extra []byte) []byte {
+	t.Helper()
+	var outer struct {
+		Algorithm asn1.RawValue
+		PublicKey asn1.RawValue
+	}
+	if _, err := asn1.Unmarshal(der, &outer); err != nil {
+		t.Fatalf("unmarshal outer SPKI: %v", err)
+	}
+	algFull := outer.Algorithm.FullBytes
+	if algFull[0] != 0x30 {
+		t.Fatalf("AlgorithmIdentifier is not a SEQUENCE")
+	}
+	headerLen := 2
+	if algFull[1] >= 0x80 {
+		headerLen = 2 + int(algFull[1]&^0x80)
+	}
+	newContent := append(append([]byte{}, algFull[headerLen:]...), extra...)
+	newAlg, err := asn1.Marshal(asn1.RawValue{Tag: 16, IsCompound: true, Bytes: newContent})
+	if err != nil {
+		t.Fatalf("marshal spliced AlgorithmIdentifier: %v", err)
+	}
+	newOuterContent := append(append([]byte{}, newAlg...), outer.PublicKey.FullBytes...)
+	newDER, err := asn1.Marshal(asn1.RawValue{Tag: 16, IsCompound: true, Bytes: newOuterContent})
+	if err != nil {
+		t.Fatalf("marshal spliced SPKI: %v", err)
+	}
+	return newDER
+}
+
+// TestLoadInitialRoot_NonCanonicalSPKIWithTrailingAlgorithmIdentifierContentRejected
+// is step-04a-review.md R4A-2's "if one exists" case for ecdsa-p384: a
+// real, hand-built non-canonical DER that this package's own parser
+// (encoding/asn1, directly and via crypto/x509.ParsePKIXPublicKey) accepts
+// and decodes to the SAME key as the original canonical DER, proving
+// ErrNonCanonicalSPKI's check is not merely a defensive invariant for
+// ecdsa-p384 — it closes a real gap (two different key IDs for the same
+// key) that existed before this check was added.
+func TestLoadInitialRoot_NonCanonicalSPKIWithTrailingAlgorithmIdentifierContentRejected(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	r1, r2 := mustKey(t), mustKey(t)
+	tk := mustKey(t)
+
+	canonical, err := base64.StdEncoding.DecodeString(tk.publicB64())
+	if err != nil {
+		t.Fatalf("decode canonical DER: %v", err)
+	}
+	nonCanonical := injectTrailingElementInAlgorithmIdentifier(t, canonical, []byte{0x05, 0x00}) // DER NULL
+
+	// Confirm the premise directly: crypto/x509 accepts nonCanonical and
+	// decodes it to the identical key canonical does, yet the bytes
+	// differ.
+	pub, err := x509.ParsePKIXPublicKey(nonCanonical)
+	if err != nil {
+		t.Fatalf("premise violated: crypto/x509 rejected the spliced DER: %v", err)
+	}
+	recanon, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil || !bytes.Equal(recanon, canonical) {
+		t.Fatalf("premise violated: re-marshaling the spliced DER's decoded key did not reproduce the original canonical DER")
+	}
+	if bytes.Equal(nonCanonical, canonical) {
+		t.Fatalf("premise violated: splice produced byte-identical DER")
+	}
+
+	nonCanonicalID := trust.DeriveKeyIDFromDER(nonCanonical)
+	nonCanonicalB64 := base64.StdEncoding.EncodeToString(nonCanonical)
+	payload := `{"schema":"relay.root.v1","version":1,"expires":"` + now.Add(24*time.Hour).Format(time.RFC3339) +
+		`","keys":{"` + string(nonCanonicalID) + `":{"keytype":"ecdsa-p384","public_key_der_b64":"` + nonCanonicalB64 + `"}},` +
+		`"roles":{"root":{"keyids":["` + r1.id + `","` + r2.id + `"],"threshold":2,"require_keytypes":["ecdsa-p384"]},` +
+		`"targets":{"keyids":["` + string(nonCanonicalID) + `"],"threshold":1,"require_keytypes":["ecdsa-p384"]},` +
+		`"log":{"keyids":["` + r1.id + `"],"threshold":1,"require_keytypes":["ecdsa-p384"]}}}`
+	env := signEnvelope(trust.RootPayloadType, []byte(payload), r1, r2)
+	if _, err := trust.LoadInitialRoot(env); !errors.Is(err, trust.ErrNonCanonicalSPKI) {
+		t.Fatalf("err = %v, want ErrNonCanonicalSPKI", err)
 	}
 }

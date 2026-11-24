@@ -3,8 +3,10 @@ package trust
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/mldsa"
 	"crypto/rand"
 	"crypto/sha512"
+	"crypto/x509"
 	"errors"
 	"testing"
 
@@ -143,6 +145,47 @@ func TestTargetsVerifier_ThresholdNotMetWrapsMLDSAError(t *testing.T) {
 	err := v.Verify(env)
 	if !errors.Is(err, ErrThresholdNotMet) || !errors.Is(err, ErrMLDSAUnavailable) {
 		t.Fatalf("err = %v, want both ErrThresholdNotMet and ErrMLDSAUnavailable", err)
+	}
+}
+
+// TestRequireCanonicalECDSASPKI_RejectsMismatch and
+// TestRequireCanonicalMLDSA87SPKI_RejectsMismatch directly exercise
+// requireCanonicalECDSASPKI/requireCanonicalMLDSA87SPKI's rejection branch
+// (step-04a-review.md R4A-2) with a deliberately mismatched der that could
+// never actually reach these functions through parseTrustedKey's public
+// entry point: der there is always the exact bytes rawKey/pub were decoded
+// from in the same call. See those functions' doc comments for why no
+// such mismatch was found reachable from LoadInitialRoot/Update, and
+// keytype.go's ADR-0022-referenced discussion.
+func TestRequireCanonicalECDSASPKI_RejectsMismatch(t *testing.T) {
+	_, priv := genTestKey(t)
+	canonical, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := requireCanonicalECDSASPKI(&priv.PublicKey, canonical); err != nil {
+		t.Fatalf("canonical der rejected: %v", err)
+	}
+	mismatched := append([]byte(nil), canonical...)
+	mismatched = append(mismatched, 0x00) // trailing byte: same key, different (non-canonical) der
+	if err := requireCanonicalECDSASPKI(&priv.PublicKey, mismatched); !errors.Is(err, ErrNonCanonicalSPKI) {
+		t.Fatalf("err = %v, want ErrNonCanonicalSPKI", err)
+	}
+}
+
+func TestRequireCanonicalMLDSA87SPKI_RejectsMismatch(t *testing.T) {
+	rawKey := make([]byte, mldsa.MLDSA87PublicKeySize)
+	canonical, err := marshalMLDSA87SPKI(rawKey)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := requireCanonicalMLDSA87SPKI(rawKey, canonical); err != nil {
+		t.Fatalf("canonical der rejected: %v", err)
+	}
+	mismatched := append([]byte(nil), canonical...)
+	mismatched[len(mismatched)-1] ^= 0xFF
+	if err := requireCanonicalMLDSA87SPKI(rawKey, mismatched); !errors.Is(err, ErrNonCanonicalSPKI) {
+		t.Fatalf("err = %v, want ErrNonCanonicalSPKI", err)
 	}
 }
 

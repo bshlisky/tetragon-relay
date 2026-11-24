@@ -110,6 +110,39 @@ func marshalMLDSA87SPKI(rawKey []byte) ([]byte, error) {
 	})
 }
 
+// requireCanonicalECDSASPKI returns ErrNonCanonicalSPKI unless der is
+// exactly x509.MarshalPKIXPublicKey(pub) (step-04a-review.md R4A-2).
+// Go's x509.MarshalPKIXPublicKey always produces the same canonical DER
+// for a given *ecdsa.PublicKey (RFC 5480's AlgorithmIdentifier.parameters
+// is the curve OID; there is no other encoding freedom in that shape), and
+// encoding/asn1 enforces minimal length/integer encoding (confirmed by
+// TestLoadInitialRoot_NonMinimalLengthSPKIRejected), so no der this
+// package's own parser accepts has ever been found to fail this check —
+// it is a defensive invariant, exercised directly by
+// TestRequireCanonicalECDSASPKI_RejectsMismatch with a hand-crafted,
+// deliberately mismatched der (not reachable via parseTrustedKey's public
+// entry point).
+func requireCanonicalECDSASPKI(pub *ecdsa.PublicKey, der []byte) error {
+	canonical, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil || !bytes.Equal(canonical, der) {
+		return fmt.Errorf("%w: keytype %q SPKI is not the canonical encoding of its own key", ErrNonCanonicalSPKI, KeyTypeECDSAP384)
+	}
+	return nil
+}
+
+// requireCanonicalMLDSA87SPKI returns ErrNonCanonicalSPKI unless der is
+// exactly marshalMLDSA87SPKI(rawKey). See requireCanonicalECDSASPKI's doc
+// comment: the same "defensive invariant, not reachable in practice"
+// reasoning applies, exercised directly by
+// TestRequireCanonicalMLDSA87SPKI_RejectsMismatch.
+func requireCanonicalMLDSA87SPKI(rawKey, der []byte) error {
+	canonical, err := marshalMLDSA87SPKI(rawKey)
+	if err != nil || !bytes.Equal(canonical, der) {
+		return fmt.Errorf("%w: keytype %q SPKI is not the canonical encoding of its own key", ErrNonCanonicalSPKI, KeyTypeMLDSA87)
+	}
+	return nil
+}
+
 // parseTrustedKey decodes der (a SubjectPublicKeyInfo) as declaredType and
 // validates that its algorithm OID actually matches that declaration (step
 // 4 prompt Part B1: "The keytype must match the SPKI's algorithm OID; a
@@ -146,20 +179,13 @@ func parseTrustedKey(declaredType KeyType, der []byte) (TrustedKey, error) {
 			return TrustedKey{}, fmt.Errorf("%w: keytype %q is not ECDSA P-384", ErrKeytypeSPKIMismatch, declaredType)
 		}
 		// step-04a-review.md R4A-2: re-encode and require byte
-		// equality with the provided DER, so two distinct encodings
-		// of the same key can never derive two different key IDs
-		// (DeriveKeyIDFromDER hashes the DER bytes as given) and
-		// slip past the A6 role-disjointness check by counting as
-		// "different" keys. Go's x509.MarshalPKIXPublicKey always
-		// produces the same canonical DER for a given *ecdsa.PublicKey
-		// (RFC 5480's AlgorithmIdentifier.parameters is the curve
-		// OID; there is no other encoding freedom in that shape), so
-		// this is a defensive invariant rather than a check reachable
-		// by any input this parser's own asn1.Unmarshal above
-		// accepts (see ADR 0022/R4A-2 discussion; a non-canonical
-		// fixture could not be constructed that passed parsing).
-		if canonical, err := x509.MarshalPKIXPublicKey(pub); err != nil || !bytes.Equal(canonical, der) {
-			return TrustedKey{}, fmt.Errorf("%w: keytype %q SPKI is not the canonical encoding of its own key", ErrNonCanonicalSPKI, declaredType)
+		// equality with the provided DER (requireCanonicalECDSASPKI),
+		// so two distinct encodings of the same key can never derive
+		// two different key IDs (DeriveKeyIDFromDER hashes the DER
+		// bytes as given) and slip past the A6 role-disjointness
+		// check by counting as "different" keys.
+		if err := requireCanonicalECDSASPKI(pub, der); err != nil {
+			return TrustedKey{}, err
 		}
 		return TrustedKey{Type: KeyTypeECDSAP384, ecdsa: pub}, nil
 
@@ -176,15 +202,15 @@ func parseTrustedKey(declaredType KeyType, der []byte) (TrustedKey, error) {
 			return TrustedKey{}, fmt.Errorf("%w: mldsa-87 public key is %d bytes, want %d", ErrKeytypeSPKIMismatch, len(rawKey), mldsa.MLDSA87PublicKeySize)
 		}
 		// step-04a-review.md R4A-2: re-encode via an explicitly built
-		// SPKI (RFC 9881's OID, absent parameters — the exact shape
-		// parseSPKIAlgorithm above already requires) and require
-		// byte equality with the provided DER. Built by hand rather
-		// than via crypto/x509.MarshalPKIXPublicKey, which for an
-		// ML-DSA key calls crypto/mldsa internally (ADR 0021) and
-		// would reintroduce the FIPS-build dependency parseTrustedKey
+		// SPKI (requireCanonicalMLDSA87SPKI; RFC 9881's OID, absent
+		// parameters) and require byte equality with the provided
+		// DER. Built by hand rather than via
+		// crypto/x509.MarshalPKIXPublicKey, which for an ML-DSA key
+		// calls crypto/mldsa internally (ADR 0021) and would
+		// reintroduce the FIPS-build dependency parseTrustedKey
 		// deliberately avoids for mldsa-87 (TrustedKey's doc comment).
-		if canonical, err := marshalMLDSA87SPKI(rawKey); err != nil || !bytes.Equal(canonical, der) {
-			return TrustedKey{}, fmt.Errorf("%w: keytype %q SPKI is not the canonical encoding of its own key", ErrNonCanonicalSPKI, declaredType)
+		if err := requireCanonicalMLDSA87SPKI(rawKey, der); err != nil {
+			return TrustedKey{}, err
 		}
 		return TrustedKey{Type: KeyTypeMLDSA87, mldsa: rawKey}, nil
 
