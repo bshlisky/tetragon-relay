@@ -266,11 +266,14 @@ func (s *Store) commitLocked(next indexPayload) error {
 	}
 	s.committed = next
 	if _, err := s.counter.Increment(); err != nil {
-		// The index on disk already reflects next.Generation; a crash
-		// now is exactly Part C5's recovery window, handled by the
-		// next Open. Report the failure so the caller knows this
-		// Increment itself did not take effect yet.
-		return fmt.Errorf("%w: %w", ErrCounterUnavailable, err)
+		// step-04b-review.md R4B-5: the index on disk already reflects
+		// next.Generation (s.committed above is already updated too)
+		// — this is exactly Part C5's accepted-once recovery window,
+		// completed by the next Open. Report this distinctly from
+		// ErrCounterUnavailable (which means the write itself could
+		// not proceed) so a caller can tell "committed, counter will
+		// catch up" apart from "nothing happened."
+		return fmt.Errorf("%w: %w", ErrCommittedCounterLag, err)
 	}
 	referenced := map[string]struct{}{}
 	for _, e := range next.LKG {

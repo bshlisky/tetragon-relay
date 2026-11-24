@@ -375,8 +375,12 @@ func TestCommitLocked_CounterIncrementFailsAfterDurableWrite(t *testing.T) {
 	defer func() { _ = s.Close() }()
 
 	s.counter = &failingCounter{err: errCounterBroken}
-	if err := s.RecordEpoch("prod-db", 5); !errors.Is(err, ErrCounterUnavailable) {
-		t.Fatalf("err = %v, want ErrCounterUnavailable", err)
+	// step-04b-review.md R4B-5: this specific failure mode (index write
+	// durable, counter increment failed right after) is now the
+	// distinct ErrCommittedCounterLag, not ErrCounterUnavailable (which
+	// means the write itself could not proceed at all).
+	if err := s.RecordEpoch("prod-db", 5); !errors.Is(err, ErrCommittedCounterLag) {
+		t.Fatalf("err = %v, want ErrCommittedCounterLag", err)
 	}
 	// The index write itself must still have taken effect (Part C5's
 	// crash-window semantics): the in-memory committed state already

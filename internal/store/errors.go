@@ -45,6 +45,21 @@ var (
 	// ErrClosed is returned by every Store method after Close.
 	ErrClosed = errors.New("store: closed")
 
+	// ErrCommittedCounterLag is returned by RecordEpoch, Put,
+	// PersistTrustRoot and RecordMonitorNames when the index write
+	// itself succeeded durably (s.committed already reflects it) but
+	// the mirrored MonotonicCounter's Increment call failed immediately
+	// after (step-04b-review.md R4B-5). This is NOT ErrTampered and NOT
+	// "nothing happened": the write is committed. index.generation is
+	// now exactly counter+1, which Part C5's Open-time recovery window
+	// (loadAndValidateIndex) accepts exactly once and then completes
+	// the increment on its own. Callers (internal/apply, internal/
+	// agent) must treat a method returning this error as the operation
+	// having succeeded for Tetragon-state purposes (never roll back or
+	// re-apply anything because of it), enter DEGRADED, and arrange for
+	// the store to be closed and re-opened so the counter catches up.
+	ErrCommittedCounterLag = errors.New("store: write committed but monotonic counter increment failed (completes on next open)")
+
 	// ErrRootDowngrade is returned by MaybeAdoptRPMRoot when the
 	// candidate RPM-shipped root's version is not strictly forward of
 	// the persisted root (Part C7: a lower or equal RPM root is ignored
