@@ -116,12 +116,25 @@ func TestRunHealthWindow_Surge(t *testing.T) {
 	}
 }
 
+// TestRunHealthWindow_GetEventsError's fake (inProcessClient.GetEvents)
+// sends the error to errc and then closes both errc and events together
+// (mirroring internal/tetra.GetEvents' own defer close(events)/close(errc)
+// pattern), well before the 200ms window ends. Which of the two closed/
+// ready channels select picks first is a genuine, harmless race (the same
+// one TestRunHealthWindow_ErrorBeforeDeadline_Fails documents): either the
+// errc branch (err != nil, windowCtx still open -> reasonHealthNotServing)
+// or the events branch (closed, windowCtx still open -> an early,
+// otherwise-unexplained stream close -> reasonEventStreamClosed) is
+// correct here, since the window is nowhere near its own deadline in
+// either case. Only these two named reasons are accepted — not "any
+// error" — so a real regression that produced some other reason, or
+// ok=true, would still fail this test.
 func TestRunHealthWindow_GetEventsError(t *testing.T) {
 	c := &inProcessClient{healthy: true, getEventsErr: errors.New("stream broke")}
 	reach := &FakeReachabilityChecker{ReachableValue: true}
 	reason, ok := runHealthWindow(context.Background(), c, reach, HealthWindowConfig{Window: 200 * time.Millisecond, PollInterval: 20 * time.Millisecond}, nil)
-	if ok || reason != reasonHealthNotServing {
-		t.Fatalf("reason=%s ok=%v, want reasonHealthNotServing/false", reason, ok)
+	if ok || (reason != reasonHealthNotServing && reason != reasonEventStreamClosed) {
+		t.Fatalf("reason=%s ok=%v, want false with reasonHealthNotServing or reasonEventStreamClosed", reason, ok)
 	}
 }
 

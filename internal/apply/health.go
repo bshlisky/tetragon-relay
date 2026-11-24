@@ -95,6 +95,24 @@ const (
 // passed, or (reason, false) on the first failure condition observed
 // (health window returns as soon as a failure is detected, it does not
 // wait out the rest of the window once failed).
+// pendingErrIsTimeout does a non-blocking check of errc for an
+// already-available value and reports whether it is (or wraps)
+// tetra.ErrTimeout. It exists for the events-closed branch of
+// runHealthWindow's select: internal/tetra.GetEvents closes both events
+// and errc together, so select can land on events' closed case before
+// ever reading an already-buffered tetra.ErrTimeout value out of errc,
+// even though windowCtx.Err() has not been observed non-nil yet (the same
+// race documented on the errc branch itself). A nil or not-yet-ready errc
+// (ok == false, including "nothing sent") is not a timeout.
+func pendingErrIsTimeout(errc <-chan error) bool {
+	select {
+	case err, ok := <-errc:
+		return ok && errors.Is(err, tetra.ErrTimeout)
+	default:
+		return false
+	}
+}
+
 func runHealthWindow(
 	ctx context.Context,
 	client TetragonClient,
@@ -162,13 +180,19 @@ func runHealthWindow(
 				// "disable this case and keep looping" branch left to
 				// reach (unlike errc below, which tolerates a closed
 				// channel by itself).
-				if windowCtx.Err() != nil {
+				if windowCtx.Err() != nil || pendingErrIsTimeout(errc) {
 					// step-03a-review.md R3-4: events closing races
 					// windowCtx.Done() at the window's own deadline
 					// (internal/tetra.GetEvents closes it, without
 					// sending, exactly when ctx ends) — handle it
 					// identically to that branch rather than looping
 					// back around only to pick Done() up next time.
+					// pendingErrIsTimeout additionally covers the same
+					// race as errc's own branch below: both channels
+					// close together, and select can land on this case
+					// before ever reading errc's already-buffered
+					// tetra.ErrTimeout value, even though
+					// windowCtx.Err() has not flipped non-nil yet.
 					if !everReachable {
 						return reasonControlPlaneDown, false
 					}
