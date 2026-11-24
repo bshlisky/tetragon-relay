@@ -275,21 +275,24 @@ func TestVerifySELinuxLabel(t *testing.T) {
 		}
 	})
 
-	t.Run("disabled_selinux_required_false", func(t *testing.T) {
+	t.Run("disabled_selinux_allowed", func(t *testing.T) {
 		getxattrFunc = func(_, _ string, _ []byte) (int, error) {
 			return 0, unix.ENODATA
 		}
-		if err := verifySELinuxLabel(Config{SocketPath: "/fake", SELinuxRequired: false}); err != nil {
-			t.Fatalf("disabled SELinux with selinux_required=false rejected: %v", err)
+		if err := verifySELinuxLabel(Config{SocketPath: "/fake", AllowSELinuxDisabled: true}); err != nil {
+			t.Fatalf("disabled SELinux with allow_selinux_disabled=true rejected: %v", err)
 		}
 	})
 
-	t.Run("disabled_selinux_required_true", func(t *testing.T) {
+	// step-03b-review.md R3B-1: the zero-value Config (AllowSELinuxDisabled
+	// defaults to false) must refuse a host with no SELinux xattr, not
+	// silently allow it.
+	t.Run("disabled_selinux_zero_value_refuses", func(t *testing.T) {
 		getxattrFunc = func(_, _ string, _ []byte) (int, error) {
 			return 0, unix.ENOTSUP
 		}
-		if err := verifySELinuxLabel(Config{SocketPath: "/fake", SELinuxRequired: true}); err == nil {
-			t.Fatal("disabled SELinux with selinux_required=true accepted")
+		if err := verifySELinuxLabel(Config{SocketPath: "/fake"}); err == nil {
+			t.Fatal("disabled SELinux with the zero-value Config (allow_selinux_disabled=false) was accepted")
 		}
 	})
 
@@ -297,7 +300,7 @@ func TestVerifySELinuxLabel(t *testing.T) {
 		getxattrFunc = func(_, _ string, _ []byte) (int, error) {
 			return 0, unix.EACCES
 		}
-		if err := verifySELinuxLabel(Config{SocketPath: "/fake", SELinuxRequired: false}); err == nil {
+		if err := verifySELinuxLabel(Config{SocketPath: "/fake", AllowSELinuxDisabled: true}); err == nil {
 			t.Fatal("an unrelated xattr read error was treated as disabled SELinux")
 		}
 	})
@@ -429,7 +432,7 @@ func TestConnectAndVerifyPeer(t *testing.T) {
 		}
 	}()
 
-	cfg := Config{SocketPath: sock}
+	cfg := Config{SocketPath: sock, AllowSELinuxDisabled: true}
 
 	t.Run("success", func(t *testing.T) {
 		peerCredFunc = func(*net.UnixConn) (uint32, int32, error) { return 0, 42, nil }
@@ -502,9 +505,9 @@ func TestVerifyPeerSELinux(t *testing.T) {
 		}
 	})
 
-	t.Run("disabled_selinux_required_false", func(t *testing.T) {
+	t.Run("disabled_selinux_allowed", func(t *testing.T) {
 		getsockoptPeerSecFunc = func(*net.UnixConn) (string, error) { return "", unix.ENOPROTOOPT }
-		active, err := verifyPeerSELinux(Config{SELinuxRequired: false}, conn)
+		active, err := verifyPeerSELinux(Config{AllowSELinuxDisabled: true}, conn)
 		if err != nil || active {
 			t.Fatalf("active=%v err=%v, want false/nil", active, err)
 		}
@@ -513,26 +516,54 @@ func TestVerifyPeerSELinux(t *testing.T) {
 	// AppArmor (the default LSM on GitHub-hosted ubuntu-24.04 runners)
 	// implements SO_PEERSEC too, returning its own bare label (no
 	// colons) instead of failing with ENOPROTOOPT — this must be treated
-	// like disabled SELinux, not a type mismatch.
+	// like disabled SELinux, not a type mismatch, as long as host facts
+	// do not positively assert SELinux is enforcing/permissive.
 	t.Run("apparmor_bare_label_treated_as_disabled", func(t *testing.T) {
 		getsockoptPeerSecFunc = func(*net.UnixConn) (string, error) { return "unconfined", nil }
-		active, err := verifyPeerSELinux(Config{SELinuxRequired: false}, conn)
+		active, err := verifyPeerSELinux(Config{AllowSELinuxDisabled: true}, conn)
 		if err != nil || active {
 			t.Fatalf("active=%v err=%v, want false/nil", active, err)
 		}
 	})
 
-	t.Run("apparmor_bare_label_required_true_fails_closed", func(t *testing.T) {
+	t.Run("apparmor_bare_label_allow_disabled_false_fails_closed", func(t *testing.T) {
 		getsockoptPeerSecFunc = func(*net.UnixConn) (string, error) { return "unconfined", nil }
-		if _, err := verifyPeerSELinux(Config{SELinuxRequired: true}, conn); err == nil {
-			t.Fatal("an unparseable (non-SELinux) label with selinux_required=true was accepted")
+		if _, err := verifyPeerSELinux(Config{}, conn); err == nil {
+			t.Fatal("an unparseable (non-SELinux) label with the zero-value Config (allow_selinux_disabled=false) was accepted")
 		}
 	})
 
-	t.Run("disabled_selinux_required_true", func(t *testing.T) {
+	// step-03b-review.md R3B-1: the zero-value Config must refuse a host
+	// reporting SELinux disabled (fail-closed by default), not allow it.
+	t.Run("disabled_selinux_zero_value_refuses", func(t *testing.T) {
 		getsockoptPeerSecFunc = func(*net.UnixConn) (string, error) { return "", unix.ENOPROTOOPT }
-		if _, err := verifyPeerSELinux(Config{SELinuxRequired: true}, conn); err == nil {
-			t.Fatal("disabled SELinux with selinux_required=true accepted")
+		if _, err := verifyPeerSELinux(Config{}, conn); err == nil {
+			t.Fatal("disabled SELinux with the zero-value Config (allow_selinux_disabled=false) was accepted")
+		}
+	})
+
+	// step-03b-review.md R3B-1: host facts reporting SELinux
+	// enforcing/permissive make an AppArmor-style bare label a hard
+	// failure, even with AllowSELinuxDisabled: true.
+	t.Run("host_facts_enforcing_bare_label_fails_even_if_allowed", func(t *testing.T) {
+		getsockoptPeerSecFunc = func(*net.UnixConn) (string, error) { return "unconfined", nil }
+		if _, err := verifyPeerSELinux(Config{AllowSELinuxDisabled: true, HostSELinuxMode: HostSELinuxEnforcing}, conn); err == nil {
+			t.Fatal("an enforcing host with an unparseable peer label was accepted")
+		}
+	})
+
+	t.Run("host_facts_permissive_unavailable_fails_even_if_allowed", func(t *testing.T) {
+		getsockoptPeerSecFunc = func(*net.UnixConn) (string, error) { return "", unix.ENOPROTOOPT }
+		if _, err := verifyPeerSELinux(Config{AllowSELinuxDisabled: true, HostSELinuxMode: HostSELinuxPermissive}, conn); err == nil {
+			t.Fatal("a permissive host with SO_PEERSEC unavailable was accepted")
+		}
+	})
+
+	t.Run("host_facts_disabled_bare_label_still_allowed", func(t *testing.T) {
+		getsockoptPeerSecFunc = func(*net.UnixConn) (string, error) { return "unconfined", nil }
+		active, err := verifyPeerSELinux(Config{AllowSELinuxDisabled: true, HostSELinuxMode: "disabled"}, conn)
+		if err != nil || active {
+			t.Fatalf("active=%v err=%v, want false/nil", active, err)
 		}
 	})
 
@@ -575,7 +606,7 @@ func TestVerifyPeerCredAndTetragon(t *testing.T) {
 	t.Run("cgroup_available_and_passes", func(t *testing.T) {
 		peerCredFunc = func(*net.UnixConn) (uint32, int32, error) { return 0, 42, nil }
 		stubPeerChecks(t, "", unix.ENOPROTOOPT, cgroupCheckResult{Available: true, Passed: true}, nil)
-		if err := verifyPeerCredAndTetragon(Config{}, conn); err != nil {
+		if err := verifyPeerCredAndTetragon(Config{AllowSELinuxDisabled: true}, conn); err != nil {
 			t.Fatalf("correct peer rejected: %v", err)
 		}
 	})
@@ -583,7 +614,7 @@ func TestVerifyPeerCredAndTetragon(t *testing.T) {
 	t.Run("cgroup_available_and_fails", func(t *testing.T) {
 		peerCredFunc = func(*net.UnixConn) (uint32, int32, error) { return 0, 42, nil }
 		stubPeerChecks(t, "", unix.ENOPROTOOPT, cgroupCheckResult{Available: true, Passed: false}, nil)
-		if err := verifyPeerCredAndTetragon(Config{}, conn); err == nil {
+		if err := verifyPeerCredAndTetragon(Config{AllowSELinuxDisabled: true}, conn); err == nil {
 			t.Fatal("peer not in the expected cgroup was accepted")
 		}
 	})
@@ -591,7 +622,7 @@ func TestVerifyPeerCredAndTetragon(t *testing.T) {
 	t.Run("cgroup_check_error", func(t *testing.T) {
 		peerCredFunc = func(*net.UnixConn) (uint32, int32, error) { return 0, 42, nil }
 		stubPeerChecks(t, "", unix.ENOPROTOOPT, cgroupCheckResult{}, errors.New("statfs failed"))
-		if err := verifyPeerCredAndTetragon(Config{}, conn); err == nil {
+		if err := verifyPeerCredAndTetragon(Config{AllowSELinuxDisabled: true}, conn); err == nil {
 			t.Fatal("a cgroup check error was not propagated")
 		}
 	})
@@ -607,8 +638,19 @@ func TestVerifyPeerCredAndTetragon(t *testing.T) {
 	t.Run("cgroup_unavailable_selinux_inactive_fails_closed", func(t *testing.T) {
 		peerCredFunc = func(*net.UnixConn) (uint32, int32, error) { return 0, 42, nil }
 		stubPeerChecks(t, "", unix.ENOPROTOOPT, cgroupCheckResult{Available: false}, nil)
-		if err := verifyPeerCredAndTetragon(Config{}, conn); err == nil {
+		if err := verifyPeerCredAndTetragon(Config{AllowSELinuxDisabled: true}, conn); err == nil {
 			t.Fatal("a peer with neither cgroup nor SELinux verification available was accepted")
+		}
+	})
+
+	// step-03b-review.md R3B-1: the zero-value Config (allow_selinux_disabled=false)
+	// must refuse even when the cgroup check alone would have passed,
+	// since SELinux being unexpectedly disabled is itself a failure now.
+	t.Run("zero_value_refuses_even_if_cgroup_passes", func(t *testing.T) {
+		peerCredFunc = func(*net.UnixConn) (uint32, int32, error) { return 0, 42, nil }
+		stubPeerChecks(t, "", unix.ENOPROTOOPT, cgroupCheckResult{Available: true, Passed: true}, nil)
+		if err := verifyPeerCredAndTetragon(Config{}, conn); err == nil {
+			t.Fatal("disabled SELinux with the zero-value Config (allow_selinux_disabled=false) was accepted")
 		}
 	})
 }
@@ -661,8 +703,9 @@ func TestDial_RealSocketEndToEnd(t *testing.T) {
 	}
 
 	cfg := Config{
-		SocketPath:     sock,
-		RelayGroupName: g.Name,
+		SocketPath:           sock,
+		RelayGroupName:       g.Name,
+		AllowSELinuxDisabled: true,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

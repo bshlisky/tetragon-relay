@@ -98,7 +98,12 @@ context and rejected as a type mismatch, failing every integration test.
 
 `verifyPeerSELinux` (`internal/tetra/dial_linux.go`) now treats a successfully-returned
 label that does not parse as an SELinux context (fewer than 3 `:`-separated fields) the
-same as SELinux being unavailable (the `cfg.SELinuxRequired` disabled-SELinux fallback),
-rather than as a type mismatch. This does not weaken the check on a real SELinux-enforcing
-RHEL 9 host (architecture doc 9.2): a genuine SELinux context always has the
-`user:role:type:level` shape, so this path is never reached there.
+same as SELinux being unavailable (the `cfg.AllowSELinuxDisabled` disabled-SELinux
+fallback), rather than as a type mismatch. This does not weaken the check on a real
+SELinux-enforcing RHEL 9 host (architecture doc 9.2): a genuine SELinux context always has
+the `user:role:type:level` shape, so this path is never reached there. (Addendum,
+step-03b-review.md R3B-1: this field was later renamed from `SELinuxRequired` to
+`AllowSELinuxDisabled` and inverted so its zero value is fail-closed; see ADR text updated
+alongside `docs/reports/step-04a.md`. The same amendment also makes this fallback itself
+conditional on host facts, via `Config.HostSELinuxMode`: it applies only when host facts do
+not positively assert SELinux is enforcing or permissive.)

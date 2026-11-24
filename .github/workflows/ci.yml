@@ -242,10 +242,11 @@ jobs:
           #
           # SO_PEERSEC (peer SELinux domain) cannot be exercised for real
           # here: GitHub-hosted ubuntu-24.04 runners have SELinux
-          # disabled, so internal/tetra's SELinuxRequired=false path (the
-          # default these tests use) is what runs; that check is only
-          # exercised against a real SELinux-enabled peer by
-          # scripts/e2e-rhel9.sh on a real RHEL 9 host.
+          # disabled, so internal/tetra's AllowSELinuxDisabled=true path
+          # (dialIntegration sets it explicitly, since the zero value is
+          # now fail-closed per step-03b-review.md R3B-1) is what runs;
+          # that check is only exercised against a real SELinux-enabled
+          # peer by scripts/e2e-rhel9.sh on a real RHEL 9 host.
           sg tetragon-relay -c 'cd internal/tetra && /tmp/tetra.itest -test.v && cd ../apply && /tmp/apply.itest -test.v'
 
       - name: Verify the admin-path test's PID scoping actually held (step-03a-review.md R3-E3)

@@ -108,8 +108,11 @@ go test -tags integration -race -count=1 -c -o "${WORKDIR}/apply.itest" ./intern
 # Unlike .github/workflows/ci.yml's job, this script runs on a real
 # RHEL 9 host with SELinux enforcing (architecture doc 9.2), so this is
 # the only place internal/tetra's SO_PEERSEC peer check is exercised for
-# real with SELinux actually enabled, not merely its selinux_required=false
-# disabled-SELinux fallback path.
+# real with SELinux actually enabled, not merely its
+# AllowSELinuxDisabled=true disabled-SELinux fallback path (dialIntegration
+# sets that field unconditionally, but it is never consulted here: the
+# real peer SELinux context actively matches, so verifyPeerSELinux never
+# reaches the disabled() fallback at all).
 REPO_ROOT="$(pwd)"
 sg "${RELAY_GROUP}" -c "cd '${REPO_ROOT}/internal/tetra' && '${WORKDIR}/tetra.itest' -test.v && cd '${REPO_ROOT}/internal/apply' && '${WORKDIR}/apply.itest' -test.v"
 

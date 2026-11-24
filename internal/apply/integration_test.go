@@ -68,6 +68,12 @@ func dialIntegration(t *testing.T) *tetra.Client {
 		SocketPath:         integrationSocket,
 		TetragonBinaryPath: mustLookPath(t, "tetragon"),
 		RelayGroupName:     "tetragon-relay",
+		// GitHub-hosted ubuntu-24.04 runners (and most non-RHEL dev/CI
+		// hosts) have SELinux disabled; AllowSELinuxDisabled's zero
+		// value is now fail-closed (step-03b-review.md R3B-1), so this
+		// integration suite must opt in explicitly. scripts/e2e-rhel9.sh
+		// runs on a real SELinux-enforcing host and does not set this.
+		AllowSELinuxDisabled: true,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

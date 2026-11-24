@@ -86,7 +86,7 @@ func connectAndVerifyPeer(dialCtx context.Context, cfg Config) (net.Conn, error)
 // verifySocketFile implements Part B2's pre-connect checks: lstat (never
 // following a symlink — os.Lstat, not os.Stat), must be a socket, owner
 // uid 0, group must equal gid, mode must not be more permissive than
-// 0660, and (if SELinux is enabled, or Config.SELinuxRequired) the
+// 0660, and (if SELinux is enabled, or !Config.AllowSELinuxDisabled) the
 // security.selinux xattr's type component must be selinuxLabelType.
 func verifySocketFile(cfg Config, gid uint32) error {
 	fi, err := os.Lstat(cfg.SocketPath)
@@ -137,11 +137,11 @@ func verifySELinuxLabel(cfg Config) error {
 	n, err := getxattrFunc(cfg.SocketPath, "security.selinux", buf)
 	if err != nil {
 		if isSELinuxDisabledErr(err) {
-			if cfg.SELinuxRequired {
-				return fmt.Errorf("%w: SELinux is disabled on this host but selinux_required is true", ErrSocketVerification)
+			if !cfg.AllowSELinuxDisabled {
+				return fmt.Errorf("%w: SELinux is disabled on this host but allow_selinux_disabled is false", ErrSocketVerification)
 			}
 			warnSELinuxDisabledOnce.Do(func() {
-				cfg.logger().Warn("SELinux is disabled on this host; continuing because selinux_required is false", "socket", cfg.SocketPath)
+				cfg.logger().Warn("SELinux is disabled on this host; continuing because allow_selinux_disabled is true", "socket", cfg.SocketPath)
 			})
 			return nil
 		}
@@ -230,16 +230,30 @@ func isPeerSELinuxUnavailableErr(err error) bool {
 // peer's own SELinux context type must equal cfg.peerSELinuxType()
 // (default "tetragon_t"). active is true only when a real comparison was
 // made (SELinux enabled); it is false when the check was skipped because
-// SELinux is disabled and cfg.SELinuxRequired is false — the only case
-// where err is also nil without active being true.
+// SELinux is disabled and cfg.AllowSELinuxDisabled is true — the only
+// case where err is also nil without active being true.
+//
+// step-03b-review.md R3B-1: when cfg.HostSELinuxMode positively asserts
+// SELinux is enforcing or permissive (from internal/hostprobe's
+// independently-collected host facts, not from anything this socket
+// connection itself reports), neither SO_PEERSEC failure mode below is
+// ever treated as "SELinux disabled" — a host that host-probe says is
+// SELinux-enforcing but whose peer returns no usable SELinux context is
+// a verification failure regardless of AllowSELinuxDisabled, since that
+// combination means either the peer is lying about its context or this
+// host's SELinux state is inconsistent between the two independent
+// sources, neither of which this check may paper over.
 func verifyPeerSELinux(cfg Config, uc *net.UnixConn) (active bool, err error) {
 	sec, gerr := getsockoptPeerSecFunc(uc)
 	disabled := func() (bool, error) {
-		if cfg.SELinuxRequired {
-			return false, fmt.Errorf("%w: SELinux is disabled on this host but selinux_required is true", ErrSocketVerification)
+		if cfg.hostSELinuxEnforcingOrPermissive() {
+			return false, fmt.Errorf("%w: host facts report SELinux %s but socket peer has no usable SELinux SO_PEERSEC context", ErrSocketVerification, cfg.HostSELinuxMode)
+		}
+		if !cfg.AllowSELinuxDisabled {
+			return false, fmt.Errorf("%w: SELinux is disabled on this host but allow_selinux_disabled is false", ErrSocketVerification)
 		}
 		warnPeerSELinuxDisabledOnce.Do(func() {
-			cfg.logger().Warn("SELinux is disabled on this host; continuing because selinux_required is false", "check", "peer_so_peersec")
+			cfg.logger().Warn("SELinux is disabled on this host; continuing because allow_selinux_disabled is true", "check", "peer_so_peersec")
 		})
 		return false, nil
 	}
@@ -259,7 +273,8 @@ func verifyPeerSELinux(cfg Config, uc *net.UnixConn) (active bool, err error) {
 		// GitHub-hosted ubuntu-24.04 runners), getsockopt succeeds but
 		// returns a label this check cannot interpret as an SELinux
 		// type — handled the same as SELinux being unavailable, not as
-		// a type mismatch.
+		// a type mismatch, UNLESS host facts say SELinux is actually
+		// enforcing/permissive (disabled() handles that above).
 		return disabled()
 	}
 	if parts[2] != cfg.peerSELinuxType() {
