@@ -166,6 +166,54 @@ const (
 	// 0016), restated here as a defensive invariant: PolicyNamePattern
 	// (63 bytes) plus "-v<version>-<8 hex>" never approaches it.
 	MaxLoadedPolicyNameBytes = 253
+
+	// --- Step 4b: internal/store (step-04b.md Part C8) ---
+
+	// MaxStoreIndexBytes bounds the serialized size of internal/store's
+	// index file (everything except the content-addressed blobs/ it
+	// references: epochs, monitor history, LKG/root blob references,
+	// generation). Chosen generously relative to MaxStoreScopes *
+	// (MaxStoreHistoryNamesPerScope * (PolicyNamePattern's 63 bytes) +
+	// a domain name and a few blob digests each) so a legitimately
+	// busy fleet of scopes/domains never approaches it, while still
+	// bounding memory for a single JSON unmarshal of untrusted (if
+	// tampered) disk content before any HMAC check can run.
+	MaxStoreIndexBytes = 4 << 20 // 4 MiB
+
+	// MaxStoreScopes bounds the number of distinct policy scopes (each
+	// with its own epoch and monitor-mode history) the index may track.
+	// A single host serves a small, fixed set of scopes (architecture
+	// doc section 7.3's "scope" field); this is a defensive cap against
+	// an index inflated by a bug or a tampered disk, not a realistic
+	// production ceiling.
+	MaxStoreScopes = 256
+
+	// MaxStoreHistoryNamesPerScope bounds the number of distinct policy
+	// names recorded as "seen in monitor mode" per scope
+	// (guard.PolicyHistory). Bounded independently of
+	// MaxPoliciesPerBundle because history accumulates across many
+	// bundles over the scope's lifetime, not just one.
+	MaxStoreHistoryNamesPerScope = 4096
+
+	// MaxStoreBlobBytes bounds a single content-addressed blob (an LKG
+	// DSSE-derived envelope or trust-root metadata). Mirrors
+	// MaxEnvelopeBytes/MaxRootMetadataBytes, the largest inputs that
+	// ever become a blob, with headroom for the store's own minimal
+	// framing.
+	MaxStoreBlobBytes = 2 << 20 // 2 MiB
+
+	// MaxStoreTotalBlobBytes bounds the sum of every live (referenced)
+	// blob's size: one LKG blob per domain plus one trust-root blob,
+	// each at most MaxStoreBlobBytes, times a generous fixed number of
+	// domains, so unbounded domain churn cannot grow the store
+	// directory without limit even though old blobs are garbage
+	// collected after every successful index swap.
+	MaxStoreTotalBlobBytes = 64 << 20 // 64 MiB
+
+	// MaxStoreDomains bounds the number of distinct relay domains
+	// (apply.LKGStore keys) the index may track, for the same reason as
+	// MaxStoreScopes.
+	MaxStoreDomains = 256
 )
 
 // TetragonVersionFamily is the pinned major.minor version family internal/
