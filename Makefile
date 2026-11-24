@@ -28,7 +28,7 @@ test-race:
 .PHONY: coverage
 coverage:
 	@fail=0; \
-	for pkg in internal/dsse internal/strictjson internal/trust internal/verify internal/policydoc internal/guard; do \
+	for pkg in internal/dsse internal/strictjson internal/trust internal/verify internal/policydoc internal/guard internal/store; do \
 		echo "== $$pkg =="; \
 		$(GO) test -count=1 -covermode=count -coverprofile=/tmp/tetragon-relay-$$(basename $$pkg).out ./$$pkg/... >/dev/null; \
 		line=$$($(GO) tool cover -func=/tmp/tetragon-relay-$$(basename $$pkg).out | tail -1); \
@@ -38,7 +38,7 @@ coverage:
 	done; \
 	exit $$fail
 
-COVER90_PKGS := internal/tetra internal/apply internal/hostprobe
+COVER90_PKGS := internal/tetra internal/apply internal/hostprobe internal/agent
 
 .PHONY: coverage90
 coverage90:

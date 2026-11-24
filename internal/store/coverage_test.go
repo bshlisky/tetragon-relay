@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/bshlisky/tetragon-relay/internal/apply"
@@ -243,6 +244,160 @@ func (f *failingCounter) Read() (uint64, error)      { return 0, f.err }
 func (f *failingCounter) Increment() (uint64, error) { return 0, f.err }
 
 var errCounterBroken = errors.New("counter broken")
+
+func TestOpen_NonexistentDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "does-not-exist")
+	if _, err := Open(dir, newTestSealer(), NewFakeMonotonicCounter()); err == nil {
+		t.Fatalf("expected an error for a nonexistent directory")
+	}
+}
+
+func TestOpen_IndexIsADirectoryNotAFile(t *testing.T) {
+	dir := t.TempDir()
+	os.Chmod(dir, 0o700)
+	if err := os.Mkdir(filepath.Join(dir, "index"), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if _, err := Open(dir, newTestSealer(), NewFakeMonotonicCounter()); !errors.Is(err, ErrTampered) {
+		t.Fatalf("err = %v, want ErrTampered", err)
+	}
+}
+
+func TestWriteBlobIfMissing_AlreadyPresentWithMatchingContent(t *testing.T) {
+	dir := t.TempDir()
+	os.Chmod(dir, 0o700)
+	s, err := Open(dir, newTestSealer(), NewFakeMonotonicCounter())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+	b := []byte("some blob content")
+	d1, err := s.writeBlobIfMissing(b)
+	if err != nil {
+		t.Fatalf("writeBlobIfMissing (first): %v", err)
+	}
+	d2, err := s.writeBlobIfMissing(b)
+	if err != nil {
+		t.Fatalf("writeBlobIfMissing (second, already present): %v", err)
+	}
+	if d1 != d2 {
+		t.Fatalf("digest changed between calls: %q vs %q", d1, d2)
+	}
+}
+
+func TestGCBlobs_SkipsSubdirectories(t *testing.T) {
+	dir := t.TempDir()
+	os.Chmod(dir, 0o700)
+	s, err := Open(dir, newTestSealer(), NewFakeMonotonicCounter())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+	if err := os.Mkdir(filepath.Join(dir, "blobs", "a-subdirectory"), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Must not attempt to remove the subdirectory as if it were an
+	// unreferenced blob file.
+	s.gcBlobs(map[string]struct{}{})
+	if _, err := os.Stat(filepath.Join(dir, "blobs", "a-subdirectory")); err != nil {
+		t.Fatalf("subdirectory was removed by gcBlobs: %v", err)
+	}
+}
+
+func TestCommitLocked_CounterIncrementFailsAfterDurableWrite(t *testing.T) {
+	dir := t.TempDir()
+	os.Chmod(dir, 0o700)
+	counter := NewFakeMonotonicCounter()
+	s, err := Open(dir, newTestSealer(), counter)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	s.counter = &failingCounter{err: errCounterBroken}
+	if err := s.RecordEpoch("prod-db", 5); !errors.Is(err, ErrCounterUnavailable) {
+		t.Fatalf("err = %v, want ErrCounterUnavailable", err)
+	}
+	// The index write itself must still have taken effect (Part C5's
+	// crash-window semantics): the in-memory committed state already
+	// reflects the new epoch even though Increment failed.
+	epoch, err := s.Current("prod-db")
+	if err != nil {
+		t.Fatalf("Current: %v", err)
+	}
+	if epoch != 5 {
+		t.Fatalf("epoch = %d, want 5 (the index write durably succeeded despite the counter failure)", epoch)
+	}
+}
+
+func TestGet_DecodeFailureMarksTampered(t *testing.T) {
+	dir := t.TempDir()
+	os.Chmod(dir, 0o700)
+	s, err := Open(dir, newTestSealer(), NewFakeMonotonicCounter())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	notJSON := []byte("this is not json at all")
+	digest, err := s.writeBlobIfMissing(notJSON)
+	if err != nil {
+		t.Fatalf("writeBlobIfMissing: %v", err)
+	}
+	s.committed.LKG["prod-db"] = lkgEntry{BlobDigest: digest, Mode: "enforce"}
+
+	if _, ok := s.Get("prod-db"); ok {
+		t.Fatalf("Get with an undecodable blob: ok = true")
+	}
+	if !errors.Is(s.Tampered(), ErrTampered) {
+		t.Fatalf("Tampered() = %v, want ErrTampered", s.Tampered())
+	}
+}
+
+func TestCloneCommitted_CopiesExistingLKGEntries(t *testing.T) {
+	dir := t.TempDir()
+	os.Chmod(dir, 0o700)
+	s, err := Open(dir, newTestSealer(), NewFakeMonotonicCounter())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+	if err := s.Put("domain-a", apply.LKGSet{Mode: "enforce"}); err != nil {
+		t.Fatalf("Put domain-a: %v", err)
+	}
+	if err := s.Put("domain-b", apply.LKGSet{Mode: "monitor"}); err != nil {
+		t.Fatalf("Put domain-b: %v", err)
+	}
+	a, ok := s.Get("domain-a")
+	if !ok || a.Mode != "enforce" {
+		t.Fatalf("Get domain-a = (%+v, %v), want (enforce, true) -- it must survive domain-b's later commit", a, ok)
+	}
+}
+
+func TestWriteIndexFile_TooLargeAfterLimitsPass(t *testing.T) {
+	dir := t.TempDir()
+	os.Chmod(dir, 0o700)
+	s, err := Open(dir, newTestSealer(), NewFakeMonotonicCounter())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	next := s.cloneCommitted()
+	// Within every per-field cardinality limit individually, but their
+	// product exceeds MaxStoreIndexBytes: 50 scopes (< MaxStoreScopes)
+	// each with MaxStoreHistoryNamesPerScope long names.
+	for i := 0; i < 50; i++ {
+		names := make([]string, limits.MaxStoreHistoryNamesPerScope)
+		for j := range names {
+			names[j] = strings.Repeat("a", 60) + strconv.Itoa(j)
+		}
+		next.History["scope"+strconv.Itoa(i)] = names
+	}
+	if err := s.commitLocked(next); !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("err = %v, want ErrLimitExceeded", err)
+	}
+}
 
 func TestOpen_PathIsAFileNotADirectory(t *testing.T) {
 	parent := t.TempDir()

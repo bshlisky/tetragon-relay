@@ -232,6 +232,15 @@ func TestClosed_EveryMethodReturnsErrClosed(t *testing.T) {
 	if err := s.Put("x", apply.LKGSet{}); !errors.Is(err, store.ErrClosed) {
 		t.Fatalf("Put after Close: err = %v, want ErrClosed", err)
 	}
+	if err := s.RecordMonitorNames("x", []string{"y"}); !errors.Is(err, store.ErrClosed) {
+		t.Fatalf("RecordMonitorNames after Close: err = %v, want ErrClosed", err)
+	}
+	if _, _, _, err := s.TrustRoot(); !errors.Is(err, store.ErrClosed) {
+		t.Fatalf("TrustRoot after Close: err = %v, want ErrClosed", err)
+	}
+	if err := s.PersistTrustRoot([]byte("x"), 1); !errors.Is(err, store.ErrClosed) {
+		t.Fatalf("PersistTrustRoot after Close: err = %v, want ErrClosed", err)
+	}
 	// Closing twice must not panic or error.
 	if err := s.Close(); err != nil {
 		t.Fatalf("second Close: %v", err)
