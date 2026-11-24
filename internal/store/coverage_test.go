@@ -318,6 +318,33 @@ func TestWriteBlobIfMissing_AlreadyPresentWithMatchingContent(t *testing.T) {
 	}
 }
 
+func TestWriteBlobIfMissing_AlreadyPresentFsyncsAgain(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.Chmod(dir, 0o700)
+	s, err := Open(dir, newTestSealer(), NewFakeMonotonicCounter())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	b := []byte("already present content")
+	if _, err := s.writeBlobIfMissing(b); err != nil {
+		t.Fatalf("writeBlobIfMissing (first): %v", err)
+	}
+
+	// step-04b-review.md R4B-4: the "already present" branch must
+	// still fsync the existing file and the blobs directory, not just
+	// assume an earlier writer already did. Swap in a faulting FS that
+	// fails the very next filesystem operation and confirm the second
+	// call (which takes the already-present branch) surfaces that
+	// failure, proving it actually touches the filesystem rather than
+	// returning success having done nothing durable at all.
+	s.fs = newFaultFS(s.fs, 0)
+	if _, err := s.writeBlobIfMissing(b); err == nil {
+		t.Fatalf("expected an error: the already-present path must still fsync (and so must observe the injected fault)")
+	}
+}
+
 func TestGCBlobs_SkipsSubdirectories(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.Chmod(dir, 0o700)

@@ -29,13 +29,23 @@ func (s *Store) blobPath(digest string) string {
 // verified before being treated as already-durable, so a half-written
 // leftover from an earlier crash (Part C3) is transparently overwritten
 // rather than mistaken for a valid, already-committed blob.
+//
+// step-04b-review.md R4B-4: the "already present" branch still fsyncs the
+// existing blob file and the blobs directory before returning, rather
+// than assuming whoever wrote it earlier already durably fsynced it.
+// This is cheap (the content is already on disk; this just re-confirms
+// durability) and removes an unenforced precondition the earlier version
+// relied on silently.
 func (s *Store) writeBlobIfMissing(b []byte) (digest string, err error) {
 	if len(b) > limits.MaxStoreBlobBytes {
 		return "", fmt.Errorf("%w: blob is %d bytes, max %d", ErrLimitExceeded, len(b), limits.MaxStoreBlobBytes)
 	}
 	digest = blobDigest(b)
 	path := s.blobPath(digest)
-	if existing, err := s.fs.ReadFile(path); err == nil && blobDigest(existing) == digest {
+	if existing, rerr := s.fs.ReadFile(path); rerr == nil && blobDigest(existing) == digest {
+		if err := s.fsyncExistingBlob(path); err != nil {
+			return "", err
+		}
 		return digest, nil
 	}
 	f, err := s.fs.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
@@ -54,6 +64,28 @@ func (s *Store) writeBlobIfMissing(b []byte) (digest string, err error) {
 		return "", fmt.Errorf("store: close blob %s: %w", digest, err)
 	}
 	return digest, nil
+}
+
+// fsyncExistingBlob fsyncs an already-written blob file at path and the
+// blobs directory it lives in, without modifying the file's content
+// (opened O_WRONLY with neither O_CREATE nor O_TRUNC). step-04b-review.md
+// R4B-4.
+func (s *Store) fsyncExistingBlob(path string) error {
+	f, err := s.fs.OpenFile(path, os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("store: open existing blob %s for fsync: %w", path, err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("store: fsync existing blob %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("store: close existing blob %s: %w", path, err)
+	}
+	if err := s.fs.FsyncDir(filepath.Join(s.dir, "blobs")); err != nil {
+		return fmt.Errorf("store: fsync blobs dir: %w", err)
+	}
+	return nil
 }
 
 // readBlob reads blobs/<digest> and verifies its content hash equals
