@@ -75,6 +75,19 @@ type StartupResult struct {
 	TrustRoot *trust.Root
 	// FirstBoot mirrors (*store.Store).FirstBoot().
 	FirstBoot bool
+	// Degraded is true when Startup succeeded but found a condition
+	// that should be surfaced to an operator immediately rather than
+	// waiting for it to manifest as a bundle-verification failure
+	// later (step-04b-review.md R4B-6): today, the only such condition
+	// is the active trust root requiring mldsa-87 on a build where
+	// ML-DSA is unavailable. A caller (step 6's relayd main) is
+	// expected to enter the architecture doc 8.4 DEGRADED state when
+	// this is true.
+	Degraded bool
+	// DegradedReason is a short, fixed, non-attacker-controlled string
+	// explaining Degraded, e.g. "trust root requires ML-DSA,
+	// unavailable in this build". Empty when Degraded is false.
+	DegradedReason string
 }
 
 // Startup runs step-04b.md Part D2's sequence: crypto self-test, open the
@@ -121,28 +134,21 @@ func Startup(cfg Config, now time.Time) (*StartupResult, error) {
 		return nil, fmt.Errorf("%w: %d RPM root files configured, max %d", ErrTooManyRootFiles, len(cfg.AvailableRPMRoots), limits.MaxRootChainFiles)
 	}
 
-	root, err := establishTrustRoot(st, cfg, now, cfg.Auditor)
+	root, err := establishTrustRoot(st, cfg, caps, now, cfg.Auditor)
 	if err != nil {
 		_ = st.Close()
 		return nil, err
 	}
 
-	if err := checkMLDSARequirement(root, caps, cfg.Auditor); err != nil {
-		// Not fatal to Startup: a role requiring mldsa-87 that this
-		// build cannot evaluate simply cannot be satisfied (fail
-		// closed at verify time, same as trust.ErrMLDSAUnavailable's
-		// own contract); the audit record above is the actionable
-		// signal for an operator. No production role requires
-		// mldsa-87 today (ADR 0022 Part B5), so this is not expected
-		// to fire outside a future hybrid rotation.
-		_ = err
-	}
+	degraded, degradedReason := startupDegradedCondition(root, caps, cfg.Auditor)
 
 	return &StartupResult{
-		Store:        st,
-		Capabilities: caps,
-		TrustRoot:    root,
-		FirstBoot:    st.FirstBoot(),
+		Store:          st,
+		Capabilities:   caps,
+		TrustRoot:      root,
+		FirstBoot:      st.FirstBoot(),
+		Degraded:       degraded,
+		DegradedReason: degradedReason,
 	}, nil
 }
 
@@ -157,7 +163,7 @@ func Startup(cfg Config, now time.Time) (*StartupResult, error) {
 // at the first missing version (a gap) or the first chain-verification
 // failure, logging either via auditor. The persisted root is never left
 // unset by a failed or partial walk.
-func establishTrustRoot(st *store.Store, cfg Config, now time.Time, auditor Auditor) (*trust.Root, error) {
+func establishTrustRoot(st *store.Store, cfg Config, caps Capabilities, now time.Time, auditor Auditor) (*trust.Root, error) {
 	if st.FirstBoot() {
 		if len(cfg.InitialRootBytes) == 0 {
 			return nil, fmt.Errorf("%w: first boot with no RPM-shipped initial root configured", ErrNoTrustRoot)
@@ -213,6 +219,19 @@ func establishTrustRoot(st *store.Store, cfg Config, now time.Time, auditor Audi
 			// at the right version and name, and (defense in depth)
 			// any other Update failure.
 			auditor.Record(AuditEvent{Step: "trust_root", Detail: fmt.Sprintf("RPM-shipped root version %d did not chain from version %d; stopping, keeping version %d", current.Version+1, current.Version, current.Version), Err: uerr})
+			break
+		}
+		if !caps.MLDSAAvailable && rootRequiresMLDSA(updated) {
+			// step-04b-review.md R4B-6: adopting a root that requires
+			// mldsa-87 on a build where ML-DSA is unavailable would
+			// make every future bundle unverifiable on this host (no
+			// signature could ever satisfy that role's
+			// require_keytypes again). Refuse this step specifically,
+			// keep the last good version, and stop the walk here —
+			// never silently skip past it to a later candidate, which
+			// could reintroduce the same unsatisfiable requirement or
+			// worse.
+			auditor.Record(AuditEvent{Step: "trust_root", Detail: fmt.Sprintf("refusing to adopt root version %d: requires mldsa-87 but ML-DSA is unavailable in this build; keeping version %d", updated.Version, current.Version)})
 			break
 		}
 		current, currentRaw = updated, next
@@ -287,13 +306,64 @@ func collectRootChainCandidates(cfg Config, auditor Auditor) map[uint64][]byte {
 	return out
 }
 
+// degradedReasonMLDSAUnavailable is StartupResult.DegradedReason's exact
+// value for step-04b-review.md R4B-6's condition, so a caller can match on
+// it (rather than parsing an arbitrary free-text string) if it ever needs
+// to distinguish this reason from other future DEGRADED causes.
+const degradedReasonMLDSAUnavailable = "trust root requires ML-DSA, unavailable in this build"
+
+// rootRequiresMLDSA reports whether any of root's three roles
+// (require_keytypes is mandatory on every role, R4A-1) lists mldsa-87,
+// regardless of this build's own ML-DSA availability. Used both by
+// establishTrustRoot's chain-walk (to refuse adopting such a root when
+// unavailable, R4B-6) and by checkMLDSARequirement (to decide whether the
+// ALREADY-established root needs a DEGRADED report).
+func rootRequiresMLDSA(root *trust.Root) bool {
+	if root == nil {
+		return false
+	}
+	for _, role := range []trust.Role{root.RootRole(), root.TargetsRole(), root.LogRole()} {
+		for _, kt := range role.RequireKeyTypes {
+			if kt == trust.KeyTypeMLDSA87 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// startupDegradedCondition implements step-04b-review.md R4B-6's second
+// bullet: if root (whatever Startup ultimately established -- first
+// boot, an unchanged persisted root, or the end of a forward chain) still
+// requires mldsa-87 on a build where ML-DSA is unavailable, Startup must
+// still succeed (the persisted/established root keeps enforcing), but
+// report a DEGRADED condition immediately rather than waiting for it to
+// surface as a verification failure at the first bundle. This is
+// deliberately a SEPARATE check from establishTrustRoot's own
+// chain-walk refusal (which only prevents NEWLY adopting such a root);
+// a root that already required it before this build ever ran reaches
+// Startup having been established by some earlier boot (or by this
+// build's own first-boot path, if the RPM-shipped initial root itself
+// requires it) and still needs to be reported.
+func startupDegradedCondition(root *trust.Root, caps Capabilities, auditor Auditor) (degraded bool, reason string) {
+	if err := checkMLDSARequirement(root, caps, auditor); err != nil {
+		return true, degradedReasonMLDSAUnavailable
+	}
+	return false, ""
+}
+
 // checkMLDSARequirement implements step-04a-review.md R4A-3's audit
 // requirement: if the loaded root's targets role requires mldsa-87
 // (trust.Role.RequireKeyTypes) and this build's crypto self-test found
 // ML-DSA-87 unavailable, record a typed, named audit event. The root
 // role and log role are also checked for the same reason, since
 // require_keytypes is mandatory on every role (R4A-1) and any of them
-// could in principle require mldsa-87.
+// could in principle require mldsa-87. step-04b-review.md R4B-6: this is
+// also what Startup uses to decide StartupResult.Degraded for an
+// ALREADY-persisted root that requires mldsa-87 on an ML-DSA-unavailable
+// build (the chain-walk's own refusal only prevents NEWLY adopting one;
+// a root that already required it before this build ever ran still needs
+// to surface immediately, not wait for the first bundle).
 func checkMLDSARequirement(root *trust.Root, caps Capabilities, auditor Auditor) error {
 	if caps.MLDSAAvailable || root == nil {
 		return nil

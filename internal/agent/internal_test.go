@@ -10,10 +10,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/bshlisky/tetragon-relay/internal/dsse"
+	"github.com/bshlisky/tetragon-relay/internal/store"
 	"github.com/bshlisky/tetragon-relay/internal/trust"
 )
 
@@ -135,6 +137,317 @@ func buildHybridTargetsRoot(t *testing.T, now time.Time) ([]byte, error) {
 // Capabilities.MLDSAAvailable=false — never true in this development
 // environment (RunCryptoSelfTest_Succeeds), so it must be constructed
 // directly.
+
+// buildECDSARoot builds a minimal, self-signed, ECDSA-only root at
+// version, signed by (threshold 2 of) rootKeys, for building a chain to
+// rotate away from in R4B-6's tests. If oldRootKeys is non-nil, the
+// envelope is ALSO signed by threshold 2 of oldRootKeys, so it satisfies
+// (*trust.Root).Update from a root built with oldRootKeys.
+func buildECDSARoot(t *testing.T, version uint64, now time.Time, rootKeys []*ecdsa.PrivateKey, oldRootKeys []*ecdsa.PrivateKey) []byte {
+	t.Helper()
+	type keyEntry struct {
+		KeyType      string `json:"keytype"`
+		PublicKeyDER string `json:"public_key_der_b64"`
+	}
+	type role struct {
+		KeyIDs          []string `json:"keyids"`
+		Threshold       int      `json:"threshold"`
+		RequireKeyTypes []string `json:"require_keytypes,omitempty"`
+	}
+	type roles struct {
+		Root    role `json:"root"`
+		Targets role `json:"targets"`
+		Log     role `json:"log"`
+	}
+	type rootPayload struct {
+		Schema  string              `json:"schema"`
+		Version uint64              `json:"version"`
+		Expires time.Time           `json:"expires"`
+		Keys    map[string]keyEntry `json:"keys"`
+		Roles   roles               `json:"roles"`
+	}
+	keyID := func(p *ecdsa.PrivateKey) string {
+		id, err := trust.DeriveKeyID(&p.PublicKey)
+		if err != nil {
+			t.Fatalf("derive key id: %v", err)
+		}
+		return string(id)
+	}
+	pub := func(p *ecdsa.PrivateKey) string {
+		der, _ := x509.MarshalPKIXPublicKey(&p.PublicKey)
+		return base64.StdEncoding.EncodeToString(der)
+	}
+	tKey, lKey := mustTestECDSAKey(t), mustTestECDSAKey(t)
+	keys := map[string]keyEntry{
+		keyID(tKey): {KeyType: "ecdsa-p384", PublicKeyDER: pub(tKey)},
+		keyID(lKey): {KeyType: "ecdsa-p384", PublicKeyDER: pub(lKey)},
+	}
+	rootIDs := make([]string, 0, len(rootKeys))
+	for _, k := range rootKeys {
+		keys[keyID(k)] = keyEntry{KeyType: "ecdsa-p384", PublicKeyDER: pub(k)}
+		rootIDs = append(rootIDs, keyID(k))
+	}
+	rp := rootPayload{
+		Schema:  "relay.root.v1",
+		Version: version,
+		Expires: now.Add(365 * 24 * time.Hour),
+		Keys:    keys,
+		Roles: roles{
+			Root:    role{KeyIDs: rootIDs, Threshold: 2, RequireKeyTypes: []string{"ecdsa-p384"}},
+			Targets: role{KeyIDs: []string{keyID(tKey)}, Threshold: 1, RequireKeyTypes: []string{"ecdsa-p384"}},
+			Log:     role{KeyIDs: []string{keyID(lKey)}, Threshold: 1, RequireKeyTypes: []string{"ecdsa-p384"}},
+		},
+	}
+	payload, err := json.Marshal(rp)
+	if err != nil {
+		t.Fatalf("marshal root payload: %v", err)
+	}
+	pae := dsse.PAE(trust.RootPayloadType, payload)
+	sign := func(p *ecdsa.PrivateKey) string {
+		digest := sha512.Sum384(pae)
+		sig, _ := ecdsa.SignASN1(rand.Reader, p, digest[:])
+		return base64.StdEncoding.EncodeToString(sig)
+	}
+	type wireSig struct {
+		KeyID string `json:"keyid"`
+		Sig   string `json:"sig"`
+	}
+	type wireEnvelope struct {
+		PayloadType string    `json:"payloadType"`
+		Payload     string    `json:"payload"`
+		Signatures  []wireSig `json:"signatures"`
+	}
+	sigs := make([]wireSig, 0, 4)
+	for _, k := range rootKeys[:2] {
+		sigs = append(sigs, wireSig{KeyID: keyID(k), Sig: sign(k)})
+	}
+	for _, k := range oldRootKeys {
+		sigs = append(sigs, wireSig{KeyID: keyID(k), Sig: sign(k)})
+	}
+	env := wireEnvelope{PayloadType: trust.RootPayloadType, Payload: base64.StdEncoding.EncodeToString(payload), Signatures: sigs}
+	b, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	return b
+}
+
+func mustTestECDSAKey(t *testing.T) *ecdsa.PrivateKey {
+	t.Helper()
+	p, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ecdsa key: %v", err)
+	}
+	return p
+}
+
+// buildHybridTargetsRootChained is buildHybridTargetsRoot, parameterized
+// by version and additionally signed by oldRootKeys too, so it can be
+// adopted as a forward-chain step from a root built with
+// buildECDSARoot's rootKeys (step-04b-review.md R4B-6).
+func buildHybridTargetsRootChained(t *testing.T, version uint64, now time.Time, newRootKeys []*ecdsa.PrivateKey, oldRootKeys []*ecdsa.PrivateKey) []byte {
+	t.Helper()
+	type keyEntry struct {
+		KeyType      string `json:"keytype"`
+		PublicKeyDER string `json:"public_key_der_b64"`
+	}
+	type role struct {
+		KeyIDs          []string `json:"keyids"`
+		Threshold       int      `json:"threshold"`
+		RequireKeyTypes []string `json:"require_keytypes,omitempty"`
+	}
+	type roles struct {
+		Root    role `json:"root"`
+		Targets role `json:"targets"`
+		Log     role `json:"log"`
+	}
+	type rootPayload struct {
+		Schema  string              `json:"schema"`
+		Version uint64              `json:"version"`
+		Expires time.Time           `json:"expires"`
+		Keys    map[string]keyEntry `json:"keys"`
+		Roles   roles               `json:"roles"`
+	}
+	keyID := func(p *ecdsa.PrivateKey) string {
+		id, err := trust.DeriveKeyID(&p.PublicKey)
+		if err != nil {
+			t.Fatalf("derive key id: %v", err)
+		}
+		return string(id)
+	}
+	pub := func(p *ecdsa.PrivateKey) string {
+		der, _ := x509.MarshalPKIXPublicKey(&p.PublicKey)
+		return base64.StdEncoding.EncodeToString(der)
+	}
+	tKey, lKey := mustTestECDSAKey(t), mustTestECDSAKey(t)
+	mpriv, err := mldsa.GenerateKey(mldsa.MLDSA87())
+	if err != nil {
+		t.Fatalf("generate mldsa key: %v", err)
+	}
+	mder, err := x509.MarshalPKIXPublicKey(mpriv.PublicKey())
+	if err != nil {
+		t.Fatalf("marshal mldsa public key: %v", err)
+	}
+	mid := string(trust.DeriveKeyIDFromDER(mder))
+
+	keys := map[string]keyEntry{
+		keyID(tKey): {KeyType: "ecdsa-p384", PublicKeyDER: pub(tKey)},
+		keyID(lKey): {KeyType: "ecdsa-p384", PublicKeyDER: pub(lKey)},
+		mid:         {KeyType: "mldsa-87", PublicKeyDER: base64.StdEncoding.EncodeToString(mder)},
+	}
+	rootIDs := make([]string, 0, len(newRootKeys))
+	for _, k := range newRootKeys {
+		keys[keyID(k)] = keyEntry{KeyType: "ecdsa-p384", PublicKeyDER: pub(k)}
+		rootIDs = append(rootIDs, keyID(k))
+	}
+	rp := rootPayload{
+		Schema:  "relay.root.v1",
+		Version: version,
+		Expires: now.Add(365 * 24 * time.Hour),
+		Keys:    keys,
+		Roles: roles{
+			Root:    role{KeyIDs: rootIDs, Threshold: 2, RequireKeyTypes: []string{"ecdsa-p384"}},
+			Targets: role{KeyIDs: []string{keyID(tKey), mid}, Threshold: 1, RequireKeyTypes: []string{"ecdsa-p384", "mldsa-87"}},
+			Log:     role{KeyIDs: []string{keyID(lKey)}, Threshold: 1, RequireKeyTypes: []string{"ecdsa-p384"}},
+		},
+	}
+	payload, err := json.Marshal(rp)
+	if err != nil {
+		t.Fatalf("marshal root payload: %v", err)
+	}
+	pae := dsse.PAE(trust.RootPayloadType, payload)
+	sign := func(p *ecdsa.PrivateKey) string {
+		digest := sha512.Sum384(pae)
+		sig, _ := ecdsa.SignASN1(rand.Reader, p, digest[:])
+		return base64.StdEncoding.EncodeToString(sig)
+	}
+	type wireSig struct {
+		KeyID string `json:"keyid"`
+		Sig   string `json:"sig"`
+	}
+	type wireEnvelope struct {
+		PayloadType string    `json:"payloadType"`
+		Payload     string    `json:"payload"`
+		Signatures  []wireSig `json:"signatures"`
+	}
+	sigs := make([]wireSig, 0, 4)
+	for _, k := range newRootKeys[:2] {
+		sigs = append(sigs, wireSig{KeyID: keyID(k), Sig: sign(k)})
+	}
+	for _, k := range oldRootKeys {
+		sigs = append(sigs, wireSig{KeyID: keyID(k), Sig: sign(k)})
+	}
+	env := wireEnvelope{PayloadType: trust.RootPayloadType, Payload: base64.StdEncoding.EncodeToString(payload), Signatures: sigs}
+	b, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	return b
+}
+
+func TestEstablishTrustRoot_RefusesToAdoptRootRequiringUnavailableMLDSA(t *testing.T) {
+	now := fixedNow()
+	r1, r2, r3 := mustTestECDSAKey(t), mustTestECDSAKey(t), mustTestECDSAKey(t)
+	v1Root := buildECDSARoot(t, 1, now, []*ecdsa.PrivateKey{r1, r2, r3}, nil)
+
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	sealer := &testSealer{key: []byte("agent-internal-test-key-0123456")}
+	counter := &testCounter{}
+	st0, err := store.Open(dir, sealer, counter)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := st0.PersistTrustRoot(v1Root, 1); err != nil {
+		t.Fatalf("PersistTrustRoot: %v", err)
+	}
+	if err := st0.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// Re-open so FirstBoot() reflects a realistic restart, not the
+	// initial bootstrap Open above (st0 exists only to seed version 1).
+	st, err := store.Open(dir, sealer, counter)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	r4, r5, r6 := mustTestECDSAKey(t), mustTestECDSAKey(t), mustTestECDSAKey(t)
+	v2Root := buildHybridTargetsRootChained(t, 2, now, []*ecdsa.PrivateKey{r4, r5, r6}, []*ecdsa.PrivateKey{r1, r2})
+
+	cfg := Config{AvailableRPMRoots: map[uint64][]byte{2: v2Root}}
+	auditor := &FakeAuditor{}
+	caps := Capabilities{MLDSAAvailable: false}
+
+	root, err := establishTrustRoot(st, cfg, caps, now.Add(time.Hour), auditor)
+	if err != nil {
+		t.Fatalf("establishTrustRoot: %v", err)
+	}
+	if root.Version != 1 {
+		t.Fatalf("Version = %d, want 1 (refused to adopt a root requiring unavailable mldsa-87)", root.Version)
+	}
+	found := false
+	for _, e := range auditor.Events {
+		if e.Step == "trust_root" && e.Err == nil && e.Detail != "" {
+			if containsSubstr(e.Detail, "refusing to adopt") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no 'refusing to adopt' audit event; events = %+v", auditor.Events)
+	}
+}
+
+func containsSubstr(s, substr string) bool {
+	for i := 0; i+len(substr) <= len(s); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
+
+// testSealer/testCounter are minimal store.KeySealer/store.MonotonicCounter
+// implementations for this white-box file, duplicating
+// store.FakeKeySealer/store.FakeMonotonicCounter's shape (not importable
+// as a dependency cycle concern here, but kept local and minimal since
+// this file only needs one Open call).
+type testSealer struct{ key []byte }
+
+func (s *testSealer) Unseal() ([]byte, error) { return s.key, nil }
+
+type testCounter struct{ v uint64 }
+
+func (c *testCounter) Read() (uint64, error) { return c.v, nil }
+func (c *testCounter) Increment() (uint64, error) {
+	c.v++
+	return c.v, nil
+}
+
+func TestStartupDegradedCondition_ReportsWhenPersistedRootRequiresUnavailableMLDSA(t *testing.T) {
+	now := fixedNow()
+	envelope, _ := buildHybridTargetsRoot(t, now)
+	root, err := trust.LoadInitialRoot(envelope)
+	if err != nil {
+		t.Fatalf("LoadInitialRoot: %v", err)
+	}
+
+	degraded, reason := startupDegradedCondition(root, Capabilities{MLDSAAvailable: false}, &FakeAuditor{})
+	if !degraded {
+		t.Fatalf("degraded = false, want true")
+	}
+	if reason != degradedReasonMLDSAUnavailable {
+		t.Fatalf("reason = %q, want %q", reason, degradedReasonMLDSAUnavailable)
+	}
+
+	degraded2, reason2 := startupDegradedCondition(root, Capabilities{MLDSAAvailable: true}, &FakeAuditor{})
+	if degraded2 || reason2 != "" {
+		t.Fatalf("degraded = (%v, %q), want (false, \"\") when ML-DSA is available", degraded2, reason2)
+	}
+}
 
 func TestCheckMLDSARequirement_FlagsEachRoleNeedingIt(t *testing.T) {
 	caps := Capabilities{MLDSAAvailable: false}
