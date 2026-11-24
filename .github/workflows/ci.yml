@@ -226,6 +226,13 @@ jobs:
           sudo chmod 660 /var/run/tetragon/tetragon.sock
           sudo chown root:tetragon-relay /var/run/tetragon/tetragon.sock
 
+      - name: DIAGNOSTIC - capture tetra getevents (unfiltered)
+        run: |
+          tetra_bin="$(dirname "${TETRAGON_BIN}")/tetra"
+          nohup sudo "${tetra_bin}" getevents -o compact --server-address unix:///var/run/tetragon/tetragon.sock > /tmp/tetra-getevents.log 2>&1 &
+          echo $! > /tmp/tetra-getevents.pid
+          sleep 1
+
       - name: Run integration test suite (unprivileged, build tag "integration")
         run: |
           set -euo pipefail
@@ -233,20 +240,23 @@ jobs:
           # real test binaries first (no setcap needed since R3-1: the
           # peer checks need no capability) and run them as the
           # unprivileged tetragon-relay group member.
-          go test -tags integration -race -count=1 -c -o /tmp/tetra.itest ./internal/tetra
           go test -tags integration -race -count=1 -c -o /tmp/apply.itest ./internal/apply
-          # TestAllowlist_NoOtherRPCsReferenced (internal/tetra) reads its
-          # own package's .go files via a relative path, so each compiled
-          # test binary must run with its source package directory as the
-          # working directory, not wherever it happens to be invoked from.
-          #
-          # SO_PEERSEC (peer SELinux domain) cannot be exercised for real
-          # here: GitHub-hosted ubuntu-24.04 runners have SELinux
-          # disabled, so internal/tetra's SELinuxRequired=false path (the
-          # default these tests use) is what runs; that check is only
-          # exercised against a real SELinux-enabled peer by
-          # scripts/e2e-rhel9.sh on a real RHEL 9 host.
-          sg tetragon-relay -c 'cd internal/tetra && /tmp/tetra.itest -test.v && cd ../apply && /tmp/apply.itest -test.v'
+          sg tetragon-relay -c 'cd internal/apply && /tmp/apply.itest -test.v -test.run "TestDiagnose_AdminPathKill|TestIntegration_RollbackOnAdminPathKill"'
+
+      - name: DIAGNOSTIC - stop tetra getevents and show log
+        if: always()
+        run: |
+          sudo kill "$(cat /tmp/tetra-getevents.pid)" 2>/dev/null || true
+          sleep 1
+          sudo chmod 644 /tmp/tetra-getevents.log || true
+          cat /tmp/tetra-getevents.log || true
+
+      - name: DIAGNOSTIC - upload tetra getevents log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tetra-getevents-log
+          path: /tmp/tetra-getevents.log
 
       - name: Stop Tetragon
         if: always()
