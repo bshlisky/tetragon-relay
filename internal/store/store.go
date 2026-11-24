@@ -135,17 +135,22 @@ func openWithFS(dir string, sealer KeySealer, counter MonotonicCounter, fsys FS)
 }
 
 // checkOwnerAndMode requires fi's permission bits to equal exactly want
-// and, on platforms exposing *syscall.Stat_t (Linux and Darwin), its owner
-// to be the calling process' own uid — the production model (architecture
-// doc section 8.5: the store directory is owned by the tetragon-relay user
-// relayd itself runs as).
+// and its owner to be the calling process' own uid — the production model
+// (architecture doc section 8.5: the store directory is owned by the
+// tetragon-relay user relayd itself runs as). step-04b-review.md R4B-3:
+// on a platform where fi.Sys() does not return *syscall.Stat_t (anything
+// other than Linux or Darwin), ownership cannot be verified at all, so
+// this fails closed (refuses to open) rather than silently downgrading to
+// a mode-only check — this project only targets RHEL 9 in production, so
+// a build on any other platform's Sys() shape is never expected to reach
+// this path for real.
 func checkOwnerAndMode(fi os.FileInfo, want os.FileMode) error {
 	if fi.Mode().Perm() != want {
 		return fmt.Errorf("mode is %o, want %o", fi.Mode().Perm(), want)
 	}
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok {
-		return nil
+		return fmt.Errorf("cannot verify ownership on this platform: fi.Sys() is %T, not *syscall.Stat_t; refusing to open", fi.Sys())
 	}
 	if uint32(st.Uid) != uint32(os.Getuid()) { //nolint:unconvert // Uid's width differs across platforms
 		return fmt.Errorf("owned by uid %d, want %d (the running process' own uid)", st.Uid, os.Getuid())

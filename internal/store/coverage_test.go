@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bshlisky/tetragon-relay/internal/apply"
 	"github.com/bshlisky/tetragon-relay/internal/limits"
@@ -244,6 +245,38 @@ func (f *failingCounter) Read() (uint64, error)      { return 0, f.err }
 func (f *failingCounter) Increment() (uint64, error) { return 0, f.err }
 
 var errCounterBroken = errors.New("counter broken")
+
+// fakeFileInfoUnknownSys is an os.FileInfo whose Sys() returns a value
+// that is not *syscall.Stat_t, simulating a platform (anything other than
+// Linux or Darwin) where ownership cannot be determined this way.
+// step-04b-review.md R4B-3.
+type fakeFileInfoUnknownSys struct {
+	mode os.FileMode
+}
+
+func (fakeFileInfoUnknownSys) Name() string           { return "store-dir" }
+func (fakeFileInfoUnknownSys) Size() int64            { return 0 }
+func (f fakeFileInfoUnknownSys) Mode() os.FileMode    { return f.mode }
+func (fakeFileInfoUnknownSys) ModTime() (t time.Time) { return t }
+func (fakeFileInfoUnknownSys) IsDir() bool            { return true }
+func (fakeFileInfoUnknownSys) Sys() interface{}       { return "not-a-syscall-stat-t" }
+
+func TestCheckOwnerAndMode_UnknownPlatformFailsClosed(t *testing.T) {
+	fi := fakeFileInfoUnknownSys{mode: 0o700}
+	if err := checkOwnerAndMode(fi, 0o700); err == nil {
+		t.Fatalf("expected an error when fi.Sys() is not *syscall.Stat_t, got nil (R4B-3: must fail closed, not silently skip the ownership check)")
+	}
+}
+
+func TestCheckOwnerAndMode_UnknownPlatformStillChecksModeFirst(t *testing.T) {
+	// The mode mismatch must still be reported even on an
+	// unknown-Sys() platform (checked first, independent of ownership).
+	fi := fakeFileInfoUnknownSys{mode: 0o755}
+	err := checkOwnerAndMode(fi, 0o700)
+	if err == nil {
+		t.Fatalf("expected an error for a mode mismatch")
+	}
+}
 
 func TestOpen_NonexistentDirectory(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "does-not-exist")
