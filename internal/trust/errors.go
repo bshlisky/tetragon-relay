@@ -82,6 +82,16 @@ var (
 	// B2.
 	ErrMLDSAUnavailable = errors.New("trust: ML-DSA is unavailable in this build")
 
+	// ErrNonCanonicalSPKI is returned when a key entry's declared
+	// SubjectPublicKeyInfo DER, while otherwise valid for its declared
+	// keytype, is not byte-for-byte equal to the canonical re-encoding
+	// of the key it decodes to. Two distinct encodings of the same key
+	// would otherwise derive two distinct key IDs (DeriveKeyIDFromDER
+	// hashes the DER as given), letting one physical key count twice
+	// toward a role's threshold or slip past the A6 disjointness rule.
+	// step-04a-review.md R4A-2.
+	ErrNonCanonicalSPKI = errors.New("trust: SPKI is not the canonical encoding of its own key")
+
 	// ErrInvalidRequireKeyTypes is returned when a role's
 	// require_keytypes list is omitted, empty-but-present-in-JSON,
 	// contains an unknown or duplicate keytype, or lists a keytype with

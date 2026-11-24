@@ -46,6 +46,36 @@ deliberately separate typed errors (not both folded into the old, pre-Part-B
 contract) so a reviewer or operator can tell "we don't know this algorithm at all" apart
 from "this entry's two fields disagree with each other".
 
+### Canonical SPKI encoding (step-04a-review.md R4A-2)
+
+`KeyID` is `"sha256:" + hex(SHA-256(der))` — a hash of the SPKI bytes exactly as provided,
+not of the decoded key material. Two different byte encodings of the same public key would
+therefore derive two different key IDs, letting one physical key be listed twice in a role
+(counting twice toward its threshold) or appear in two different roles at once, past the A6
+disjointness check (which compares `KeyID`s, not keys).
+
+`parseTrustedKey` now re-encodes every key immediately after parsing it and requires
+byte-for-byte equality with the DER as provided, else `ErrNonCanonicalSPKI` (malformed
+metadata): `x509.MarshalPKIXPublicKey` for ecdsa-p384 (the exact function
+`DeriveKeyIDFromDER`'s canonical form already assumes); a hand-built SPKI
+(`marshalMLDSA87SPKI`) for mldsa-87, constructed from RFC 9881's OID and the raw key bytes
+with no `crypto/x509`/`crypto/mldsa` call — consistent with `TrustedKey`'s existing rule that
+parsing an mldsa-87 key never depends on `crypto/mldsa` being available.
+
+No non-canonical SPKI encoding was found that this package's own parser (`encoding/asn1`,
+used directly in `parseSPKIAlgorithm` and via `crypto/x509.ParsePKIXPublicKey`) actually
+accepts. The classic BER/DER confusion — re-encoding the outer SEQUENCE's length in long
+form where the canonical form uses short form — was tried concretely and is rejected by
+`encoding/asn1` itself ("asn1: structure error: non-minimal length"), confirmed by
+`TestLoadInitialRoot_NonMinimalLengthSPKIRejected` (`internal/trust/parsing_test.go`), which
+is rejected as `ErrMalformedMetadata` at the structural-parsing stage, before
+`ErrNonCanonicalSPKI`'s check is ever reached. `encoding/asn1`'s minimal-length and
+minimal-integer enforcement (confirmed by reading Go 1.27.4's own decoder) leaves no
+remaining encoding freedom for either key shape once the algorithm OID and raw key bytes are
+fixed, so `ErrNonCanonicalSPKI` is, as R4A-2 anticipated, a defensive invariant rather than
+one demonstrated reachable by a real input — kept because the guarantee (one key = one key
+ID) should not depend on that remaining true of `encoding/asn1`'s internals forever.
+
 ### Dispatch on the key's keytype, never the signature's (Part B2)
 
 `TrustedKey.verifySignature` switches on `k.Type` — a property of the TRUSTED key from
@@ -155,6 +185,11 @@ update adds `mldsa-87` to a role's `require_keytypes`.
   on every role; `role_missing_require_keytypes` (an omitted field, `KindTrustLoad`) and
   `root_update_new_root_missing_require_keytypes` (a rotation whose new root omits it,
   `KindTrustUpdate`) were added, both expecting `ErrInvalidRequireKeyTypes`.
+- step-04a-review.md R4A-2: `ErrNonCanonicalSPKI` is a new typed error; no committed vector
+  exercises it (every key every generator in this repo produces is already canonical, since
+  they are all built by `x509.MarshalPKIXPublicKey`/`marshalMLDSA87SPKI` in the first place)
+  — covered instead by `TestLoadInitialRoot_NonMinimalLengthSPKIRejected`, which documents
+  why no vector could be constructed.
 - `FuzzRootV2` (`internal/trust/fuzz_test.go`) gives the new ASN.1 SPKI-parsing and
   `require_keytypes` code paths dedicated fuzz coverage beyond `FuzzRootUpdate`'s
   pre-existing ECDSA-only corpus.

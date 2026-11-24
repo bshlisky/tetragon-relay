@@ -1,6 +1,7 @@
 package trust
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/mldsa"
@@ -79,6 +80,36 @@ func parseSPKIAlgorithm(der []byte) (oid asn1.ObjectIdentifier, params asn1.RawV
 	return pk.Algorithm.Algorithm, pk.Algorithm.Parameters, pk.PublicKey.RightAlign(), nil
 }
 
+// mldsaAlgorithmIdentifier is RFC 9881 section 4's AlgorithmIdentifier for
+// ML-DSA-87: just the OID, with no parameters field at all (not even an
+// explicit NULL) — unlike pkixAlgorithmIdentifier above, which carries an
+// (optional) Parameters field for ECDSA's named-curve case.
+type mldsaAlgorithmIdentifier struct {
+	Algorithm asn1.ObjectIdentifier
+}
+
+// mldsaPKIXPublicKey is the canonical SubjectPublicKeyInfo shape for an
+// ML-DSA-87 key (RFC 9881 section 4): AlgorithmIdentifier with absent
+// parameters, then the raw public key as a BIT STRING.
+type mldsaPKIXPublicKey struct {
+	Algorithm mldsaAlgorithmIdentifier
+	PublicKey asn1.BitString
+}
+
+// marshalMLDSA87SPKI builds the canonical DER SubjectPublicKeyInfo for an
+// ML-DSA-87 key from its raw public key bytes, without calling
+// crypto/x509.MarshalPKIXPublicKey (which would require constructing a
+// *mldsa.PublicKey via crypto/mldsa, unavailable under ADR 0021's FIPS
+// build) or crypto/mldsa at all. Used by parseTrustedKey (step-04a-review.md
+// R4A-2) to require that a parsed key's declared DER was already in this
+// one canonical form.
+func marshalMLDSA87SPKI(rawKey []byte) ([]byte, error) {
+	return asn1.Marshal(mldsaPKIXPublicKey{
+		Algorithm: mldsaAlgorithmIdentifier{Algorithm: oidMLDSA87},
+		PublicKey: asn1.BitString{Bytes: rawKey, BitLength: len(rawKey) * 8},
+	})
+}
+
 // parseTrustedKey decodes der (a SubjectPublicKeyInfo) as declaredType and
 // validates that its algorithm OID actually matches that declaration (step
 // 4 prompt Part B1: "The keytype must match the SPKI's algorithm OID; a
@@ -114,6 +145,22 @@ func parseTrustedKey(declaredType KeyType, der []byte) (TrustedKey, error) {
 		if !ok || pub.Curve != elliptic.P384() {
 			return TrustedKey{}, fmt.Errorf("%w: keytype %q is not ECDSA P-384", ErrKeytypeSPKIMismatch, declaredType)
 		}
+		// step-04a-review.md R4A-2: re-encode and require byte
+		// equality with the provided DER, so two distinct encodings
+		// of the same key can never derive two different key IDs
+		// (DeriveKeyIDFromDER hashes the DER bytes as given) and
+		// slip past the A6 role-disjointness check by counting as
+		// "different" keys. Go's x509.MarshalPKIXPublicKey always
+		// produces the same canonical DER for a given *ecdsa.PublicKey
+		// (RFC 5480's AlgorithmIdentifier.parameters is the curve
+		// OID; there is no other encoding freedom in that shape), so
+		// this is a defensive invariant rather than a check reachable
+		// by any input this parser's own asn1.Unmarshal above
+		// accepts (see ADR 0022/R4A-2 discussion; a non-canonical
+		// fixture could not be constructed that passed parsing).
+		if canonical, err := x509.MarshalPKIXPublicKey(pub); err != nil || !bytes.Equal(canonical, der) {
+			return TrustedKey{}, fmt.Errorf("%w: keytype %q SPKI is not the canonical encoding of its own key", ErrNonCanonicalSPKI, declaredType)
+		}
 		return TrustedKey{Type: KeyTypeECDSAP384, ecdsa: pub}, nil
 
 	case KeyTypeMLDSA87:
@@ -127,6 +174,17 @@ func parseTrustedKey(declaredType KeyType, der []byte) (TrustedKey, error) {
 		}
 		if len(rawKey) != mldsa.MLDSA87PublicKeySize {
 			return TrustedKey{}, fmt.Errorf("%w: mldsa-87 public key is %d bytes, want %d", ErrKeytypeSPKIMismatch, len(rawKey), mldsa.MLDSA87PublicKeySize)
+		}
+		// step-04a-review.md R4A-2: re-encode via an explicitly built
+		// SPKI (RFC 9881's OID, absent parameters — the exact shape
+		// parseSPKIAlgorithm above already requires) and require
+		// byte equality with the provided DER. Built by hand rather
+		// than via crypto/x509.MarshalPKIXPublicKey, which for an
+		// ML-DSA key calls crypto/mldsa internally (ADR 0021) and
+		// would reintroduce the FIPS-build dependency parseTrustedKey
+		// deliberately avoids for mldsa-87 (TrustedKey's doc comment).
+		if canonical, err := marshalMLDSA87SPKI(rawKey); err != nil || !bytes.Equal(canonical, der) {
+			return TrustedKey{}, fmt.Errorf("%w: keytype %q SPKI is not the canonical encoding of its own key", ErrNonCanonicalSPKI, declaredType)
 		}
 		return TrustedKey{Type: KeyTypeMLDSA87, mldsa: rawKey}, nil
 

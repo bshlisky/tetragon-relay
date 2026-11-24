@@ -327,3 +327,54 @@ func TestLoadInitialRoot_KeyBadDER(t *testing.T) {
 		t.Fatalf("err = %v, want ErrMalformedMetadata", err)
 	}
 }
+
+// TestLoadInitialRoot_NonMinimalLengthSPKIRejected is step-04a-review.md
+// R4A-2's required test: a hand-built non-canonical DER encoding of a real
+// ECDSA P-384 key, re-encoding the outer SubjectPublicKeyInfo SEQUENCE's
+// length in long form (0x81 0xNN) where the canonical encoding
+// crypto/x509.MarshalPKIXPublicKey always produces uses short form. This is
+// the classic BER/DER confusion R4A-2 is concerned with (two byte-distinct
+// encodings of the same key deriving two different key IDs). No such
+// encoding was found that this package's parser (encoding/asn1, used both
+// directly and via crypto/x509.ParsePKIXPublicKey) actually accepts: Go's
+// asn1 decoder enforces minimal length encoding and rejects this one
+// outright ("asn1: structure error: non-minimal length"), so it is
+// rejected as ErrMalformedMetadata at the structural-parsing stage, never
+// reaching (and therefore never needing) the canonical re-encoding
+// equality check in parseTrustedKey. That check (ErrNonCanonicalSPKI)
+// remains a defensive invariant: every attempt to construct an alternate
+// DER encoding this parser accepts failed at an earlier, independent
+// layer, consistent with ADR 0022's note that Go's DER parsing is strict.
+func TestLoadInitialRoot_NonMinimalLengthSPKIRejected(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	r1, r2 := mustKey(t), mustKey(t)
+	tk := mustKey(t)
+
+	canonical, err := base64.StdEncoding.DecodeString(tk.publicB64())
+	if err != nil {
+		t.Fatalf("decode canonical DER: %v", err)
+	}
+	if canonical[0] != 0x30 || canonical[1] >= 0x80 {
+		t.Fatalf("test assumption violated: canonical DER does not start with a short-form SEQUENCE length")
+	}
+	// Re-encode the outer SEQUENCE length from short form (one byte) to
+	// long form (0x81 <len>), leaving every other byte — and therefore
+	// the decoded key material — unchanged.
+	nonMinimal := append([]byte{0x30, 0x81, canonical[1]}, canonical[2:]...)
+	nonMinimalB64 := base64.StdEncoding.EncodeToString(nonMinimal)
+	// DeriveKeyIDFromDER hashes the DER bytes as given, so the
+	// non-minimal encoding's derived ID differs from tk.id; use the ID
+	// it actually derives so this fails for the reason under test
+	// (malformed DER), not an unrelated key-ID mismatch.
+	nonMinimalID := trust.DeriveKeyIDFromDER(nonMinimal)
+
+	payload := `{"schema":"relay.root.v1","version":1,"expires":"` + now.Add(24*time.Hour).Format(time.RFC3339) +
+		`","keys":{"` + string(nonMinimalID) + `":{"keytype":"ecdsa-p384","public_key_der_b64":"` + nonMinimalB64 + `"}},` +
+		`"roles":{"root":{"keyids":["` + r1.id + `","` + r2.id + `"],"threshold":2,"require_keytypes":["ecdsa-p384"]},` +
+		`"targets":{"keyids":["` + string(nonMinimalID) + `"],"threshold":1,"require_keytypes":["ecdsa-p384"]},` +
+		`"log":{"keyids":["` + r1.id + `"],"threshold":1,"require_keytypes":["ecdsa-p384"]}}}`
+	env := signEnvelope(trust.RootPayloadType, []byte(payload), r1, r2)
+	if _, err := trust.LoadInitialRoot(env); !errors.Is(err, trust.ErrMalformedMetadata) {
+		t.Fatalf("err = %v, want ErrMalformedMetadata (non-minimal length rejected by encoding/asn1 itself)", err)
+	}
+}
