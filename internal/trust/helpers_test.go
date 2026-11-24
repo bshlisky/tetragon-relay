@@ -116,7 +116,18 @@ type wireEnvelope struct {
 	Signatures  []wireSig `json:"signatures"`
 }
 
+// roleOf builds an all-ecdsa-p384 role and always sets require_keytypes =
+// ["ecdsa-p384"]: require_keytypes is mandatory on every role
+// (step-04a-review.md R4A-1), so there is no longer an "omitted" case here.
+// Use roleOfOmittingKeyTypes to build the deliberately-malformed "field
+// omitted" cases.
 func roleOf(keys []*genKey, threshold int) wireRole {
+	return roleWithKeyTypes(keys, threshold, "ecdsa-p384")
+}
+
+// roleOfOmittingKeyTypes is roleOf but leaves require_keytypes unset
+// (nil/omitted), for tests asserting that is rejected (R4A-1).
+func roleOfOmittingKeyTypes(keys []*genKey, threshold int) wireRole {
 	ids := make([]string, 0, len(keys))
 	for _, k := range keys {
 		ids = append(ids, k.id)
@@ -124,10 +135,10 @@ func roleOf(keys []*genKey, threshold int) wireRole {
 	return wireRole{KeyIDs: ids, Threshold: threshold}
 }
 
-// roleWithKeyTypes is roleOf plus an explicit require_keytypes list (step
-// 4 prompt Part B3).
+// roleWithKeyTypes is roleOfOmittingKeyTypes plus an explicit
+// require_keytypes list (step 4 prompt Part B3).
 func roleWithKeyTypes(keys []*genKey, threshold int, requireKeyTypes ...string) wireRole {
-	r := roleOf(keys, threshold)
+	r := roleOfOmittingKeyTypes(keys, threshold)
 	r.RequireKeyTypes = requireKeyTypes
 	return r
 }

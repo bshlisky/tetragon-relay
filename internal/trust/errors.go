@@ -83,9 +83,9 @@ var (
 	ErrMLDSAUnavailable = errors.New("trust: ML-DSA is unavailable in this build")
 
 	// ErrInvalidRequireKeyTypes is returned when a role's
-	// require_keytypes list is empty-but-present-in-JSON (as opposed to
-	// omitted), contains an unknown or duplicate keytype, or lists a
-	// keytype with no key of that type present in the role. Step 4
-	// prompt Part B3.
+	// require_keytypes list is omitted, empty-but-present-in-JSON,
+	// contains an unknown or duplicate keytype, or lists a keytype with
+	// no key of that type present in the role. Step 4 prompt Part B3;
+	// mandatory per role as of step-04a-review.md R4A-1.
 	ErrInvalidRequireKeyTypes = errors.New("trust: invalid require_keytypes")
 )

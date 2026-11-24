@@ -99,13 +99,21 @@ of that type is among the verified set. Both conditions are evaluated against th
 verified-signature set from the same pass over the envelope — there is no way to satisfy
 (b) with a signature that was not independently counted toward (a).
 
-`require_keytypes` is validated at parse time (`parseAndValidatePayload`): it must be
-either omitted entirely (no requirement) or present with at least one entry
-(`ErrInvalidRequireKeyTypes` if present-but-empty), every entry must be a known keytype
-with no duplicates, and every listed type must have at least one key actually in that
-role's `keyids` — a `require_keytypes` entry naming a type the role has no key for could
-never be satisfied and is rejected as malformed rather than accepted as an unreachable
-(and therefore misleading) requirement.
+`require_keytypes` is validated at parse time (`parseAndValidatePayload`): it is
+**mandatory on every role** (step-04a-review.md R4A-1, superseding Part B3's original
+"omitted means no requirement" rule) — omitted or present-but-empty is
+`ErrInvalidRequireKeyTypes` — every entry must be a known keytype with no duplicates, and
+every listed type must have at least one key actually in that role's `keyids` — a
+`require_keytypes` entry naming a type the role has no key for could never be satisfied and
+is rejected as malformed rather than accepted as an unreachable (and therefore misleading)
+requirement.
+
+R4A-1's finding: with the field merely optional, a role holding both an ECDSA and an
+ML-DSA key at threshold 1 would accept either signature alone with nothing in the metadata
+flagging the missing hybrid guarantee — exactly the downgrade hybrid signing exists to
+prevent, and an easy omission to make in a future root rotation. Making it mandatory closes
+that gap structurally: every role, including root and log (which never need a hybrid
+guarantee today), must say explicitly which keytype(s) it requires.
 
 Root rotation (`(*Root).Update`) checks the OLD root role against its own (already-loaded)
 `RequireKeyTypes` and the NEW root role against its own (candidate) `RequireKeyTypes`
@@ -132,10 +140,10 @@ GitHub Actions figure).
 
 The production root generator (`cmd/bundlesign-test`'s `buildStandardRoot`,
 `buildHybridRoot`, and the standard (non-hybrid) vectors) sets `require_keytypes:
-["ecdsa-p384"]` or leaves it unset — never requires `mldsa-87` in a role actually shipped
-today. `TrustedKey`'s ML-DSA-87 verification path is complete and exercised by both direct
-unit tests and vectors, but is reachable in production only once a future trust-root update
-adds `mldsa-87` to a role's `require_keytypes`.
+["ecdsa-p384"]` on every role (`roleOf`) — never requires `mldsa-87` in a role actually
+shipped today. `TrustedKey`'s ML-DSA-87 verification path is complete and exercised by both
+direct unit tests and vectors, but is reachable in production only once a future trust-root
+update adds `mldsa-87` to a role's `require_keytypes`.
 
 ## Consequences
 
@@ -143,6 +151,10 @@ adds `mldsa-87` to a role's `require_keytypes`.
 - Every format change in this ADR is a breaking change to the unreleased root-metadata and
   envelope formats; every committed vector in `testdata/vectors/` was regenerated with
   `cmd/bundlesign-test`, and the new vectors required by Part B6 were added alongside them.
+- step-04a-review.md R4A-1: all vectors were regenerated again to carry `require_keytypes`
+  on every role; `role_missing_require_keytypes` (an omitted field, `KindTrustLoad`) and
+  `root_update_new_root_missing_require_keytypes` (a rotation whose new root omits it,
+  `KindTrustUpdate`) were added, both expecting `ErrInvalidRequireKeyTypes`.
 - `FuzzRootV2` (`internal/trust/fuzz_test.go`) gives the new ASN.1 SPKI-parsing and
   `require_keytypes` code paths dedicated fuzz coverage beyond `FuzzRootUpdate`'s
   pre-existing ECDSA-only corpus.

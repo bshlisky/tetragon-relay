@@ -92,31 +92,36 @@ func parseAndValidatePayload(payload []byte) (*parsedPayload, error) {
 			ids = append(ids, kid)
 		}
 
-		// Step 4 prompt Part B3: require_keytypes must be non-empty
-		// (explicitly present but empty is malformed; omitted is
-		// fine — no requirement), contain only known keytypes without
-		// duplicates, and every listed type must have at least one
-		// key in this role.
-		var requireTypes []KeyType
-		if role.RequireKeyTypes != nil {
-			if len(role.RequireKeyTypes) == 0 {
-				return Role{}, fmt.Errorf("%w: require_keytypes is present but empty", ErrInvalidRequireKeyTypes)
+		// step-04a-review.md R4A-1: require_keytypes is now MANDATORY
+		// on every role. An omitted field was previously accepted as
+		// "no algorithm requirement", which let a role holding both
+		// an ECDSA and an ML-DSA key with threshold 1 accept either
+		// signature alone — exactly the downgrade hybrid signing
+		// exists to prevent. Both omitted and present-but-empty are
+		// now malformed metadata; the list must contain only known
+		// keytypes without duplicates, and every listed type must
+		// have at least one key in this role.
+		if role.RequireKeyTypes == nil {
+			return Role{}, fmt.Errorf("%w: require_keytypes is required and must be non-empty", ErrInvalidRequireKeyTypes)
+		}
+		if len(role.RequireKeyTypes) == 0 {
+			return Role{}, fmt.Errorf("%w: require_keytypes is present but empty", ErrInvalidRequireKeyTypes)
+		}
+		requireTypes := make([]KeyType, 0, len(role.RequireKeyTypes))
+		seenTypes := make(map[KeyType]bool, len(role.RequireKeyTypes))
+		for _, rt := range role.RequireKeyTypes {
+			kt := KeyType(rt)
+			if !knownKeyTypes[kt] {
+				return Role{}, fmt.Errorf("%w: unknown keytype %q", ErrInvalidRequireKeyTypes, rt)
 			}
-			seenTypes := make(map[KeyType]bool, len(role.RequireKeyTypes))
-			for _, rt := range role.RequireKeyTypes {
-				kt := KeyType(rt)
-				if !knownKeyTypes[kt] {
-					return Role{}, fmt.Errorf("%w: unknown keytype %q", ErrInvalidRequireKeyTypes, rt)
-				}
-				if seenTypes[kt] {
-					return Role{}, fmt.Errorf("%w: duplicate keytype %q", ErrInvalidRequireKeyTypes, rt)
-				}
-				seenTypes[kt] = true
-				if !presentTypes[kt] {
-					return Role{}, fmt.Errorf("%w: keytype %q required but the role has no key of that type", ErrInvalidRequireKeyTypes, rt)
-				}
-				requireTypes = append(requireTypes, kt)
+			if seenTypes[kt] {
+				return Role{}, fmt.Errorf("%w: duplicate keytype %q", ErrInvalidRequireKeyTypes, rt)
 			}
+			seenTypes[kt] = true
+			if !presentTypes[kt] {
+				return Role{}, fmt.Errorf("%w: keytype %q required but the role has no key of that type", ErrInvalidRequireKeyTypes, rt)
+			}
+			requireTypes = append(requireTypes, kt)
 		}
 
 		return Role{KeyIDs: ids, Threshold: role.Threshold, RequireKeyTypes: requireTypes}, nil

@@ -1264,6 +1264,64 @@ func generateAll(dir string) error {
 		}
 	}
 
+	// role_missing_require_keytypes (step-04a-review.md R4A-1): the
+	// targets role's require_keytypes field is omitted entirely.
+	// Mandatory on every role; omission is malformed metadata, not "no
+	// requirement".
+	{
+		r1, err := newP384Key()
+		if err != nil {
+			return err
+		}
+		r2, err := newP384Key()
+		if err != nil {
+			return err
+		}
+		r3, err := newP384Key()
+		if err != nil {
+			return err
+		}
+		tk, err := newP384Key()
+		if err != nil {
+			return err
+		}
+		lk, err := newP384Key()
+		if err != nil {
+			return err
+		}
+		spec := rootSpec{
+			version: 1,
+			expires: baseNow.Add(365 * 24 * time.Hour),
+			keys:    []*testKey{r1, r2, r3, tk, lk},
+			root:    roleOf([]*testKey{r1, r2, r3}, 2),
+			// targets role omits require_keytypes entirely.
+			targets: roleOfOmittingKeyTypes([]*testKey{tk}, 1),
+			log:     roleOf([]*testKey{lk}, 1),
+		}
+		payload, err := buildRootPayload(spec)
+		if err != nil {
+			return err
+		}
+		env, err := signEnvelope(rootPayloadType, payload, r1, r2)
+		if err != nil {
+			return err
+		}
+		v := vector("role_missing_require_keytypes", "The targets role's require_keytypes field is omitted entirely; require_keytypes is mandatory on every role (step-04a-review.md R4A-1), so this is malformed metadata, not \"no algorithm requirement\".", testvectors.KindTrustLoad)
+		v.RootMetadataB64 = b64(env)
+		v.ExpectedError = "ErrInvalidRequireKeyTypes"
+		if err := saveChecked(dir, v); err != nil {
+			return err
+		}
+	}
+
+	// root_update_new_root_missing_require_keytypes (step-04a-review.md
+	// R4A-1): a root rotation whose NEW root's targets role omits
+	// require_keytypes. Must be rejected before it is ever accepted as
+	// the new persisted root.
+	if err := genRootUpdateVectorMissingKeyTypes(dir); err != nil {
+		return err
+	}
+
 	if err := generateHybridVectors(dir); err != nil {
 		return err
 	}

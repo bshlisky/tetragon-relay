@@ -97,8 +97,9 @@ func edgeRoot(t testing.TB, requireLogProof bool, expires time.Time) (env []byte
 		PublicKeyDER string `json:"public_key_der_b64"`
 	}
 	type role struct {
-		KeyIDs    []string `json:"keyids"`
-		Threshold int      `json:"threshold"`
+		KeyIDs          []string `json:"keyids"`
+		Threshold       int      `json:"threshold"`
+		RequireKeyTypes []string `json:"require_keytypes,omitempty"`
 	}
 	type roles struct {
 		Root    role `json:"root"`
@@ -124,9 +125,9 @@ func edgeRoot(t testing.TB, requireLogProof bool, expires time.Time) (env []byte
 			lk.id: {KeyType: "ecdsa-p384", PublicKeyDER: lk.publicB64()},
 		},
 		Roles: roles{
-			Root:    role{KeyIDs: []string{r1.id}, Threshold: 1},
-			Targets: role{KeyIDs: []string{tk.id}, Threshold: 1},
-			Log:     role{KeyIDs: []string{lk.id}, Threshold: 1},
+			Root:    role{KeyIDs: []string{r1.id}, Threshold: 1, RequireKeyTypes: []string{"ecdsa-p384"}},
+			Targets: role{KeyIDs: []string{tk.id}, Threshold: 1, RequireKeyTypes: []string{"ecdsa-p384"}},
+			Log:     role{KeyIDs: []string{lk.id}, Threshold: 1, RequireKeyTypes: []string{"ecdsa-p384"}},
 		},
 		RequireLogProof: requireLogProof,
 	}
@@ -165,8 +166,9 @@ func edgeRootManyTargets(t testing.TB, targetKeys []*edgeKey, expires time.Time)
 		PublicKeyDER string `json:"public_key_der_b64"`
 	}
 	type role struct {
-		KeyIDs    []string `json:"keyids"`
-		Threshold int      `json:"threshold"`
+		KeyIDs          []string `json:"keyids"`
+		Threshold       int      `json:"threshold"`
+		RequireKeyTypes []string `json:"require_keytypes,omitempty"`
 	}
 	type roles struct {
 		Root    role `json:"root"`
@@ -197,9 +199,9 @@ func edgeRootManyTargets(t testing.TB, targetKeys []*edgeKey, expires time.Time)
 		Expires: expires,
 		Keys:    keys,
 		Roles: roles{
-			Root:    role{KeyIDs: []string{r1.id}, Threshold: 1},
-			Targets: role{KeyIDs: targetIDs, Threshold: 1},
-			Log:     role{KeyIDs: []string{lk.id}, Threshold: 1},
+			Root:    role{KeyIDs: []string{r1.id}, Threshold: 1, RequireKeyTypes: []string{"ecdsa-p384"}},
+			Targets: role{KeyIDs: targetIDs, Threshold: 1, RequireKeyTypes: []string{"ecdsa-p384"}},
+			Log:     role{KeyIDs: []string{lk.id}, Threshold: 1, RequireKeyTypes: []string{"ecdsa-p384"}},
 		},
 	}
 	payload, err := json.Marshal(rp)
@@ -306,9 +308,9 @@ func edgeRootManyMLDSATargets(t testing.TB, targetKeys []*edgeMLDSAKey, expires 
 		Expires: expires,
 		Keys:    keys,
 		Roles: roles{
-			Root:    role{KeyIDs: []string{r1.id}, Threshold: 1},
+			Root:    role{KeyIDs: []string{r1.id}, Threshold: 1, RequireKeyTypes: []string{"ecdsa-p384"}},
 			Targets: role{KeyIDs: targetIDs, Threshold: 1, RequireKeyTypes: []string{"mldsa-87"}},
-			Log:     role{KeyIDs: []string{lk.id}, Threshold: 1},
+			Log:     role{KeyIDs: []string{lk.id}, Threshold: 1, RequireKeyTypes: []string{"ecdsa-p384"}},
 		},
 	}
 	payload, err := json.Marshal(rp)
@@ -348,8 +350,9 @@ func edgeRootForFuzz(expires time.Time) (env []byte, targetsKey *edgeKey) {
 		PublicKeyDER string `json:"public_key_der_b64"`
 	}
 	type role struct {
-		KeyIDs    []string `json:"keyids"`
-		Threshold int      `json:"threshold"`
+		KeyIDs          []string `json:"keyids"`
+		Threshold       int      `json:"threshold"`
+		RequireKeyTypes []string `json:"require_keytypes,omitempty"`
 	}
 	type roles struct {
 		Root    role `json:"root"`
@@ -374,9 +377,9 @@ func edgeRootForFuzz(expires time.Time) (env []byte, targetsKey *edgeKey) {
 			lk.id: {KeyType: "ecdsa-p384", PublicKeyDER: lk.publicB64()},
 		},
 		Roles: roles{
-			Root:    role{KeyIDs: []string{r1.id}, Threshold: 1},
-			Targets: role{KeyIDs: []string{tk.id}, Threshold: 1},
-			Log:     role{KeyIDs: []string{lk.id}, Threshold: 1},
+			Root:    role{KeyIDs: []string{r1.id}, Threshold: 1, RequireKeyTypes: []string{"ecdsa-p384"}},
+			Targets: role{KeyIDs: []string{tk.id}, Threshold: 1, RequireKeyTypes: []string{"ecdsa-p384"}},
+			Log:     role{KeyIDs: []string{lk.id}, Threshold: 1, RequireKeyTypes: []string{"ecdsa-p384"}},
 		},
 	}
 	payload, err := json.Marshal(rp)

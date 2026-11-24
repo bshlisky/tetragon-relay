@@ -69,7 +69,20 @@ func buildRootPayload(spec rootSpec) ([]byte, error) {
 	return json.Marshal(rp)
 }
 
+// roleOf builds a role whose keys are all ecdsa-p384 (every production role
+// and every role helper in this generator except hybrid targets roles), so
+// it always sets require_keytypes = ["ecdsa-p384"] (step-04a-review.md
+// R4A-1: require_keytypes is mandatory on every role; there is no longer an
+// "omitted means no requirement" case). Use roleOfOmittingKeyTypes to build
+// the deliberately-malformed "field omitted" vectors.
 func roleOf(keys []*testKey, threshold int) rolePayload {
+	return roleWithKeyTypes(keys, threshold, "ecdsa-p384")
+}
+
+// roleOfOmittingKeyTypes is roleOf but leaves require_keytypes unset
+// (nil/omitted), for vectors that must assert this is rejected
+// (step-04a-review.md R4A-1).
+func roleOfOmittingKeyTypes(keys []*testKey, threshold int) rolePayload {
 	ids := make([]string, 0, len(keys))
 	for _, k := range keys {
 		ids = append(ids, k.id)
@@ -80,7 +93,7 @@ func roleOf(keys []*testKey, threshold int) rolePayload {
 // roleWithKeyTypes is roleOf plus an explicit require_keytypes list (step
 // 4 prompt Part B3), e.g. ["ecdsa-p384", "mldsa-87"] for a hybrid role.
 func roleWithKeyTypes(keys []*testKey, threshold int, requireKeyTypes ...string) rolePayload {
-	r := roleOf(keys, threshold)
+	r := roleOfOmittingKeyTypes(keys, threshold)
 	r.RequireKeyTypes = requireKeyTypes
 	return r
 }

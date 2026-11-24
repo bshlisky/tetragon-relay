@@ -35,14 +35,16 @@ const (
 type Role struct {
 	KeyIDs    []KeyID
 	Threshold int
-	// RequireKeyTypes, when non-empty, requires at least one distinct
-	// key of each listed KeyType to have produced a valid signature,
-	// IN ADDITION TO the distinct-key Threshold above (both must hold).
-	// A role with no keytype requirement carries this empty (the
-	// pre-Part-B3 behavior: only Threshold distinct keys of any
-	// supported type). ["ecdsa-p384"] is production's requirement
-	// today (Part B5); a future hybrid rotation can add "mldsa-87" by
-	// trust-root update alone, with no format or code change.
+	// RequireKeyTypes is MANDATORY on every role (step-04a-review.md
+	// R4A-1) and always non-empty by the time a Role reaches this
+	// struct: it requires at least one distinct key of each listed
+	// KeyType to have produced a valid signature, IN ADDITION TO the
+	// distinct-key Threshold above (both must hold). An omitted or
+	// empty require_keytypes in the wire metadata is malformed and
+	// never reaches this type. ["ecdsa-p384"] is production's
+	// requirement today (Part B5); a future hybrid rotation can add
+	// "mldsa-87" by trust-root update alone, with no format or code
+	// change.
 	RequireKeyTypes []KeyType
 }
 
@@ -151,9 +153,9 @@ type rolePayload struct {
 	KeyIDs    []string `json:"keyids"`
 	Threshold int      `json:"threshold"`
 	// RequireKeyTypes is step 4 prompt Part B3's per-role algorithm
-	// requirement, e.g. ["ecdsa-p384"] or (hybrid, future)
-	// ["ecdsa-p384", "mldsa-87"]. Omitted/empty means no keytype
-	// requirement beyond Threshold distinct keys of any supported type.
+	// requirement, e.g. ["ecdsa-p384"] or (hybrid) ["ecdsa-p384",
+	// "mldsa-87"]. Mandatory on every role (step-04a-review.md R4A-1):
+	// omitted or present-but-empty is malformed metadata.
 	RequireKeyTypes []string `json:"require_keytypes,omitempty"`
 }
 

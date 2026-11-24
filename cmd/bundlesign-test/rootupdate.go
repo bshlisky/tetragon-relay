@@ -136,3 +136,99 @@ func genRootUpdateVectorWithExpiry(dir, name, desc string, oldVersion, newVersio
 	v.ExpectedError = expectedError
 	return saveChecked(dir, v)
 }
+
+// genRootUpdateVectorMissingKeyTypes builds a root rotation (version 1 to
+// 2) whose NEW root's targets role omits require_keytypes entirely, signed
+// by a threshold of both the old and the new root-role keys (so the only
+// reason Update can reject it is the missing require_keytypes field).
+// step-04a-review.md R4A-1: "a rotation whose new root omits it" must be
+// rejected, keeping the persisted (old) root.
+func genRootUpdateVectorMissingKeyTypes(dir string) error {
+	oldR1, oldR2, oldR3, err := threeP384Keys()
+	if err != nil {
+		return err
+	}
+	oldT1, err := newP384Key()
+	if err != nil {
+		return err
+	}
+	oldL1, err := newP384Key()
+	if err != nil {
+		return err
+	}
+	oldSpec := rootSpec{
+		version: 1,
+		expires: baseNow.Add(365 * 24 * time.Hour),
+		keys:    []*testKey{oldR1, oldR2, oldR3, oldT1, oldL1},
+		root:    roleOf([]*testKey{oldR1, oldR2, oldR3}, 2),
+		targets: roleOf([]*testKey{oldT1}, 1),
+		log:     roleOf([]*testKey{oldL1}, 1),
+	}
+	oldPayload, err := buildRootPayload(oldSpec)
+	if err != nil {
+		return err
+	}
+	oldEnv, err := signEnvelope(rootPayloadType, oldPayload, oldR1, oldR2)
+	if err != nil {
+		return err
+	}
+
+	newR1, newR2, newR3, err := threeP384Keys()
+	if err != nil {
+		return err
+	}
+	newT1, err := newP384Key()
+	if err != nil {
+		return err
+	}
+	newL1, err := newP384Key()
+	if err != nil {
+		return err
+	}
+	newSpec := rootSpec{
+		version: 2,
+		expires: baseNow.Add(365 * 24 * time.Hour),
+		keys:    []*testKey{newR1, newR2, newR3, newT1, newL1},
+		root:    roleOf([]*testKey{newR1, newR2, newR3}, 2),
+		// targets role omits require_keytypes entirely.
+		targets: roleOfOmittingKeyTypes([]*testKey{newT1}, 1),
+		log:     roleOf([]*testKey{newL1}, 1),
+	}
+	newPayload, err := buildRootPayload(newSpec)
+	if err != nil {
+		return err
+	}
+
+	pae := paeFor(rootPayloadType, newPayload)
+	s1, err := makeSig(oldR1, pae)
+	if err != nil {
+		return err
+	}
+	s2, err := makeSig(oldR2, pae)
+	if err != nil {
+		return err
+	}
+	s3, err := makeSig(newR1, pae)
+	if err != nil {
+		return err
+	}
+	s4, err := makeSig(newR2, pae)
+	if err != nil {
+		return err
+	}
+	newEnv, err := rawEnvelopeWithSigs(rootPayloadType, newPayload, []wireSignature{s1, s2, s3, s4})
+	if err != nil {
+		return err
+	}
+
+	v := testvectors.Vector{
+		Name:        "root_update_new_root_missing_require_keytypes",
+		Kind:        testvectors.KindTrustUpdate,
+		Description: "Root rotation to version 2 whose new root's targets role omits require_keytypes entirely, even though it is signed by a threshold of both the old and the new root-role keys. require_keytypes is mandatory on every role (step-04a-review.md R4A-1); the rotation must be rejected and the old (version 1) root kept.",
+		Now:         baseNow.Format(time.RFC3339),
+	}
+	v.RootMetadataB64 = b64(oldEnv)
+	v.NewRootMetadataB64 = b64(newEnv)
+	v.ExpectedError = "ErrInvalidRequireKeyTypes"
+	return saveChecked(dir, v)
+}

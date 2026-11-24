@@ -212,8 +212,11 @@ func TestLoadInitialRoot_DeclaredKeyTypeDoesNotMatchSPKI(t *testing.T) {
 }
 
 // TestLoadInitialRoot_InvalidRequireKeyTypes covers step 4 prompt Part
-// B3's require_keytypes validation: present-but-empty, an unknown
-// keytype, a duplicate keytype, and a keytype the role has no key of.
+// B3's require_keytypes validation (present-but-empty, an unknown keytype,
+// a duplicate keytype, a keytype the role has no key of) plus
+// step-04a-review.md R4A-1's "omitted entirely" case: require_keytypes is
+// mandatory on every role, so an omitted field is malformed metadata too,
+// not "no requirement".
 func TestLoadInitialRoot_InvalidRequireKeyTypes(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	r1, r2 := mustKey(t), mustKey(t)
@@ -225,25 +228,59 @@ func TestLoadInitialRoot_InvalidRequireKeyTypes(t *testing.T) {
 			`"` + tk.id + `":{"keytype":"ecdsa-p384","public_key_der_b64":"` + tk.publicB64() + `"},` +
 			`"` + lk.id + `":{"keytype":"ecdsa-p384","public_key_der_b64":"` + lk.publicB64() + `"}`
 	}
+	// requireKeyTypesField is the targets role's "require_keytypes": ...
+	// JSON fragment including the key, or "" to omit the field entirely
+	// (R4A-1's case).
 	cases := map[string]string{
-		"present but empty": `[]`,
-		"unknown keytype":   `["dilithium3"]`,
-		"duplicate keytype": `["ecdsa-p384","ecdsa-p384"]`,
-		"type has no key":   `["mldsa-87"]`,
+		"omitted":           "",
+		"present but empty": `,"require_keytypes":[]`,
+		"unknown keytype":   `,"require_keytypes":["dilithium3"]`,
+		"duplicate keytype": `,"require_keytypes":["ecdsa-p384","ecdsa-p384"]`,
+		"type has no key":   `,"require_keytypes":["mldsa-87"]`,
 	}
-	for name, requireKeyTypes := range cases {
+	for name, requireKeyTypesField := range cases {
 		t.Run(name, func(t *testing.T) {
 			payload := `{"schema":"relay.root.v1","version":1,"expires":"` + now.Add(24*time.Hour).Format(time.RFC3339) +
 				`","keys":{` + keysJSON() + `},` +
-				`"roles":{"root":{"keyids":["` + r1.id + `","` + r2.id + `"],"threshold":2},` +
-				`"targets":{"keyids":["` + tk.id + `"],"threshold":1,"require_keytypes":` + requireKeyTypes + `},` +
-				`"log":{"keyids":["` + lk.id + `"],"threshold":1}}}`
+				`"roles":{"root":{"keyids":["` + r1.id + `","` + r2.id + `"],"threshold":2,"require_keytypes":["ecdsa-p384"]},` +
+				`"targets":{"keyids":["` + tk.id + `"],"threshold":1` + requireKeyTypesField + `},` +
+				`"log":{"keyids":["` + lk.id + `"],"threshold":1,"require_keytypes":["ecdsa-p384"]}}}`
 			env := signEnvelope(trust.RootPayloadType, []byte(payload), r1, r2)
 			if _, err := trust.LoadInitialRoot(env); !errors.Is(err, trust.ErrInvalidRequireKeyTypes) {
 				t.Fatalf("err = %v, want ErrInvalidRequireKeyTypes", err)
 			}
 		})
 	}
+}
+
+// TestLoadInitialRoot_RequireKeyTypesOmittedOnRootOrLogRole covers R4A-1 for
+// the root and log roles specifically (the table above only varies the
+// targets role): omitting require_keytypes on root, or on log, with every
+// other role valid, must also be rejected.
+func TestLoadInitialRoot_RequireKeyTypesOmittedOnRootOrLogRole(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	r1, r2 := mustKey(t), mustKey(t)
+	tk := mustKey(t)
+	lk := mustKey(t)
+	all := []*genKey{r1, r2, tk, lk}
+
+	t.Run("root role omits require_keytypes", func(t *testing.T) {
+		payload := buildRootPayload(1, now.Add(24*time.Hour), all,
+			roleOfOmittingKeyTypes([]*genKey{r1, r2}, 2), roleOf([]*genKey{tk}, 1), roleOf([]*genKey{lk}, 1))
+		env := signEnvelope(trust.RootPayloadType, payload, r1, r2)
+		if _, err := trust.LoadInitialRoot(env); !errors.Is(err, trust.ErrInvalidRequireKeyTypes) {
+			t.Fatalf("err = %v, want ErrInvalidRequireKeyTypes", err)
+		}
+	})
+
+	t.Run("log role omits require_keytypes", func(t *testing.T) {
+		payload := buildRootPayload(1, now.Add(24*time.Hour), all,
+			roleOf([]*genKey{r1, r2}, 2), roleOf([]*genKey{tk}, 1), roleOfOmittingKeyTypes([]*genKey{lk}, 1))
+		env := signEnvelope(trust.RootPayloadType, payload, r1, r2)
+		if _, err := trust.LoadInitialRoot(env); !errors.Is(err, trust.ErrInvalidRequireKeyTypes) {
+			t.Fatalf("err = %v, want ErrInvalidRequireKeyTypes", err)
+		}
+	})
 }
 
 func TestLoadInitialRoot_InvalidRootAndLogRoles(t *testing.T) {
