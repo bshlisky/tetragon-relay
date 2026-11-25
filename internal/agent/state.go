@@ -1,6 +1,9 @@
 package agent
 
-import "fmt"
+import (
+	"fmt"
+	"sync"
+)
 
 // State is one of architecture doc 8.3/8.4's ten relay-agent states.
 type State int
@@ -204,7 +207,14 @@ func (e *ErrInvalidTransition) Error() string {
 // (structural: this package's control loop only ever calls
 // apply.Engine's Apply/Reconcile, both add-before-remove; nothing in this
 // file has a handle to, or calls, any "unload everything" primitive).
+//
+// mu guards current: D3's RunSession fires every transition from its own
+// goroutine, but Current() may legitimately be read concurrently from
+// another (a status/metrics read, or -- today -- a test observing
+// RunSession's progress), so both methods take the same lock rather than
+// assuming a single-goroutine-only caller.
 type StateMachine struct {
+	mu      sync.Mutex
 	current State
 	auditor Auditor
 }
@@ -222,7 +232,11 @@ func NewStateMachine(auditor Auditor) (*StateMachine, error) {
 }
 
 // Current returns the machine's current state.
-func (m *StateMachine) Current() State { return m.current }
+func (m *StateMachine) Current() State {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.current
+}
 
 // Fire applies event to the machine. EventTerminateRevoked is valid from
 // any state (architecture doc 8.4: "entered from any state on
@@ -230,6 +244,8 @@ func (m *StateMachine) Current() State { return m.current }
 // current state in transitions, else ErrInvalidTransition (the state is
 // left unchanged) and no audit record is written for the rejected event.
 func (m *StateMachine) Fire(event Event) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if event == EventTerminateRevoked {
 		from := m.current
 		m.current = StateRevoked

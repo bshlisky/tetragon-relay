@@ -297,6 +297,12 @@ const (
 	// (architecture doc 8.6's example).
 	DefaultCollectorBatchMaxAge = 2 * time.Second
 
+	// ControlConnectDegradedTimeout is architecture doc 8.4's DEGRADED
+	// row, first entry condition: "No controller for > 5 min" --
+	// EventConnectTimeout fires once a session has gone this long
+	// without completing Hello/HelloAck (step-06a-resume.md D3).
+	ControlConnectDegradedTimeout = 5 * time.Minute
+
 	// DefaultIdentityKeyRotation is identity.key_rotation's default
 	// when relay.yaml omits it. Intentionally the same value as
 	// internal/identity.DefaultRotationInterval (architecture doc
