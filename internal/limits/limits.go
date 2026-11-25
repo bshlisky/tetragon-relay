@@ -252,17 +252,20 @@ const (
 	// buffer an unbounded message, and the agent itself never sends one.
 	MaxControlMessageBytes = 1 << 20 // 1 MiB
 
-	// ControlKeepaliveInterval and ControlKeepaliveTimeout are the
-	// control channel's HTTP/2 PING keepalive parameters (architecture
-	// doc 6.1: "HTTP/2 PING every 30 s, timeout 10 s").
+	// ControlKeepaliveInterval is the control channel's HTTP/2 PING
+	// keepalive interval (architecture doc 6.1: "every 30 s").
 	ControlKeepaliveInterval = 30 * time.Second
-	ControlKeepaliveTimeout  = 10 * time.Second
+	// ControlKeepaliveTimeout is the control channel's HTTP/2 PING
+	// keepalive timeout (architecture doc 6.1: "timeout 10 s").
+	ControlKeepaliveTimeout = 10 * time.Second
 
-	// ControlDialBackoffBase and ControlDialBackoffCap are the control
-	// channel's reconnect backoff parameters (architecture doc 6.3 step
-	// 6: "full-jitter exponential backoff (1 s base, 5 min cap)").
+	// ControlDialBackoffBase is the control channel's reconnect backoff
+	// base (architecture doc 6.3 step 6: "full-jitter exponential
+	// backoff (1 s base, 5 min cap)").
 	ControlDialBackoffBase = 1 * time.Second
-	ControlDialBackoffCap  = 5 * time.Minute
+	// ControlDialBackoffCap is the control channel's reconnect backoff
+	// cap (architecture doc 6.3 step 6).
+	ControlDialBackoffCap = 5 * time.Minute
 )
 
 // TetragonVersionFamily is the pinned major.minor version family internal/
