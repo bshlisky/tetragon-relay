@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed.
+Accepted, with the amendments in "Amendments (step-04c-review.md, R4C-1/R4C-2)" below.
 
 ## Context
 
@@ -116,41 +116,37 @@ actually in the code (nothing did: the design below was confirmed against the re
   `Startup` calls a new `reverifyLKG(st, now, auditor) error` step:
   1. `st.Domains()` lists every domain with a persisted LKG.
   2. For each domain, `st.Get(domain)` returns the cached `LKGSet` (as today); its
-     `RawEnvelope`/`RootVersion` are the fields this ADR adds.
+     `RawEnvelope`/`RootVersion` are the fields this ADR adds. **As amended by R4C-1**: a
+     missing `RawEnvelope` or a `RootVersion == 0` is `store.ErrTampered`, not "nothing to
+     check" (see Amendments below).
   3. `st.RootAtVersion(set.RootVersion)` retrieves that exact historical root's raw bytes;
      missing (should be impossible given section 3's retention rule; treated as
      `store.ErrTampered` if it happens anyway, since it means the retention invariant was
      violated) is fail-closed, never "skip this domain."
   4. `trust.LoadInitialRoot(rootBytes)` parses that historical root (self-verifying,
-     exactly as `establishTrustRoot` already does for the persisted/current root), then
-     `root.TargetsVerifier(now)` (expiry-checked as of now — the review's "expiry ...
-     checks excluded, since this is not a new acceptance" refers to epoch/expiry checks
-     from `verify.Verify`'s own algorithm being skipped here, not to `TargetsVerifier`'s own
-     `ErrRootMetadataExpired` guard, which exists purely to keep that method's one
-     documented precondition; this is addressed explicitly in `reverifyLKG`'s own tests:
-     expiry of the root metadata used to re-verify an old LKG does not, by itself, treat the
-     LKG as tampered — see the implementation note below).
-  5. `dsse.ParseEnvelope` + the verifier's `Verify(env)` re-checks the signature threshold
-     exactly as `verify.Verify` step 3 does, but with NO epoch, expiry, target, or scope
-     checks (the review: "expiry and epoch checks excluded, since this is not a new
+     exactly as `establishTrustRoot` already does for the persisted/current root). **As
+     amended by R4C-2**: the signature check in step 5 below uses
+     `root.ProvenanceVerifier()`, not `root.TargetsVerifier(now)` — whether `root.Expires`
+     has elapsed is audited separately as operational staleness and no longer gates whether
+     the signature is actually checked (see Amendments below).
+  5. The verifier's `Verify(env)` (via `dsse.ParseEnvelope`) re-checks the signature
+     threshold exactly as `verify.Verify` step 3 does, but with NO epoch, expiry, target, or
+     scope checks (the review: "expiry and epoch checks excluded, since this is not a new
      acceptance" — this is re-confirming provenance of an already-accepted artifact, not
-     re-running acceptance).
+     re-running acceptance). This check now always runs, regardless of whether the
+     historical root's own metadata has expired (R4C-2).
   6. The envelope's payload is re-parsed into the same bundle-policy shape `LKGSet` stores
      (name, version, canonical JSON per policy, mode) and compared field-for-field against
      the cached `set.Policies`/`set.Mode`. Any mismatch (signature failure, parse failure,
      or parsed-content mismatch) is `store.ErrTampered`, surfaced the same way every other
      `Startup` tamper path is (store already open, error returned, caller must not retry
      expecting self-heal).
-  - Implementation note on expired root metadata: if `TargetsVerifier(now)` itself refuses
-    (the historical root's OWN 365-day validity has elapsed — plausible for a very old LKG
-    on a host that has not re-applied that domain in a long time), this is logged via
-    `Auditor` and does NOT mark the store tampered (an expired root is an operational
-    staleness condition the architecture doc already treats as "stop accepting NEW bundles,
-    keep LKG enforcing" at the targets-verification layer, not evidence the LKG itself was
-    forged) — `reverifyLKG` treats this one specific outcome as "skip re-verification for
-    this domain, audit it" rather than `ErrTampered`. Every other failure mode in step 5/6
-    above (bad signature, mismatched content) IS `ErrTampered`: those can only happen if
-    the stored bytes were altered or forged, never from ordinary time passing.
+  - Implementation note on expired root metadata (superseded by R4C-2; kept for history —
+    see Amendments below for the corrected behavior): the original implementation used
+    `TargetsVerifier(now)` and, if it returned `ErrRootMetadataExpired`, skipped the
+    signature check entirely and trusted the cached set. This was found (R4C-2) to let an
+    attacker who forged a valid store index HMAC bypass re-verification by pointing an
+    altered LKG at any sufficiently old (expired) retained root version.
 
 ## Consequences
 
@@ -175,3 +171,52 @@ actually in the code (nothing did: the design below was confirmed against the re
   the new fields, which this step adds.
 - **No change** to `apply.LKGStore`'s method set, `internal/store`'s dependency graph
   (still no `internal/trust` import), or any Accepted ADR.
+
+## Amendments (docs/reviews/step-04c-review.md, R4C-1/R4C-2)
+
+Both findings below were fail-open branches in `reverifyDomainLKG`, justified in code
+comments as avoiding a "new requirement" rather than decided by the architect. Per this
+project's working agreement, ambiguity resolves to the interpretation that rejects more,
+and a branch that skips a security check needs an explicit architect decision — hence
+these amendments, which supersede the corresponding text above (left in place, struck
+through in spirit, for history) rather than silently rewriting it.
+
+- **R4C-1 (a missing raw envelope skips re-verification).** The original design (section 4,
+  step 2 above) treated an `LKGSet` with no `RawEnvelope` as "a pre-R4B-2 record, nothing to
+  check." No such record exists anywhere: `internal/store`'s LKG schema, and this
+  re-verification step, were both introduced together in step 4b/4c and have never shipped
+  without it. Worse, this is precisely the attack R4B-2/this ADR exists to defend against:
+  an attacker who can produce a valid store-index HMAC (e.g. a compromised HMAC key)
+  rewrites the LKG blob with altered policies and simply omits `raw_envelope` (or sets
+  `root_version` to 0), and re-verification would skip straight past the one check that
+  would have caught it. **Amended decision**: an LKG entry with no `RawEnvelope`, or with
+  `RootVersion == 0` (never a value `trust.LoadInitialRoot`/`Update` produces), is
+  `store.ErrTampered`. The "pre-R4B-2" branch and its comment are removed.
+- **R4C-2 (an expired historical root skips signature verification entirely).** The
+  original design (section 4, step 4's implementation note above) used
+  `root.TargetsVerifier(now)` to build the re-verification `Verifier`, and treated
+  `ErrRootMetadataExpired` as "skip re-verification for this domain, audit it" rather than
+  tamper. `TargetsVerifier`'s expiry check is correct for its actual purpose — deciding
+  whether to accept a *new* bundle — but a signature's validity does not change with time,
+  and within a year of normal fleet operation every older retained root will have expired.
+  An attacker with the HMAC key could therefore point an altered LKG at an expired retained
+  root version and bypass the check exactly as in R4C-1. **Amended decision**:
+  `internal/trust` gains `(*Root).ProvenanceVerifier()`, a trust-layer constructor that
+  checks signatures and role thresholds (including `RequireKeyTypes`) under a root
+  regardless of its metadata expiry, named so it cannot be mistaken for an acceptance-path
+  check; its doc comment states it must never be used to accept new bundles.
+  `reverifyDomainLKG` now uses it instead of `TargetsVerifier`, so expiry of the historical
+  root's own metadata never again skips the signature check — an expired root is still
+  audited as operational staleness, but no longer changes the outcome.
+  `TestProvenanceVerifier_OnlyCalledFromAgentReverify` (internal/trust, AST-based, scans the
+  whole module) statically enforces that only `internal/agent`'s re-verification calls it.
+- **New regression tests** (`internal/agent/reverify_test.go`):
+  `TestStartup_ReverifyLKG_NoRawEnvelopeIsTampered`,
+  `TestStartup_ReverifyLKG_ZeroRootVersionIsTampered`,
+  `TestStartup_ReverifyLKG_ExpiredHistoricalRootStillVerifiesAndSucceeds` (a genuine,
+  untampered LKG under an expired root still loads, with the expiry only audited), and
+  `TestStartup_ReverifyLKG_ExpiredHistoricalRootStillDetectsTamper` (an altered envelope
+  under an expired root is still caught). Plus
+  `TestRoot_ProvenanceVerifier_IgnoresExpiry` (internal/trust) covering the new method
+  directly: a genuine signature under long-expired metadata still verifies; a forged one
+  still does not.
