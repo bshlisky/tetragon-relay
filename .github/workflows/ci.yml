@@ -235,6 +235,14 @@ jobs:
           # unprivileged tetragon-relay group member.
           go test -tags integration -race -count=1 -c -o /tmp/tetra.itest ./internal/tetra
           go test -tags integration -race -count=1 -c -o /tmp/apply.itest ./internal/apply
+          # step-04c.md Part E7: internal/agent's own integration test
+          # (apply a bundle, simulate an agent restart via a store
+          # close/reopen + Startup, confirm epoch/LKG persistence and
+          # replay rejection) against the SAME Tetragon instance this
+          # job already started. Built and run alongside the existing
+          # two, before apply's own final "nothing left loaded" check
+          # below, so that check also covers whatever this suite loaded.
+          go test -tags integration -race -count=1 -c -o /tmp/agent.itest ./internal/agent
           # TestAllowlist_NoOtherRPCsReferenced (internal/tetra) reads its
           # own package's .go files via a relative path, so each compiled
           # test binary must run with its source package directory as the
@@ -247,7 +255,7 @@ jobs:
           # now fail-closed per step-03b-review.md R3B-1) is what runs;
           # that check is only exercised against a real SELinux-enabled
           # peer by scripts/e2e-rhel9.sh on a real RHEL 9 host.
-          sg tetragon-relay -c 'cd internal/tetra && /tmp/tetra.itest -test.v && cd ../apply && /tmp/apply.itest -test.v'
+          sg tetragon-relay -c 'cd internal/tetra && /tmp/tetra.itest -test.v && cd ../apply && /tmp/apply.itest -test.v && cd ../agent && /tmp/agent.itest -test.v'
 
       - name: Verify the admin-path test's PID scoping actually held (step-03a-review.md R3-E3)
         if: always()
