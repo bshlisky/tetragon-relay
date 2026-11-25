@@ -79,7 +79,17 @@ var (
 	// ErrBadHostURISAN is returned when the peer certificate's URI SAN
 	// does not match "spiffe://<trust-domain>/host/<uuid>".
 	ErrBadHostURISAN = errors.New("testcontroller: peer certificate URI SAN is not a valid host SPIFFE ID for this trust domain")
+	// ErrBadInitialSeq is returned when the first AgentMessage on a
+	// stream does not carry seq == firstSeq (docs/decisions/
+	// 0032-seq-numbering-starts-at-one.md: the pinned rule, seq starts
+	// at 1 in each direction). The stream is terminated with
+	// Terminate{PROTOCOL_ERROR} before this error is returned.
+	ErrBadInitialSeq = errors.New("testcontroller: AgentMessage.seq does not start at the pinned value")
 )
+
+// firstSeq is docs/decisions/0032-seq-numbering-starts-at-one.md's pinned
+// starting value for seq in each direction.
+const firstSeq = 1
 
 // Connect implements controlv1.AgentControlServer (architecture doc 6.2's
 // Connect RPC; 6.3 steps 1-3: authorize, then Hello/HelloAck). The full
@@ -89,6 +99,7 @@ func (s *Server) Connect(stream controlv1.AgentControl_ConnectServer) error {
 	hostUUID, err := s.authorize(stream.Context())
 	if err != nil {
 		_ = stream.Send(&controlv1.ControllerMessage{
+			Seq: firstSeq,
 			Body: &controlv1.ControllerMessage_Terminate{Terminate: &controlv1.Terminate{
 				Reason: terminateReasonFor(err), Detail: err.Error(),
 			}},
@@ -104,6 +115,16 @@ func (s *Server) Connect(stream controlv1.AgentControl_ConnectServer) error {
 	if hello == nil {
 		return fmt.Errorf("testcontroller: expected Hello as the first message, got %T", msg.GetBody())
 	}
+	if msg.GetSeq() != firstSeq {
+		err := fmt.Errorf("%w: first AgentMessage.seq = %d, want %d", ErrBadInitialSeq, msg.GetSeq(), firstSeq)
+		_ = stream.Send(&controlv1.ControllerMessage{
+			Seq: firstSeq,
+			Body: &controlv1.ControllerMessage_Terminate{Terminate: &controlv1.Terminate{
+				Reason: controlv1.Terminate_PROTOCOL_ERROR, Detail: err.Error(),
+			}},
+		})
+		return err
+	}
 	if hello.GetHostUuid() != hostUUID {
 		return fmt.Errorf("testcontroller: Hello.host_uuid %q does not match the certificate's host UUID %q", hello.GetHostUuid(), hostUUID)
 	}
@@ -113,6 +134,7 @@ func (s *Server) Connect(stream controlv1.AgentControl_ConnectServer) error {
 		return fmt.Errorf("testcontroller: generate nonce: %w", err)
 	}
 	return stream.Send(&controlv1.ControllerMessage{
+		Seq: firstSeq,
 		Body: &controlv1.ControllerMessage_HelloAck{HelloAck: &controlv1.HelloAck{
 			Nonce: nonce, HeartbeatIntervalSeconds: s.cfg.HeartbeatIntervalSeconds,
 		}},

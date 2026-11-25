@@ -29,14 +29,14 @@ does not implement this check; it is the gateway's job entirely.
 
 | Field | Type | Semantics |
 | --- | --- | --- |
-| `seq` | `uint64` | Strictly increasing per stream, starting however the agent chooses (this step does not fix a starting value; the gateway must track the stream's own first-seen `seq` and require strict increase from there, never assume it starts at 0 or 1). A gap or regression closes the stream (architecture 6.5; section 5 below). |
+| `seq` | `uint64` | Pinned (`docs/decisions/0032-seq-numbering-starts-at-one.md`): the first `AgentMessage` on a stream has `seq = 1`; every following message's `seq` is exactly the previous plus 1. Any other value -- 0, a gap, a regression, a repeat -- is a protocol error: the gateway sends `Terminate{PROTOCOL_ERROR}` and closes the stream. `internal/testcontroller.Server.Connect` enforces this on the first message today. |
 | `body` (oneof) | `Hello \| Heartbeat \| ApplyResult \| StateReport \| Alert` | Exactly one of these per message. |
 
 ### 1.2 `ControllerMessage` (controller → agent), `control.proto:36-47`
 
 | Field | Type | Semantics |
 | --- | --- | --- |
-| `seq` | `uint64` | Same strictly-increasing rule, controller's own stream direction. |
+| `seq` | `uint64` | Same pinned rule (`docs/decisions/0032-seq-numbering-starts-at-one.md`), the controller's own, independent stream direction: first message `seq = 1`, then exactly +1. The agent closes the stream and reconnects (existing backoff) on any other value; it does not trust a `Terminate` from a peer whose own sequencing is already broken. |
 | `body` (oneof) | `HelloAck \| PolicyBundle \| StateRequest \| RotateIdentity \| TrustUpdate \| Terminate` | **This set is closed by design** (`control.proto:46`): "No exec, file write, shell, config-set, or debug messages exist by design." Do not add messages to this oneof without an ADR-equivalent review on the agent side — the agent's proto breaking-change CI gate (`docs/decisions/0010-proto-breaking-change-baseline.md`) will reject an uncoordinated change anyway. |
 
 ### 1.3 `Hello` (agent → controller, once per connection), `control.proto:49-66`
@@ -134,8 +134,11 @@ handshake completes) or an immediate `Terminate` with a reason (section 6).
   anywhere in this repository (agent or test server) — this is entirely your responsibility.
 - **Message size cap 1 MiB**; bundles above 512 KiB rejected **at authoring time** (in your
   policy UI / signer pipeline, not at the gateway).
-- **`seq` gaps or regressions close the stream** — per direction (the agent's `seq` and your
-  own `seq` are independent counters, each must only increase).
+- **`seq` is pinned, not merely increasing** (`docs/decisions/0032-seq-numbering-starts-at-one.md`):
+  per direction (the agent's `seq` and your own `seq` are independent counters), the first
+  message is `seq = 1` and every following message is exactly the previous plus 1. Any other
+  value — not just a gap or regression, but also `seq = 0` on the first message or a repeat —
+  closes the stream.
 - **The gateway only forwards bundles whose digest it has a Signer receipt for; it cannot
   construct envelopes itself** (and the agent would reject a self-constructed one anyway —
   see section 5's verification algorithm, which never trusts the gateway's own signature).
@@ -225,8 +228,10 @@ reference since `ApplyResult.Status` is part of this step's proto contract.)
 - [ ] Forward `PolicyBundle.envelope` byte-for-byte, never re-encoded.
 - [ ] Never construct a `PolicyBundle` envelope yourself; only forward one with a Signer
       receipt.
-- [ ] Reject (`seq` gap/regression) a stream whose sequence numbers are not strictly
-      increasing in each direction.
+- [ ] Reject (`Terminate{PROTOCOL_ERROR}`) a stream whose `AgentMessage.seq` does not start
+      at 1 and increase by exactly 1 thereafter
+      (`docs/decisions/0032-seq-numbering-starts-at-one.md`); send your own `ControllerMessage.seq`
+      the same way.
 
 **Reference implementation of the handshake only**: `cmd/testcontroller` (build tag
 `testserver`; see its README). It implements the TLS profile, the client-certificate checks
