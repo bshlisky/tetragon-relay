@@ -64,6 +64,60 @@ func parseUnitDirectives(t *testing.T, path string) map[string]string {
 	return out
 }
 
+// execStartPreLines returns every "ExecStartPre=" directive's value, in
+// file order (parseUnitDirectives' map collapses repeated keys to the
+// last one, which is wrong for ExecStartPre: systemd runs every
+// occurrence, in order).
+func execStartPreLines(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path) //nolint:gosec // path is this package's own fixed source file, not attacker-controlled
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	var out []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if val, ok := strings.CutPrefix(line, "ExecStartPre="); ok {
+			out = append(out, val)
+		}
+	}
+	return out
+}
+
+// TestProductionUnit_ProvisionsTPMBeforeHostFacts implements
+// docs/prompts/step-05a.md Part C3: the TPM NV counter index must be
+// provisioned (relay-probe --provision-tpm, root via the leading "+") on
+// every unit start, before relayd itself is ever exec'd, and before (or
+// at least alongside) the existing host-facts probe -- both are
+// ExecStartPre=+ lines run as root ahead of the unprivileged ExecStart.
+func TestProductionUnit_ProvisionsTPMBeforeHostFacts(t *testing.T) {
+	lines := execStartPreLines(t, unitFilePath(t))
+	var tpmIdx, factsIdx = -1, -1
+	for i, l := range lines {
+		if strings.Contains(l, "--provision-tpm") {
+			tpmIdx = i
+		}
+		if strings.Contains(l, "--facts-path") {
+			factsIdx = i
+		}
+	}
+	if tpmIdx < 0 {
+		t.Fatalf("no ExecStartPre= line invokes relay-probe --provision-tpm; lines = %v", lines)
+	}
+	if !strings.HasPrefix(lines[tpmIdx], "+") {
+		t.Errorf("the --provision-tpm ExecStartPre line does not start with '+' (must run as root: owner authorization is required to define the NV index): %q", lines[tpmIdx])
+	}
+	if !strings.Contains(lines[tpmIdx], "--tpm-device /dev/tpmrm0") {
+		t.Errorf("the --provision-tpm ExecStartPre line does not pin --tpm-device to /dev/tpmrm0 (architecture doc 8.6: never /dev/tpm0): %q", lines[tpmIdx])
+	}
+	if factsIdx < 0 {
+		t.Fatalf("no ExecStartPre= line invokes relay-probe's host-facts mode; lines = %v", lines)
+	}
+	if tpmIdx > factsIdx {
+		t.Errorf("TPM provisioning (index %d) runs AFTER the host-facts probe (index %d); order is not required by the architecture doc but this test pins the current, deliberate order", tpmIdx, factsIdx)
+	}
+}
+
 // TestProductionUnit_NoCapabilities implements step-03a-review.md R3-3:
 // the production unit must grant no capabilities at all. R3-1 reverted
 // commit 6be5137's CAP_SYS_PTRACE grant (architecture doc P9/section 8.7:

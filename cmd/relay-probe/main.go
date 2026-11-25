@@ -18,6 +18,7 @@ import (
 	"strconv"
 
 	"github.com/bshlisky/tetragon-relay/internal/hostprobe"
+	"github.com/bshlisky/tetragon-relay/internal/tpm"
 )
 
 func main() {
@@ -31,8 +32,18 @@ func run(args []string, stdout, stderr *os.File) int {
 	tetragonBinaryPath := fs.String("tetragon-binary", "/usr/local/bin/tetragon", "path to the Tetragon daemon binary to hash")
 	factsPath := fs.String("facts-path", hostprobe.HostFactsPath, "where to write the host facts file (ignored with --report)")
 	relayGroup := fs.String("relay-group", "tetragon-relay", "group that should own the facts file (ignored with --report)")
+	provisionTPM := fs.Bool("provision-tpm", false, "provision the TPM NV counter index used for store rollback protection, then exit (requires owner authorization; run once, before the agent's first start)")
+	tpmDevice := fs.String("tpm-device", "/dev/tpmrm0", "TPM resource manager device path (--provision-tpm only; architecture doc 8.6 -- never /dev/tpm0)")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+
+	if *provisionTPM {
+		if err := provisionTPMCounter(*tpmDevice); err != nil {
+			_, _ = fmt.Fprintf(stderr, "relay-probe: provision TPM: %v\n", err)
+			return 1
+		}
+		return 0
 	}
 
 	facts, err := collect(*tetragonBinaryPath)
@@ -66,6 +77,24 @@ func run(args []string, stdout, stderr *os.File) int {
 		return 1
 	}
 	return 0
+}
+
+// provisionTPMCounter opens the TPM resource manager device and
+// provisions (or validates an already-correct) NV counter index at
+// tpm.DefaultCounterHandle (docs/prompts/step-05a.md C3). Run once, by
+// this root-run command via the unit's ExecStartPre=+
+// (packaging/systemd/tetragon-relay.service); relayd itself (unprivileged)
+// never defines or undefines this index, only reads and increments it
+// (internal/tpm.OpenCounter). Idempotent: running it again against an
+// already-correctly-provisioned index is a no-op, so it is safe to run on
+// every unit start, not just the first.
+func provisionTPMCounter(devicePath string) error {
+	dev, err := tpm.OpenDevice(devicePath)
+	if err != nil {
+		return fmt.Errorf("open TPM device %s: %w", devicePath, err)
+	}
+	defer func() { _ = dev.Close() }()
+	return tpm.ProvisionCounter(dev, tpm.DefaultCounterHandle)
 }
 
 func lookupGID(name string) (int, error) {

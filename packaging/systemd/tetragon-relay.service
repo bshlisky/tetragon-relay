@@ -26,6 +26,13 @@ Group=tetragon-relay
 SupplementaryGroups=tss
 RuntimeDirectory=tetragon-relay
 RuntimeDirectoryMode=0750
+# step-05a prompt Part C3: provisions (or validates) the TPM NV counter
+# index used for store rollback protection. Requires owner authorization,
+# hence root (the same ExecStartPre=+ as the host-facts probe below);
+# relayd itself (unprivileged) only ever reads and increments this index,
+# never defines or undefines it. Idempotent, so safe to run on every
+# unit start, not just the first time the index is absent.
+ExecStartPre=+/usr/libexec/tetragon-relay/relay-probe --provision-tpm --tpm-device /dev/tpmrm0
 ExecStartPre=+/usr/libexec/tetragon-relay/relay-probe --tetragon-binary /usr/local/bin/tetragon --relay-group tetragon-relay --facts-path /run/tetragon-relay/host-facts.json
 ExecStart=/usr/libexec/tetragon-relay/relayd --config /etc/tetragon-relay/relay.yaml
 WatchdogSec=30s

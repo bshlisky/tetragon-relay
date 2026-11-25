@@ -54,6 +54,29 @@ func TestRun_BadFlag(t *testing.T) {
 	}
 }
 
+// TestRun_ProvisionTPM_MissingDeviceFails covers --provision-tpm's own
+// flag-wiring and error path (run() returns 1, not a panic, and never
+// falls through to collect()/the facts-file path): the TPM success path
+// itself is internal/tpm.ProvisionCounter's own test suite's job
+// (internal/tpm/counter_test.go, against a real software TPM), since
+// provisionTPMCounter needs a real "/dev/tpmrm0"-shaped device file this
+// test environment cannot provide.
+func TestRun_ProvisionTPM_MissingDeviceFails(t *testing.T) {
+	dir := t.TempDir()
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = devNull.Close() }()
+	code := run([]string{
+		"--provision-tpm",
+		"--tpm-device", dir + "/no-such-tpmrm0",
+	}, devNull, devNull)
+	if code != 1 {
+		t.Fatalf("run(--provision-tpm) with a missing device = %d, want 1", code)
+	}
+}
+
 func TestRun_UnresolvableGroup(t *testing.T) {
 	if !collectIsImplemented() {
 		t.Skip("collect() is not implemented on this platform; nothing to test past flag parsing")
