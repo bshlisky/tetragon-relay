@@ -13,6 +13,25 @@ import (
 	"google.golang.org/grpc/peer"
 )
 
+// ScriptStream is the subset of controlv1.AgentControl_ConnectServer a
+// Script needs to drive one connected agent (docs/prompts/step-06a.md
+// Part E2).
+type ScriptStream interface {
+	Send(*controlv1.ControllerMessage) error
+	Recv() (*controlv1.AgentMessage, error)
+}
+
+// Script is called by Connect once Hello/HelloAck has completed, given
+// the still-open stream and the authorized host UUID, so a caller (an
+// E3 integration test driving a real agent) can exercise docs/prompts/
+// step-06a.md Part E2's scenarios: heartbeat expectations, StateRequest,
+// RotateIdentity, every Terminate reason, out-of-order seq, oversize
+// messages and unknown message types. Connect returns whatever Script
+// returns. Config's zero value (nil Script) preserves this package's
+// original docs/prompts/step-05b.md E2 behavior: return immediately
+// after HelloAck.
+type Script func(ctx context.Context, stream ScriptStream, hostUUID string) error
+
 // Config is everything the test server needs to run (architecture doc
 // 6.1's TLS profile, 6.3's client checks).
 type Config struct {
@@ -35,6 +54,9 @@ type Config struct {
 	Inventory map[string]bool
 	// HeartbeatIntervalSeconds is reported in HelloAck.
 	HeartbeatIntervalSeconds uint32
+	// Script, if non-nil, drives the stream after Hello/HelloAck
+	// (Part E2); see Script's own doc comment.
+	Script Script
 }
 
 // ServerTLSConfig builds the *tls.Config for Config: TLS 1.3 only,
@@ -133,12 +155,18 @@ func (s *Server) Connect(stream controlv1.AgentControl_ConnectServer) error {
 	if _, err := rand.Read(nonce); err != nil {
 		return fmt.Errorf("testcontroller: generate nonce: %w", err)
 	}
-	return stream.Send(&controlv1.ControllerMessage{
+	if err := stream.Send(&controlv1.ControllerMessage{
 		Seq: firstSeq,
 		Body: &controlv1.ControllerMessage_HelloAck{HelloAck: &controlv1.HelloAck{
 			Nonce: nonce, HeartbeatIntervalSeconds: s.cfg.HeartbeatIntervalSeconds,
 		}},
-	})
+	}); err != nil {
+		return err
+	}
+	if s.cfg.Script == nil {
+		return nil
+	}
+	return s.cfg.Script(stream.Context(), stream, hostUUID)
 }
 
 // ErrDenylisted and ErrNotInInventory are the two 6.3-step-2 authorization

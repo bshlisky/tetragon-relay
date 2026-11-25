@@ -6,10 +6,18 @@ mutual authentication, the client-certificate checks architecture doc section 6.
 describe (chain validity via TLS itself, host SPIFFE ID parsing, a denylist, inventory
 membership), and the Hello/HelloAck exchange.
 
-It never forwards policy bundles, tracks heartbeats beyond the first Hello, or persists
-anything. The full control message loop, trust updates, and bundle distribution are
-implemented by the customer's existing backend (see `docs/server-contract.md`), not by this
-tool.
+It never forwards policy bundles or persists anything. The full control message loop, trust
+updates, and bundle distribution are implemented by the customer's existing backend (see
+`docs/server-contract.md`), not by this tool.
+
+`internal/testcontroller.Config.Script` (docs/prompts/step-06a.md Part E2) lets a Go caller
+drive one connected agent past Hello/HelloAck: send `StateRequest`, `RotateIdentity`, every
+`Terminate` reason, an out-of-order `seq`, an oversize message, or an unknown message type,
+and read back whatever the agent sends (heartbeats, `ApplyResult`, `Alert`, `StateReport`).
+This standalone binary's own CLI does not expose scripting; E2/E3 scenarios are driven from
+Go test code (internal/testcontroller's own tests; the E3 integration suite) that constructs
+a `Script` directly, the same way `internal/controlclient`'s integration test already drives
+this package without going through the binary.
 
 Used by:
 
