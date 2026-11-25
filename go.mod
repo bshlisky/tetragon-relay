@@ -5,6 +5,7 @@ go 1.27.0
 toolchain go1.27.4
 
 require (
+	github.com/google/go-tpm v0.9.8
 	github.com/santhosh-tekuri/jsonschema/v5 v5.3.1
 	golang.org/x/sys v0.50.0
 	google.golang.org/grpc v1.85.0
