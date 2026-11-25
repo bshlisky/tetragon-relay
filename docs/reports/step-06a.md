@@ -1,11 +1,37 @@
-# Step 6a report (partial): First actions, Part A, Part B
+# Step 6a report (partial): First actions, Part A, Part B (+B6/B7), Part C, Part D
 
 Per docs/prompts/step-06a.md's working agreement ("session size: if the work clearly will
 not fit one session, finish a coherent part, get CI green, write the report for what is
-done, and stop. Never stop mid-item"): First actions, Part A (A1-A3) and Part B (the
-config loader) are complete, each commit green on GitHub (ci + integration). Parts C
-(relayd assembly), D (state machine and control loop) and E (tests, beyond B5) are **not
-yet done** -- see section 9.
+done, and stop. Never stop mid-item"): First actions, Part A (A1-A3), Part B (the config
+loader, plus the architect's two follow-up hardening items B6/B7), Part C (relayd
+assembly) and Part D (the state machine and control-message dispatcher) are complete,
+each commit green on GitHub (ci + integration). Part E (beyond B5's FuzzConfig, already
+done) -- state-machine/handler unit tests are already included with D above, but
+`cmd/testcontroller` scripted multi-message sequences (E2) and the E3 systemd-sandbox
+integration suite are **not yet done** -- see section 9.
+
+## 0. Updates since the first partial report
+
+- **B6** (architect review): `internal/config.Load` now opens relay.yaml with
+  `O_NOFOLLOW` and performs every check (regular file, mode, owner, group) against the
+  open file descriptor's `Stat()`, not a separate path-based `Lstat`/`Stat` pair -- closing
+  the check-then-open race the original implementation left.
+- **B7** (architect review): `internal/config.Load` additionally refuses an
+  attacker-writable or non-root-owned parent directory, opened the same descriptor-based
+  way (`O_DIRECTORY|O_NOFOLLOW`).
+- **Part D1**: `internal/agent.StateMachine`, a table-driven implementation of
+  architecture doc 8.3/8.4's ten states, transcribed edge for edge, plus one documented
+  extension (`EventDegradedCondition`) for D2's explicit cert-expiry rule.
+- **Part D2**: `internal/agent.ControlLoop.HandleControllerMessage`, the message
+  dispatcher for every member of `ControllerMessage`'s closed oneof, ADR 0032's seq
+  enforcement (`SeqTracker`), `BuildHeartbeat`, and `CheckCertExpiry`.
+- **Part C**: `cmd/relayd/main.go` assembles the startup sequence this repository's
+  components already implement into a running process, with production-only TPM-device
+  and no-test-enroller restrictions (C2/C3) and `sd_notify`/watchdog/clean-shutdown (C4).
+
+See sections 2-8 below for the full, updated detail (file tree, command output, mapping,
+invariants, deviations, dependencies, limitations) covering every item above; section 9
+lists exactly what remains.
 
 ## 1. Summary
 
@@ -69,6 +95,24 @@ internal/
 Makefile                                 (+FuzzConfig in fuzz-short; internal/config in
                                           COVER90_PKGS)
 .github/workflows/nightly-fuzz.yml       (+FuzzConfig matrix entry)
+internal/
+  config/
+    load.go, load_test.go, errors.go     (B6: O_NOFOLLOW descriptor-based checks;
+                                          B7: checkParentDir/validateParentDirInfo)
+    fileinfo_stub_test.go                (new: synthetic os.FileInfo for owner/group
+                                          branch coverage without root)
+  agent/
+    state.go, state_test.go              (new: Part D1 StateMachine)
+    controlloop.go, controlloop_test.go  (new: Part D2 ControlLoop dispatcher)
+    snapshot.go, snapshot_test.go        (new: RealSnapshotProvider)
+    identityrotator.go, identityrotator_test.go (new: RealIdentityRotator)
+cmd/relayd/
+  main.go                                (Part C: full startup sequence assembly)
+  certutil.go                            (new: PEM cert-bundle loader)
+  sdnotify.go                            (new: minimal sd_notify, no new dependency)
+  tpmdevice.go, tpmdevice_const.go,
+  tpmdevice_testtpm.go                   (new: C3's production-vs-testtpm TPM device policy)
+  enroller.go                            (new: C2's always-refuses noEnroller)
 ```
 
 ## 3. Command output
@@ -110,6 +154,11 @@ $ go test -count=1 -covermode=count -coverprofile=/tmp/pd.out ./internal/policyd
 | `6d53964` A3: seq pinning | 45635641617 success | 45635641617 success |
 | `9b231a3` B2: yamlharden extraction | 45637254652 success | 45637254652 success |
 | `bcec04e` B: config loader | 45639114690 success | 45639114690 success |
+| `1376ff1` B6: O_NOFOLLOW descriptor checks | 45681050094 success | 45681050094 success |
+| `42b736e` B7: parent directory checks | 45681283349 success | 45681283349 success |
+| `4605d43` D1: state machine | (bundled with D2's push) | — |
+| `4e92677` D2: control loop dispatcher | 45682914393 success | 45682914393 success |
+| `d815833` C: relayd assembly | 45684683356 success | 45684683356 success |
 
 ## 4. Mapping: item -> functions -> tests
 
@@ -124,6 +173,11 @@ $ go test -count=1 -covermode=count -coverprofile=/tmp/pd.out ./internal/policyd
 | B3 (schema/required fields) | `config.validateAndBuild` and its per-section helpers | `TestValidateAndBuild_EveryRule` (24 subtests, one per rejection), `TestValidateAndBuild_OptionalPositiveOverridesAccepted`, `TestParse_ValidConfig_DefaultsApplied` |
 | B4 (config digest) | `(*Config).Digest` | `TestParse_Digest_IsSHA256OfExactBytes` (including a copy-not-alias check) |
 | B5 (fuzz) | `FuzzConfig` | wired into `make fuzz-short` and `.github/workflows/nightly-fuzz.yml` |
+| B6 (O_NOFOLLOW descriptor checks) | `config.openConfigFile`, `checkOpenedConfigFile`, `validateConfigFileInfo` | `TestOpenConfigFile_*` (9 tests), `TestValidateConfigFileInfo_AllBranches` (9 subtests via `fileInfoStub`) |
+| B7 (parent directory checks) | `config.checkParentDir`, `validateParentDirInfo` | `TestCheckParentDir_*` (6 tests), `TestValidateParentDirInfo_AllBranches` (7 subtests) |
+| D1 (state machine) | `agent.StateMachine`, `transitions` | `TestEveryDocumentedTransition` (17 edges incl. the new `EventDegradedCondition` ones), `TestForbiddenTransitions` (every other (state,event) pair), `TestTerminateRevoked_ValidFromEveryState` |
+| D2 (control loop) | `agent.ControlLoop.HandleControllerMessage`, `SeqTracker`, `OutboundSeq`, `BuildHeartbeat`, `CheckCertExpiry` | `TestHandleControllerMessage_*` (11 tests), `TestSeqTracker*`, `TestBuildHeartbeat*`, `TestCheckCertExpiry_*` |
+| C (relayd assembly) | `main.run`, `openTPMDevice` (prod/testtpm), `buildEnroller`/`noEnroller`, `sdNotify`, `agent.RealSnapshotProvider`, `agent.RealIdentityRotator` | `TestRealSnapshotProvider_*`, `TestRealIdentityRotator_*`; `main.run` itself is glue code exercised end-to-end only by a real (root, TPM-equipped) host -- see section 11 |
 
 ## 5. Invariants and threats addressed
 
@@ -196,46 +250,60 @@ None. `internal/yamlharden` and `internal/config` both use only `gopkg.in/yaml.v
 
 ## 8. Known limitations
 
-- **Nothing in this repository calls `config.Load` yet.** `cmd/relayd`'s `main()` is still
-  the step-1 stub; wiring `--config`, `config.Load`, and feeding the result into
-  `internal/identity.Config`, `internal/controlclient.Config`, `internal/tetra.Config` and
-  `internal/apply`'s health-window config is Part C (not yet built).
-- **`Config.SecurityRelaxations()` is not yet connected to an `Auditor`.** Part B's job was
-  to surface which relaxations are configured; actually writing the "loud startup audit
-  record" the prompt requires is Part C's startup-sequence job
-  (`internal/agent.Startup`-equivalent wiring for this step).
+- **`cmd/relayd`'s control stream is never driven in this step.** `main.run` builds every
+  component (store, TPM, Tetragon client, apply engine, cert manager) but does not call
+  `internal/controlclient.Dial` or start `ControlLoop`'s message loop: doing so needs a
+  client certificate, and this build's `buildEnroller` always refuses to enroll (C2). A
+  host with a chain persisted by some future real enrollment flow would still have no code
+  path in this binary that dials out with it yet. This is the single largest gap between
+  "the components exist and are tested" and "the agent actually reaches STEADY," and is
+  the main reason E3's "clean start to STEADY with heartbeats arriving" scenario cannot be
+  demonstrated without first closing it.
+- **`RealIdentityRotator.Rotate` is unimplemented** (returns a named error): rotating onto
+  a brand-new TPM key needs `internal/tpm.RotateHostSigner`, which `internal/agent`
+  deliberately has no import of in this file (matching `identity.CertManager`'s own
+  TPM-decoupling); wiring it is a small, well-scoped follow-up.
+- **No reconnect/backoff orchestration loop exists.** `controlclient.DialBackoff` and
+  `agent.ControlLoop`'s dispatcher both exist and are tested in isolation, but nothing yet
+  ties them together into the actual "dial, Hello, loop messages, on disconnect back off
+  and redial" loop architecture doc 6.3 describes; this is what Part E2/E3 would exercise
+  once built.
 - **`internal/testcontroller`'s seq enforcement only covers the first message.** The full
-  per-direction rule (every later message, not just the first) requires the multi-message
-  control loop Part D builds; this is called out explicitly in ADR 0032 and
-  `docs/server-contract.md`.
+  per-direction rule (every later message, not just the first) now has an agent-side
+  counterpart (`SeqTracker`, Part D2) but still needs the reconnect loop above to be
+  exercised against a real multi-message stream.
+- **No separate controller CA bundle field in relay.yaml.** `main.run` reuses
+  `cfg.EnrollmentTrustBundle` for both identity enrollment and (if the control stream were
+  driven) the controller's own TLS verification -- the same test-only simplification
+  `docs/reports/step-05b.md`'s own integration test already uses, now also present in
+  production wiring. Flagged as an open question (section 10) rather than fixed silently.
 - Every known limitation from `docs/reports/step-05b.md` section 8 not specifically closed
-  above is unchanged by this partial step (no production Enroller, no real caller wires
-  `controlclient`/`identity` together yet, etc.) -- Part C is exactly the step that closes
-  most of them.
+  above remains (no production Enroller, in particular).
 
-## 9. What remains (Parts C, D, E of docs/prompts/step-06a.md)
+## 9. What remains (Part E of docs/prompts/step-06a.md)
 
 Not started:
 
-- **Part C** -- `cmd/relayd` assembly: flag parsing, the full startup sequence (crypto
-  self-test through control client, in the order Part C1 specifies), the production-build
-  "no test Enroller, stay UNENROLLED" rule (C2), TPM device restriction to `/dev/tpmrm0` in
-  production builds (C3), `sd_notify`/watchdog/clean-shutdown (C4).
-- **Part D** -- the table-driven state machine (architecture doc 8.3's ten states) and the
-  control message loop (Hello, Heartbeat, StateRequest, RotateIdentity, Terminate,
-  PolicyBundle/TrustUpdate stubs, inbound `seq`/size/unknown-type validation, the
-  DEGRADED-on-expiring-certificate rule, reconnect backoff/DEGRADED-after-5-minutes).
-- **Part E** -- unit tests for the state machine and every message handler (E1);
-  extending `cmd/testcontroller` to drive scripted multi-message sequences (E2); the E3
-  integration suite running `relayd` as a real process under the production systemd
-  sandbox settings with swtpm, real Tetragon and the test controller (the step's most
-  important evidence item, per the user's own stated priority); coverage >=90% for
-  `internal/config` (already met) and `internal/agent` once Part D lands.
+- **E2** -- extending `cmd/testcontroller` so it can drive scripted multi-message
+  sequences (heartbeat expectations, `StateRequest`, `RotateIdentity`, every `Terminate`
+  reason, out-of-order `seq`, oversize messages, unknown types) against a real stream.
+- **E3** -- the integration suite running `relayd` as a real process under the production
+  systemd unit's sandbox settings (`User=`, empty capabilities, `ProtectSystem=strict`,
+  `ReadWritePaths`, `ProtectProc=invisible`), with swtpm (via the new `testtpm` build tag)
+  through a real Tetragon and the test controller. This needs the reconnect/control-loop
+  orchestration gap (section 8) closed first for the "clean start to STEADY" scenario to
+  be meaningful; the other scenarios (SIGTERM leaves policies unchanged, a production
+  build stays UNENROLLED and still enforces LKG) are already exercisable against what
+  exists today.
+- Coverage: `internal/config` (93.8%) and `internal/agent` (92.9%) both already meet the
+  >=90% gate as of this report; E1 (state machine and handler unit tests) is, in effect,
+  already done (section 4's D1/D2 rows) even though E2/E3 are not.
 
-Given the size of C+D+E relative to what First actions/A/B already took, continuing in
-this same session is a deliberate choice to make with the user rather than something to
-decide unilaterally mid-step; see the session's own message to the user alongside this
-report.
+The reconnect/control-loop orchestration gap (section 8) is the natural next piece of
+work: a `RunSession` function tying `controlclient.Dial`, `SendHello`,
+`ControlLoop.HandleControllerMessage`, `BuildHeartbeat` (on a 15 s ticker) and
+`DialBackoff` together, driven by a real enrolled identity. A fresh session picking this
+report up should start there, since E2/E3 cannot produce meaningful evidence without it.
 
 ## 10. Open questions for the architect
 
@@ -249,6 +317,10 @@ report.
    recommended path. Should it become required when `identity.provider == "spire"`
    (cross-field validation), or does Part C's "no production Enroller exists yet" scope
    note make that moot until a real SPIRE integration exists to consume it?
+3. Should relay.yaml gain a separate `controller.ca_bundle` (or similar) field distinct
+   from `identity.trust_bundle`, now that `cmd/relayd/main.go` actually wires a value into
+   both roles? Section 8 flags this as the production code now repeating the integration
+   test's own documented simplification rather than only tests doing so.
 
 ## 11. Self-review: the 5 places a reviewer is most likely to find a bug
 
