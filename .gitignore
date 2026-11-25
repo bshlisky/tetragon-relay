@@ -5,6 +5,7 @@
 /cmd/relayd/relayd
 /cmd/relay-probe/relay-probe
 /bundlesign-test
+/testcontroller
 *.test
 *.out
 

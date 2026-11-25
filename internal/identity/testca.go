@@ -137,6 +137,37 @@ func (e *testEnroller) Enroll(ctx context.Context, csrDER []byte) ([]*x509.Certi
 	if err := e.ca.consumeToken(e.token); err != nil {
 		return nil, err
 	}
+	now := time.Now()
+	return e.ca.issue(csrDER, now.Add(-time.Minute), now.Add(e.ca.ttl), []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth})
+}
+
+// IssueWithValidity is a test-only escape hatch (consumes no join token)
+// for tests that need a client (EKU clientAuth) leaf certificate with a
+// specific, possibly invalid, validity window -- e.g. an already-expired
+// certificate, to prove a SERVER's own TLS-level expiry check refuses it
+// (docs/prompts/step-05b.md E3's "an expired client certificate" negative
+// case). Production code and NewTestEnroller's normal Enroll path never
+// call this; it exists only so integration tests can construct a
+// deliberately invalid certificate without needing access to the CA's
+// private key.
+func (ca *TestCA) IssueWithValidity(csrDER []byte, notBefore, notAfter time.Time) ([]*x509.Certificate, error) {
+	return ca.issue(csrDER, notBefore, notAfter, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth})
+}
+
+// IssueServerCertificate is a test-only helper (consumes no join token)
+// for issuing a SERVER (EKU serverAuth) certificate from this same test
+// CA -- used by integration tests to stand up a reference controller
+// (internal/testcontroller) whose certificate this CA's
+// EnrollmentTrustBundle can also verify, without needing a second,
+// separate test CA. Architecture doc section 5 keeps the identity PKI and
+// policy trust root as separate trust domains in production; using one
+// CA for both agent and controller certificates here is a test-only
+// simplification, not a production pattern.
+func (ca *TestCA) IssueServerCertificate(csrDER []byte, notBefore, notAfter time.Time) ([]*x509.Certificate, error) {
+	return ca.issue(csrDER, notBefore, notAfter, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth})
+}
+
+func (ca *TestCA) issue(csrDER []byte, notBefore, notAfter time.Time, ekus []x509.ExtKeyUsage) ([]*x509.Certificate, error) {
 	csr, err := x509.ParseCertificateRequest(csrDER)
 	if err != nil {
 		return nil, fmt.Errorf("identity: testca: parse CSR: %w", err)
@@ -148,17 +179,16 @@ func (e *testEnroller) Enroll(ctx context.Context, csrDER []byte) ([]*x509.Certi
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now()
 	leafTemplate := &x509.Certificate{
 		SerialNumber: serial,
 		Subject:      csr.Subject,
-		NotBefore:    now.Add(-time.Minute),
-		NotAfter:     now.Add(e.ca.ttl),
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
 		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		ExtKeyUsage:  ekus,
 		URIs:         csr.URIs,
 	}
-	der, err := x509.CreateCertificate(rand.Reader, leafTemplate, e.ca.cert, csr.PublicKey, e.ca.key)
+	der, err := x509.CreateCertificate(rand.Reader, leafTemplate, ca.cert, csr.PublicKey, ca.key)
 	if err != nil {
 		return nil, fmt.Errorf("identity: testca: create leaf certificate: %w", err)
 	}
@@ -166,7 +196,7 @@ func (e *testEnroller) Enroll(ctx context.Context, csrDER []byte) ([]*x509.Certi
 	if err != nil {
 		return nil, fmt.Errorf("identity: testca: parse leaf certificate: %w", err)
 	}
-	return []*x509.Certificate{leaf, e.ca.cert}, nil
+	return []*x509.Certificate{leaf, ca.cert}, nil
 }
 
 func randomSerial() (*big.Int, error) {
