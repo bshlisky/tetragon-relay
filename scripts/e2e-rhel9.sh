@@ -116,7 +116,31 @@ go test -tags integration -race -count=1 -c -o "${WORKDIR}/apply.itest" ./intern
 REPO_ROOT="$(pwd)"
 sg "${RELAY_GROUP}" -c "cd '${REPO_ROOT}/internal/tetra' && '${WORKDIR}/tetra.itest' -test.v && cd '${REPO_ROOT}/internal/apply' && '${WORKDIR}/apply.itest' -test.v"
 
+echo "== TPM (step-05a prompt D3; requires a real TPM 2.0 device or vTPM at TPM_E2E_DEVICE, default /dev/tpmrm0) =="
+TPM_E2E_DEVICE="${TPM_E2E_DEVICE:-/dev/tpmrm0}"
+if [ ! -e "${TPM_E2E_DEVICE}" ]; then
+  echo "WARNING: ${TPM_E2E_DEVICE} not found; skipping the TPM section entirely."
+  echo "Record in docs/reports/step-05a.md section 13 that this section was NOT run, and why."
+else
+  if command -v tpm2_getcap >/dev/null 2>&1; then
+    echo "-- TPM manufacturer / firmware version (tpm2_getcap properties-fixed) --"
+    sudo tpm2_getcap properties-fixed 2>&1 | grep -E "TPM2_PT_MANUFACTURER|TPM2_PT_FIRMWARE_VERSION|value:" || true
+    echo "-- supported ECC curves (tpm2_getcap ecc-curves) --"
+    sudo tpm2_getcap ecc-curves 2>&1 || true
+  else
+    echo "WARNING: tpm2-tools (tpm2_getcap) not installed; skipping the manufacturer/firmware/curve report."
+    echo "Install the 'tpm2-tools' RPM to get this; proceeding to the round-trip test regardless."
+  fi
+
+  echo "-- running internal/tpm's D1 round-trip against the real device (build tag tpm_e2e) --"
+  sudo chmod 660 "${TPM_E2E_DEVICE}" 2>/dev/null || true
+  TPM_E2E_DEVICE="${TPM_E2E_DEVICE}" go test -tags tpm_e2e -run 'TestTPMRealDeviceRoundTrip|TestHostSignerRealDeviceCurveDetection' -v ./internal/tpm/...
+fi
+
 echo "== done =="
 echo "Record this run's kernel version (uname -r above), scenario pass/fail,"
 echo "and whether it was actually executed (vs. authored-but-unrun) in"
-echo "docs/reports/step-03.md section 13."
+echo "docs/reports/step-03.md section 13, and the TPM section's own result"
+echo "(manufacturer, firmware version, supported ECC curves, round-trip"
+echo "pass/fail, and whether it ran at all) in docs/reports/step-05a.md"
+echo "section 13."
