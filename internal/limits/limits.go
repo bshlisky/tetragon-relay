@@ -243,6 +243,26 @@ const (
 	// roots/ directory (or a caller bug) could force onto one Startup
 	// call.
 	MaxRootChainFiles = 64
+
+	// MaxControlMessageBytes is the gRPC message size cap internal/
+	// controlclient enforces on the control channel (architecture doc
+	// 6.1: "Max frame 1 MiB"). Applied as both the max receive and max
+	// send size on the client's single AgentControl.Connect stream, so a
+	// malicious or malfunctioning controller cannot force the agent to
+	// buffer an unbounded message, and the agent itself never sends one.
+	MaxControlMessageBytes = 1 << 20 // 1 MiB
+
+	// ControlKeepaliveInterval and ControlKeepaliveTimeout are the
+	// control channel's HTTP/2 PING keepalive parameters (architecture
+	// doc 6.1: "HTTP/2 PING every 30 s, timeout 10 s").
+	ControlKeepaliveInterval = 30 * time.Second
+	ControlKeepaliveTimeout  = 10 * time.Second
+
+	// ControlDialBackoffBase and ControlDialBackoffCap are the control
+	// channel's reconnect backoff parameters (architecture doc 6.3 step
+	// 6: "full-jitter exponential backoff (1 s base, 5 min cap)").
+	ControlDialBackoffBase = 1 * time.Second
+	ControlDialBackoffCap  = 5 * time.Minute
 )
 
 // TetragonVersionFamily is the pinned major.minor version family internal/
