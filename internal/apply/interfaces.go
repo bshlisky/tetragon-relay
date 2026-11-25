@@ -62,6 +62,17 @@ type LKGSet struct {
 	// Mode is the bundle mode ("monitor" or "enforce") the set was
 	// loaded under (architecture doc 7.4 step 11).
 	Mode string
+	// RawEnvelope is the exact signed DSSE envelope bytes
+	// (verify.Result.RawEnvelope) that verified to produce this set,
+	// never re-encoded. ADR 0025 (step-04b-review.md R4B-2):
+	// architecture doc 8.2/7.7 specify the LKG store keeps the raw
+	// envelope, not only a parsed form, so it can be independently
+	// re-verified later. May be empty for an LKGSet constructed by a
+	// test or an older on-disk record that predates this field.
+	RawEnvelope []byte
+	// RootVersion is the trust-root version (verify.Result.RootVersion)
+	// whose targets role verified RawEnvelope's signature. ADR 0025.
+	RootVersion uint64
 }
 
 // LKGPolicy is one policy within an LKGSet.

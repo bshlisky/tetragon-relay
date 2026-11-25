@@ -278,6 +278,86 @@ func TestCheckOwnerAndMode_UnknownPlatformStillChecksModeFirst(t *testing.T) {
 	}
 }
 
+func TestPrunedRootHistory_ReferencedVersionWithNoBlobIsOmittedAndEmptyIsNil(t *testing.T) {
+	// No TrustRoot and no LKG entries at all: nothing to keep.
+	if h := prunedRootHistory(indexPayload{}); h != nil {
+		t.Fatalf("prunedRootHistory(empty) = %v, want nil", h)
+	}
+	// An LKG entry references a root version this package has no blob
+	// for at all (should not happen for an index this package itself
+	// ever produced); the fail-closed choice is to omit it, not invent
+	// or silently keep a phantom reference.
+	p := indexPayload{
+		LKG: map[string]lkgEntry{
+			"domain-a": {BlobDigest: "d", Mode: "enforce", RootVersion: 7},
+		},
+	}
+	h := prunedRootHistory(p)
+	if _, ok := h[7]; ok {
+		t.Fatalf("prunedRootHistory kept version 7 despite no blob for it: %v", h)
+	}
+}
+
+func TestRootAtVersion_CorruptedBlobMarksTampered(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.Chmod(dir, 0o700)
+	s, err := Open(dir, newTestSealer(), NewFakeMonotonicCounter())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := s.PersistTrustRoot([]byte("root-bytes"), 1); err != nil {
+		t.Fatalf("PersistTrustRoot: %v", err)
+	}
+	entry := s.committed.TrustRootHistory[1]
+	if err := os.WriteFile(s.blobPath(entry.BlobDigest), []byte("corrupted"), 0o600); err != nil {
+		t.Fatalf("corrupt blob: %v", err)
+	}
+	if _, ok, err := s.RootAtVersion(1); ok || !errors.Is(err, ErrTampered) {
+		t.Fatalf("RootAtVersion after corruption = (ok=%v, err=%v), want (false, ErrTampered)", ok, err)
+	}
+}
+
+func TestPut_TooLargeRawEnvelope(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.Chmod(dir, 0o700)
+	s, err := Open(dir, newTestSealer(), NewFakeMonotonicCounter())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	big := make([]byte, limits.MaxStoreBlobBytes+1)
+	if err := s.Put("prod-db", apply.LKGSet{Mode: "enforce", RawEnvelope: big}); !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("err = %v, want ErrLimitExceeded", err)
+	}
+}
+
+func TestPut_AfterCloseReturnsErrClosed(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.Chmod(dir, 0o700)
+	s, err := Open(dir, newTestSealer(), NewFakeMonotonicCounter())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := s.Put("prod-db", apply.LKGSet{Mode: "enforce"}); !errors.Is(err, ErrClosed) {
+		t.Fatalf("err = %v, want ErrClosed", err)
+	}
+}
+
+func TestVerifyIndexLimits_TooManyRootHistoryVersions(t *testing.T) {
+	p := indexPayload{Schema: indexSchema, Generation: 1, Epochs: map[string]uint64{}, History: map[string][]string{}, LKG: map[string]lkgEntry{}}
+	p.TrustRootHistory = make(map[uint64]trustRootEntry, limits.MaxStoreRootHistoryVersions+1)
+	for i := uint64(0); i < uint64(limits.MaxStoreRootHistoryVersions+1); i++ {
+		p.TrustRootHistory[i] = trustRootEntry{Version: i, BlobDigest: "d"}
+	}
+	if err := verifyIndexLimits(p); !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("err = %v, want ErrLimitExceeded", err)
+	}
+}
+
 func TestOpen_NonexistentDirectory(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "does-not-exist")
 	if _, err := Open(dir, newTestSealer(), NewFakeMonotonicCounter()); err == nil {

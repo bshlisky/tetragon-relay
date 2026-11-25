@@ -140,6 +140,18 @@ func Startup(cfg Config, now time.Time) (*StartupResult, error) {
 		return nil, err
 	}
 
+	// ADR 0025 (step-04b-review.md R4B-2): re-confirm every persisted
+	// domain's LKG against the exact trust-root version that verified
+	// it, independent of whichever root establishTrustRoot just
+	// settled on. A failure here is exactly like store.Open's own
+	// ErrTampered contract: the caller must not retry expecting
+	// self-heal, and must not unload or change anything Tetragon
+	// currently has loaded.
+	if err := reverifyLKG(st, now, cfg.Auditor); err != nil {
+		_ = st.Close()
+		return nil, err
+	}
+
 	degraded, degradedReason := startupDegradedCondition(root, caps, cfg.Auditor)
 
 	return &StartupResult{

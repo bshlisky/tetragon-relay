@@ -248,7 +248,9 @@ func Verify(in Input) Result {
 	}
 
 	return Result{
-		Code: CodeAccept,
+		Code:        CodeAccept,
+		RawEnvelope: in.Envelope,
+		RootVersion: in.RootVersion,
 		Bundle: &Bundle{
 			BundleID:           bp.BundleID,
 			Epoch:              bp.Epoch,

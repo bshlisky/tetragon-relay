@@ -155,6 +155,92 @@ func TestLKGStore_RoundTrips(t *testing.T) {
 	}
 }
 
+func TestRootHistory_RetainedWhileReferencedThenGarbageCollected(t *testing.T) {
+	// ADR 0025 (step-04b-review.md R4B-2): a root rotation does not
+	// retroactively re-verify every domain's existing LKG, so an old
+	// root version's blob must stay retrievable (via RootAtVersion) for
+	// as long as any LKG.RootVersion still references it, and be
+	// garbage-collected once nothing does.
+	s, _, _ := newTestStore(t)
+
+	if err := s.PersistTrustRoot([]byte("root-v1-bytes"), 1); err != nil {
+		t.Fatalf("PersistTrustRoot v1: %v", err)
+	}
+	if err := s.Put("domain-a", apply.LKGSet{Mode: "enforce", RawEnvelope: []byte("envelope-v1"), RootVersion: 1}); err != nil {
+		t.Fatalf("Put (root version 1): %v", err)
+	}
+
+	if err := s.PersistTrustRoot([]byte("root-v2-bytes"), 2); err != nil {
+		t.Fatalf("PersistTrustRoot v2: %v", err)
+	}
+
+	// Still referenced by domain-a's LKG: must still be retrievable even
+	// though it is no longer the current root.
+	raw, ok, err := s.RootAtVersion(1)
+	if err != nil || !ok || string(raw) != "root-v1-bytes" {
+		t.Fatalf("RootAtVersion(1) = (%q, ok=%v, err=%v), want (root-v1-bytes, true, nil) while still referenced", raw, ok, err)
+	}
+	raw2, ok2, err2 := s.RootAtVersion(2)
+	if err2 != nil || !ok2 || string(raw2) != "root-v2-bytes" {
+		t.Fatalf("RootAtVersion(2) = (%q, ok=%v, err=%v), want (root-v2-bytes, true, nil)", raw2, ok2, err2)
+	}
+
+	// Re-apply domain-a's LKG under the new root version: nothing
+	// references version 1 anymore.
+	if err := s.Put("domain-a", apply.LKGSet{Mode: "enforce", RawEnvelope: []byte("envelope-v2"), RootVersion: 2}); err != nil {
+		t.Fatalf("Put (root version 2): %v", err)
+	}
+	if _, ok, err := s.RootAtVersion(1); err != nil || ok {
+		t.Fatalf("RootAtVersion(1) after nothing references it = (ok=%v, err=%v), want (false, nil)", ok, err)
+	}
+}
+
+func TestDomains_ListsEveryPersistedDomain(t *testing.T) {
+	s, _, _ := newTestStore(t)
+	if domains, err := s.Domains(); err != nil || len(domains) != 0 {
+		t.Fatalf("Domains on an empty store = (%v, %v), want (empty, nil)", domains, err)
+	}
+	if err := s.Put("domain-a", apply.LKGSet{Mode: "enforce"}); err != nil {
+		t.Fatalf("Put domain-a: %v", err)
+	}
+	if err := s.Put("domain-b", apply.LKGSet{Mode: "monitor"}); err != nil {
+		t.Fatalf("Put domain-b: %v", err)
+	}
+	domains, err := s.Domains()
+	if err != nil {
+		t.Fatalf("Domains: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, d := range domains {
+		seen[d] = true
+	}
+	if !seen["domain-a"] || !seen["domain-b"] || len(domains) != 2 {
+		t.Fatalf("Domains = %v, want exactly [domain-a domain-b]", domains)
+	}
+}
+
+func TestRootAtVersion_NotFoundAndClosed(t *testing.T) {
+	s, _, _ := newTestStore(t)
+	if _, ok, err := s.RootAtVersion(1); err != nil || ok {
+		t.Fatalf("RootAtVersion(1) on an empty store = (ok=%v, err=%v), want (false, nil)", ok, err)
+	}
+	if err := s.PersistTrustRoot([]byte("root-bytes"), 1); err != nil {
+		t.Fatalf("PersistTrustRoot: %v", err)
+	}
+	if raw, ok, err := s.RootAtVersion(1); err != nil || !ok || string(raw) != "root-bytes" {
+		t.Fatalf("RootAtVersion(1) = (%q, ok=%v, err=%v), want (root-bytes, true, nil)", raw, ok, err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, _, err := s.RootAtVersion(1); !errors.Is(err, store.ErrClosed) {
+		t.Fatalf("RootAtVersion after Close: err = %v, want ErrClosed", err)
+	}
+	if _, err := s.Domains(); !errors.Is(err, store.ErrClosed) {
+		t.Fatalf("Domains after Close: err = %v, want ErrClosed", err)
+	}
+}
+
 func TestTrustRoot_PersistAndDowngradeProtection(t *testing.T) {
 	s, _, _ := newTestStore(t)
 	if _, _, ok, err := s.TrustRoot(); err != nil || ok {

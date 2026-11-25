@@ -79,4 +79,14 @@ type Result struct {
 	Reason string
 	// Bundle is populated only when Code == CodeAccept.
 	Bundle *Bundle
+
+	// RawEnvelope is Input.Envelope, unchanged, populated only when
+	// Code == CodeAccept. ADR 0025 (R4B-2): callers that persist a
+	// last-known-good set (internal/apply, via internal/store) must
+	// keep this exact byte sequence, not a re-encoded form, so it can
+	// be independently re-verified later.
+	RawEnvelope []byte
+	// RootVersion is Input.RootVersion, unchanged, populated only when
+	// Code == CodeAccept. ADR 0025.
+	RootVersion uint64
 }

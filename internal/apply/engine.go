@@ -257,7 +257,7 @@ func (e *Engine) Apply(ctx context.Context, result *verify.Result) (*Result, err
 		return e.rollback(ctx, string(reason))
 	}
 
-	if err := e.lkg.Put(e.cfg.domain(), bundleToLKG(bundle, resolved)); err != nil {
+	if err := e.lkg.Put(e.cfg.domain(), bundleToLKG(result, resolved)); err != nil {
 		e.audit("lkg_put_failed", err.Error(), err, "")
 	}
 
@@ -270,13 +270,58 @@ func (e *Engine) Apply(ctx context.Context, result *verify.Result) (*Result, err
 	return &Result{Status: StatusApplied, ModeMechanism: modeMechanismActionRewrite, Digest: digest, Detail: detail}, nil
 }
 
-func bundleToLKG(bundle *verify.Bundle, resolved []resolvedPolicy) LKGSet {
+// ResolveLKGSet rebuilds the LKGSet a successful Apply would persist for
+// bundle, using ONLY bundle's own already-schema-validated content and
+// parser — no Tetragon calls, no loaded-name computation (Tetragon's
+// loaded names are irrelevant to what gets persisted as LKG content).
+// ADR 0025 (step-04b-review.md R4B-2): internal/agent uses this at
+// startup to re-derive a domain's LKGSet from a fresh re-parse of its own
+// persisted RawEnvelope and compare it against the cached Policies/Mode,
+// so any divergence between the two (evidence of tampering, since both
+// are supposed to have been produced from the exact same bytes) is
+// detected. Mirrors resolve()+bundleToLKG's content-shaping exactly
+// (parse, then rewrite actions to Post for monitor mode) but without the
+// loaded/final-name rewriting step, which is operational-only and not
+// part of what is compared.
+func ResolveLKGSet(bundle *verify.Bundle, parser PolicyParser) (LKGSet, error) {
+	if bundle == nil {
+		return LKGSet{}, fmt.Errorf("apply: ResolveLKGSet: nil bundle")
+	}
+	if parser == nil {
+		return LKGSet{}, fmt.Errorf("apply: ResolveLKGSet: nil PolicyParser")
+	}
+	set := LKGSet{Mode: bundle.Mode}
+	for _, p := range bundle.Policies {
+		doc, err := parser.Parse(p.Name, p.YAML)
+		if err != nil {
+			return LKGSet{}, fmt.Errorf("apply: re-parse policy %q: %w", p.Name, err)
+		}
+		finalJSON := doc.CanonicalJSON()
+		if bundle.Mode == "monitor" {
+			rewritten, err := rewriteActionsToPost(finalJSON)
+			if err != nil {
+				return LKGSet{}, fmt.Errorf("apply: rewrite actions for %q: %w", p.Name, err)
+			}
+			finalJSON = rewritten
+		}
+		set.Policies = append(set.Policies, LKGPolicy{Name: p.Name, Version: p.Version, CanonicalJSON: finalJSON})
+	}
+	return set, nil
+}
+
+// bundleToLKG builds the LKGSet persisted after a successful apply.
+// result's Bundle supplies the parsed/operational fields (unchanged from
+// before ADR 0025); result's RawEnvelope/RootVersion (populated by
+// verify.Verify on CodeAccept) are carried through unaltered, the
+// architecture-specified integrity-bearing artifact this step adds.
+func bundleToLKG(result *verify.Result, resolved []resolvedPolicy) LKGSet {
+	bundle := result.Bundle
 	byName := make(map[string][]byte, len(resolved))
 	for _, r := range resolved {
 		// preNameJSON, not finalJSON: see resolvedPolicy's doc comment.
 		byName[r.baseName] = r.preNameJSON
 	}
-	set := LKGSet{Mode: bundle.Mode}
+	set := LKGSet{Mode: bundle.Mode, RawEnvelope: result.RawEnvelope, RootVersion: result.RootVersion}
 	for _, p := range bundle.Policies {
 		set.Policies = append(set.Policies, LKGPolicy{Name: p.Name, Version: p.Version, CanonicalJSON: byName[p.Name]})
 	}

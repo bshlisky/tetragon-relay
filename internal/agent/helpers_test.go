@@ -4,9 +4,11 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"testing"
 	"time"
@@ -122,13 +124,95 @@ func signEnvelope(payloadType string, payload []byte, signers ...*genKey) []byte
 // signed envelope bytes and the root keys (for signing a later rotation).
 func standardRoot(t *testing.T, version int, expires time.Time) (envelope []byte, rootKeys []*genKey) {
 	t.Helper()
+	env, rootKeys, _ := standardRootWithTargetsKey(t, version, expires)
+	return env, rootKeys
+}
+
+// standardRootWithTargetsKey is standardRoot, additionally returning the
+// targets key (so a test can sign its own bundle envelopes against this
+// root, for ADR 0025/R4B-2's LKG re-verification tests).
+func standardRootWithTargetsKey(t *testing.T, version int, expires time.Time) (envelope []byte, rootKeys []*genKey, targetsKey *genKey) {
+	t.Helper()
 	r1, r2, r3 := mustKey(t), mustKey(t), mustKey(t)
 	tk := mustKey(t)
 	lk := mustKey(t)
 	all := []*genKey{r1, r2, r3, tk, lk}
 	payload := buildRootPayload(version, expires, all, roleOf([]*genKey{r1, r2, r3}, 2), roleOf([]*genKey{tk}, 1), roleOf([]*genKey{lk}, 1))
 	env := signEnvelope(trust.RootPayloadType, payload, r1, r2)
-	return env, []*genKey{r1, r2, r3}
+	return env, []*genKey{r1, r2, r3}, tk
+}
+
+// bundlePolicySpec is one policy to include in a buildBundleEnvelope call.
+type bundlePolicySpec struct {
+	name    string
+	version int
+	yaml    string
+}
+
+// minimalPolicyYAML returns real, schema-valid, guard-safe TracingPolicy
+// YAML (mirrors cmd/bundlesign-test's validPolicyYAML): a single
+// observe-only (Post) kprobe needs no matchBinaries scoping, so it passes
+// every guardrail trivially.
+func minimalPolicyYAML(name string) string {
+	return "apiVersion: cilium.io/v1alpha1\nkind: TracingPolicy\nmetadata:\n  name: " + name + "\nspec:\n  kprobes:\n  - call: \"do_something\"\n    selectors:\n    - matchActions:\n      - action: \"Post\"\n"
+}
+
+// buildBundleEnvelope builds and signs a minimal, real policy-bundle DSSE
+// envelope under targetsKey, for ADR 0025/R4B-2's LKG re-verification
+// tests: internal/agent needs a genuine, independently re-parseable and
+// re-verifiable envelope, not internal/apply's own fakeDoc/fakePolicyParser
+// test doubles (which never produce anything internal/policydoc.Parse or
+// a DSSE signature check would accept).
+func buildBundleEnvelope(t *testing.T, targetsKey *genKey, scope, mode string, epoch uint64, now time.Time, policies []bundlePolicySpec) []byte {
+	t.Helper()
+	type targetsPayload struct {
+		HostUUIDs      []string `json:"host_uuids"`
+		SelectorDigest string   `json:"selector_digest"`
+	}
+	type policyPayload struct {
+		Name    string `json:"name"`
+		Version int    `json:"version"`
+		SHA256  string `json:"sha256"`
+		YAML    string `json:"yaml"`
+	}
+	type bundlePayload struct {
+		Schema             string          `json:"schema"`
+		BundleID           string          `json:"bundle_id"`
+		Epoch              uint64          `json:"epoch"`
+		Scope              string          `json:"scope"`
+		Targets            targetsPayload  `json:"targets"`
+		NotBefore          time.Time       `json:"not_before"`
+		Expires            time.Time       `json:"expires"`
+		TetragonMinVersion string          `json:"tetragon_min_version"`
+		Mode               string          `json:"mode"`
+		Policies           []policyPayload `json:"policies"`
+	}
+	pp := make([]policyPayload, 0, len(policies))
+	for _, p := range policies {
+		pp = append(pp, policyPayload{Name: p.name, Version: p.version, SHA256: sha256Hex(p.yaml), YAML: p.yaml})
+	}
+	bp := bundlePayload{
+		Schema:             "relay.policybundle.v1",
+		BundleID:           "pb-test-0001",
+		Epoch:              epoch,
+		Scope:              scope,
+		Targets:            targetsPayload{HostUUIDs: []string{"11111111-1111-4111-8111-111111111111"}, SelectorDigest: "sha256:unused"},
+		NotBefore:          now.Add(-time.Hour),
+		Expires:            now.Add(60 * 24 * time.Hour),
+		TetragonMinVersion: "1.0.0",
+		Mode:               mode,
+		Policies:           pp,
+	}
+	payload, err := json.Marshal(bp)
+	if err != nil {
+		t.Fatalf("marshal bundle payload: %v", err)
+	}
+	return signEnvelope("application/vnd.relay.policybundle.v1+json", payload, targetsKey)
+}
+
+func sha256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
 }
 
 // rotatedRoot builds a NEW root at version+1 with a fresh key set, signed

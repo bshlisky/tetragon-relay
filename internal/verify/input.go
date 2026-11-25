@@ -35,6 +35,16 @@ type Input struct {
 	// (*trust.Root).TargetsVerifier(Now). It must not be nil.
 	Trust trust.Verifier
 
+	// RootVersion is the version of the trust root Trust was derived
+	// from (the same *trust.Root the caller called TargetsVerifier on).
+	// Verify performs no check of its own using this value; it is
+	// threaded straight through to Result.RootVersion on CodeAccept
+	// purely so a caller (internal/apply, via internal/store) can later
+	// re-verify an accepted bundle's provenance against the EXACT root
+	// version that verified it, even after that root is no longer
+	// current (docs/decisions/0025-lkg-raw-envelope.md, R4B-2).
+	RootVersion uint64
+
 	// Epochs supplies the current epoch for a scope.
 	Epochs EpochSource
 

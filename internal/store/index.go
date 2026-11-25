@@ -15,13 +15,20 @@ import (
 // indexSchema is the required value of indexFile.Payload.Schema.
 const indexSchema = "relay.store.index.v1"
 
-// lkgEntry references one domain's persisted LKG blob.
+// lkgEntry references one domain's persisted LKG blob. RootVersion
+// (ADR 0025, step-04b-review.md R4B-2) mirrors the blob's own
+// lkgBlob.RootVersion field at the index level (the same redundancy
+// Mode already has here alongside lkgBlob.Mode), so commitLocked's
+// root-history retention computation (which root versions are still
+// "live") never needs to open and decode every domain's blob.
 type lkgEntry struct {
-	BlobDigest string `json:"blob_digest"`
-	Mode       string `json:"mode"`
+	BlobDigest  string `json:"blob_digest"`
+	Mode        string `json:"mode"`
+	RootVersion uint64 `json:"root_version,omitempty"`
 }
 
-// trustRootEntry references the persisted trust root's raw-bytes blob.
+// trustRootEntry references a persisted trust root version's raw-bytes
+// blob.
 type trustRootEntry struct {
 	Version    uint64 `json:"version"`
 	BlobDigest string `json:"blob_digest"`
@@ -40,6 +47,15 @@ type indexPayload struct {
 	History    map[string][]string `json:"history"`
 	LKG        map[string]lkgEntry `json:"lkg"`
 	TrustRoot  *trustRootEntry     `json:"trust_root,omitempty"`
+	// TrustRootHistory records every root version whose blob must stay
+	// live because it is either the current TrustRoot or still
+	// referenced by some domain's LKG.RootVersion (ADR 0025): a root
+	// rotation does not retroactively re-verify every domain's existing
+	// LKG, so an LKG's own recorded root version may be older than the
+	// current one. commitLocked prunes this to exactly the
+	// currently-referenced set on every write (store.go's
+	// prunedRootHistory), so it never grows unbounded.
+	TrustRootHistory map[uint64]trustRootEntry `json:"trust_root_history,omitempty"`
 }
 
 // indexFile is the on-disk shape of the index file: the payload plus its
@@ -55,11 +71,12 @@ type indexFile struct {
 // the same bytes regardless of insertion order.
 func canonicalPayloadBytes(p indexPayload) ([]byte, error) {
 	sorted := indexPayload{
-		Schema:     p.Schema,
-		Generation: p.Generation,
-		Epochs:     p.Epochs,
-		LKG:        p.LKG,
-		TrustRoot:  p.TrustRoot,
+		Schema:           p.Schema,
+		Generation:       p.Generation,
+		Epochs:           p.Epochs,
+		LKG:              p.LKG,
+		TrustRoot:        p.TrustRoot,
+		TrustRootHistory: p.TrustRootHistory,
 	}
 	if p.History != nil {
 		sorted.History = make(map[string][]string, len(p.History))
@@ -100,6 +117,9 @@ func verifyIndexLimits(p indexPayload) error {
 	}
 	if len(p.LKG) > limits.MaxStoreDomains {
 		return fmt.Errorf("%w: %d LKG domains, max %d", ErrLimitExceeded, len(p.LKG), limits.MaxStoreDomains)
+	}
+	if len(p.TrustRootHistory) > limits.MaxStoreRootHistoryVersions {
+		return fmt.Errorf("%w: %d trust root history versions, max %d", ErrLimitExceeded, len(p.TrustRootHistory), limits.MaxStoreRootHistoryVersions)
 	}
 	return nil
 }

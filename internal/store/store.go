@@ -258,6 +258,7 @@ func (s *Store) firstBoot() (indexPayload, error) {
 func (s *Store) commitLocked(next indexPayload) error {
 	next.Schema = indexSchema
 	next.Generation = s.committed.Generation + 1
+	next.TrustRootHistory = prunedRootHistory(next)
 	if err := verifyIndexLimits(next); err != nil {
 		return err
 	}
@@ -282,8 +283,55 @@ func (s *Store) commitLocked(next indexPayload) error {
 	if next.TrustRoot != nil {
 		referenced[next.TrustRoot.BlobDigest] = struct{}{}
 	}
+	for _, e := range next.TrustRootHistory {
+		referenced[e.BlobDigest] = struct{}{}
+	}
 	s.gcBlobs(referenced)
 	return nil
+}
+
+// prunedRootHistory implements ADR 0025's retention rule: a root
+// version's blob (and its entry in next.TrustRootHistory) stays live only
+// while it is either the current TrustRoot or still referenced by some
+// domain's LKG.RootVersion. Any version not referenced by either is
+// dropped from the returned map, so TrustRootHistory never accumulates
+// stale versions and gcBlobs (reading it back from next, after this
+// function has already run) correctly removes their now-unreferenced
+// blobs too.
+func prunedRootHistory(next indexPayload) map[uint64]trustRootEntry {
+	keep := map[uint64]struct{}{}
+	if next.TrustRoot != nil {
+		keep[next.TrustRoot.Version] = struct{}{}
+	}
+	for _, e := range next.LKG {
+		if e.RootVersion != 0 {
+			keep[e.RootVersion] = struct{}{}
+		}
+	}
+	if len(keep) == 0 {
+		return nil
+	}
+	out := make(map[uint64]trustRootEntry, len(keep))
+	for v := range keep {
+		if e, ok := next.TrustRootHistory[v]; ok {
+			out[v] = e
+			continue
+		}
+		if next.TrustRoot != nil && v == next.TrustRoot.Version {
+			// The current root's own history entry may not exist yet
+			// on the very commit that first persists it (PersistTrustRoot
+			// sets next.TrustRoot directly); use it as the source.
+			out[v] = *next.TrustRoot
+		}
+		// Otherwise: a version is referenced (by an LKG entry) but this
+		// package has no blob for it at all. This should not happen for
+		// an index this package itself ever produced; omitting it here
+		// is the fail-closed choice -- internal/agent's re-verification
+		// (ADR 0025) will then correctly find no root for that version
+		// and treat the LKG as unverifiable, rather than this package
+		// inventing or silently keeping a phantom reference.
+	}
+	return out
 }
 
 // writeIndexFile is Part C3's index-only write sequence: write index.tmp,
@@ -332,12 +380,13 @@ func (s *Store) writeIndexFile(payload indexPayload) error {
 
 func (s *Store) cloneCommitted() indexPayload {
 	next := indexPayload{
-		Schema:     s.committed.Schema,
-		Generation: s.committed.Generation,
-		Epochs:     make(map[string]uint64, len(s.committed.Epochs)),
-		History:    make(map[string][]string, len(s.committed.History)),
-		LKG:        make(map[string]lkgEntry, len(s.committed.LKG)),
-		TrustRoot:  s.committed.TrustRoot,
+		Schema:           s.committed.Schema,
+		Generation:       s.committed.Generation,
+		Epochs:           make(map[string]uint64, len(s.committed.Epochs)),
+		History:          make(map[string][]string, len(s.committed.History)),
+		LKG:              make(map[string]lkgEntry, len(s.committed.LKG)),
+		TrustRoot:        s.committed.TrustRoot,
+		TrustRootHistory: make(map[uint64]trustRootEntry, len(s.committed.TrustRootHistory)),
 	}
 	for k, v := range s.committed.Epochs {
 		next.Epochs[k] = v
@@ -347,6 +396,9 @@ func (s *Store) cloneCommitted() indexPayload {
 	}
 	for k, v := range s.committed.LKG {
 		next.LKG[k] = v
+	}
+	for k, v := range s.committed.TrustRootHistory {
+		next.TrustRootHistory[k] = v
 	}
 	return next
 }
@@ -499,16 +551,25 @@ type lkgBlobPolicy struct {
 	CanonicalJSON []byte `json:"canonical_json"`
 }
 
+// lkgBlob gained RawEnvelope/RootVersion in ADR 0025
+// (step-04b-review.md R4B-2): architecture doc 8.2/7.7 specify the LKG
+// store keeps the raw signed DSSE envelope, never re-encoded, alongside
+// the already-parsed/rewritten Policies/Mode the apply engine
+// operationally needs (add-before-remove diffing, Reconcile). Both are
+// content-addressed together as one blob (see Put's doc comment for why
+// this is not split into two separate blobs).
 type lkgBlob struct {
-	Schema   string          `json:"schema"`
-	Mode     string          `json:"mode"`
-	Policies []lkgBlobPolicy `json:"policies"`
+	Schema      string          `json:"schema"`
+	Mode        string          `json:"mode"`
+	Policies    []lkgBlobPolicy `json:"policies"`
+	RawEnvelope []byte          `json:"raw_envelope,omitempty"`
+	RootVersion uint64          `json:"root_version,omitempty"`
 }
 
 const lkgBlobSchema = "relay.store.lkg.v1"
 
 func toLKGBlob(set apply.LKGSet) lkgBlob {
-	b := lkgBlob{Schema: lkgBlobSchema, Mode: set.Mode, Policies: make([]lkgBlobPolicy, 0, len(set.Policies))}
+	b := lkgBlob{Schema: lkgBlobSchema, Mode: set.Mode, Policies: make([]lkgBlobPolicy, 0, len(set.Policies)), RawEnvelope: set.RawEnvelope, RootVersion: set.RootVersion}
 	for _, p := range set.Policies {
 		b.Policies = append(b.Policies, lkgBlobPolicy{Name: p.Name, Version: p.Version, CanonicalJSON: p.CanonicalJSON})
 	}
@@ -516,7 +577,7 @@ func toLKGBlob(set apply.LKGSet) lkgBlob {
 }
 
 func (b lkgBlob) toLKGSet() apply.LKGSet {
-	set := apply.LKGSet{Mode: b.Mode, Policies: make([]apply.LKGPolicy, 0, len(b.Policies))}
+	set := apply.LKGSet{Mode: b.Mode, Policies: make([]apply.LKGPolicy, 0, len(b.Policies)), RawEnvelope: b.RawEnvelope, RootVersion: b.RootVersion}
 	for _, p := range b.Policies {
 		set.Policies = append(set.Policies, apply.LKGPolicy{Name: p.Name, Version: p.Version, CanonicalJSON: p.CanonicalJSON})
 	}
@@ -569,7 +630,7 @@ func (s *Store) Put(domain string, set apply.LKGSet) error {
 		return err
 	}
 	next := s.cloneCommitted()
-	next.LKG[domain] = lkgEntry{BlobDigest: digest, Mode: set.Mode}
+	next.LKG[domain] = lkgEntry{BlobDigest: digest, Mode: set.Mode, RootVersion: set.RootVersion}
 	return s.commitLocked(next)
 }
 
@@ -623,6 +684,57 @@ func (s *Store) PersistTrustRoot(raw []byte, version uint64) error {
 		return err
 	}
 	next := s.cloneCommitted()
-	next.TrustRoot = &trustRootEntry{Version: version, BlobDigest: digest}
+	entry := trustRootEntry{Version: version, BlobDigest: digest}
+	next.TrustRoot = &entry
+	// ADR 0025: also record this version in TrustRootHistory directly
+	// (commitLocked's prunedRootHistory would otherwise only discover it
+	// via next.TrustRoot, which it does already handle, but setting it
+	// explicitly here means RootAtVersion can find a just-persisted
+	// current version without relying on that fallback).
+	if next.TrustRootHistory == nil {
+		next.TrustRootHistory = map[uint64]trustRootEntry{}
+	}
+	next.TrustRootHistory[version] = entry
 	return s.commitLocked(next)
+}
+
+// RootAtVersion returns a historical trust root version's raw signed
+// bytes, or ok=false if that version is not (or is no longer) retained
+// (ADR 0025, step-04b-review.md R4B-2): internal/agent uses this at
+// startup to re-verify each domain's LKG against the EXACT root version
+// that verified it, which may not be the current one.
+func (s *Store) RootAtVersion(version uint64) (raw []byte, ok bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.preflightLocked(); err != nil {
+		return nil, false, err
+	}
+	e, ok := s.committed.TrustRootHistory[version]
+	if !ok {
+		return nil, false, nil
+	}
+	raw, rerr := s.readBlob(e.BlobDigest)
+	if rerr != nil {
+		s.markTamperedLocked(rerr)
+		return nil, false, s.tamperErr
+	}
+	return raw, true, nil
+}
+
+// Domains returns every domain currently holding a persisted LKG set, in
+// no particular order. internal/agent uses this at startup to iterate
+// every domain for re-verification (ADR 0025); it is deliberately not
+// part of apply.LKGStore, which never needs to enumerate domains (the
+// apply engine always operates on one domain/scope at a time).
+func (s *Store) Domains() ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.preflightLocked(); err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(s.committed.LKG))
+	for domain := range s.committed.LKG {
+		out = append(out, domain)
+	}
+	return out, nil
 }

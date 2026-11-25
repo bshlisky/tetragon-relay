@@ -215,6 +215,19 @@ const (
 	// MaxStoreScopes.
 	MaxStoreDomains = 256
 
+	// MaxStoreRootHistoryVersions bounds the number of distinct trust
+	// root versions internal/store keeps a live blob for simultaneously
+	// (ADR 0025 / step-04b-review.md R4B-2: a root rotation does not
+	// retroactively re-verify every domain's existing LKG, so an LKG's
+	// recorded root version can be older than the current one).
+	// commitLocked prunes this to exactly the currently-referenced set
+	// on every write, so in practice it is bounded by MaxStoreDomains
+	// (at most one distinct historical version per domain) plus one for
+	// the current root; set generously above that so a legitimate,
+	// fully-diverse fleet of domain root versions is never the thing
+	// that trips this cap.
+	MaxStoreRootHistoryVersions = 512
+
 	// --- step-04b-review.md R4B-1: forward root chaining ---
 
 	// MaxRootChainFiles bounds both the number of RPM-shipped
