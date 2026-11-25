@@ -38,7 +38,7 @@ coverage:
 	done; \
 	exit $$fail
 
-COVER90_PKGS := internal/tetra internal/apply internal/hostprobe internal/agent internal/identity internal/controlclient
+COVER90_PKGS := internal/tetra internal/apply internal/hostprobe internal/agent internal/identity internal/controlclient internal/config
 
 .PHONY: coverage90
 coverage90:
@@ -84,6 +84,7 @@ fuzz-short:
 	$(GO) test -run=NONE -fuzz=FuzzPolicyParse -fuzztime=60s ./internal/policydoc/...
 	$(GO) test -run=NONE -fuzz=FuzzGuard -fuzztime=60s ./internal/guard/...
 	$(GO) test -run=NONE -fuzz=FuzzStoreIndex -fuzztime=60s ./internal/store/...
+	$(GO) test -run=NONE -fuzz=FuzzConfig -fuzztime=60s ./internal/config/...
 
 .PHONY: lint
 lint:

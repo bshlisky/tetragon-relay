@@ -266,6 +266,47 @@ const (
 	// ControlDialBackoffCap is the control channel's reconnect backoff
 	// cap (architecture doc 6.3 step 6).
 	ControlDialBackoffCap = 5 * time.Minute
+
+	// --- step-06a: internal/config (relay.yaml) ---
+
+	// MaxConfigFileBytes bounds the size of relay.yaml internal/config
+	// will read, before any parsing happens. A legitimate config is a
+	// few hundred bytes to a few KiB (architecture doc 8.6's example);
+	// this is a defensive cap against an operator error or a tampered
+	// file forcing an unbounded read/parse, not a realistic ceiling.
+	MaxConfigFileBytes = 1 << 20 // 1 MiB
+
+	// MaxConfigFileMode is the most permissive mode internal/config
+	// will accept for relay.yaml (architecture doc 8.5's filesystem
+	// table: "root:tetragon-relay, 0640"). A mode with any bit set
+	// outside this is refused, never silently masked.
+	MaxConfigFileMode = 0o640
+
+	// DefaultHeartbeatInterval is controller.heartbeat_interval's
+	// default when relay.yaml omits it (architecture doc 6.3 step 5:
+	// "Heartbeat every 15 s").
+	DefaultHeartbeatInterval = 15 * time.Second
+
+	// DefaultCollectorSpoolMaxBytes is collector.spool_max_bytes's
+	// default (architecture doc 8.6's example: 2147483648, 2 GiB).
+	DefaultCollectorSpoolMaxBytes = 2 * (1 << 30)
+	// DefaultCollectorBatchMaxEvents is collector.batch_max_events's
+	// default (architecture doc 8.6's example).
+	DefaultCollectorBatchMaxEvents = 2000
+	// DefaultCollectorBatchMaxAge is collector.batch_max_age's default
+	// (architecture doc 8.6's example).
+	DefaultCollectorBatchMaxAge = 2 * time.Second
+
+	// DefaultIdentityKeyRotation is identity.key_rotation's default
+	// when relay.yaml omits it. Intentionally the same value as
+	// internal/identity.DefaultRotationInterval (architecture doc
+	// 5.4's host key rotation cadence, 7 days): duplicated rather than
+	// imported so internal/config stays decoupled from internal/identity
+	// (the same "duplicate a small constant instead of adding an
+	// import" convention internal/tetra's HostSELinuxEnforcing/
+	// HostSELinuxPermissive constants already use relative to
+	// internal/hostprobe).
+	DefaultIdentityKeyRotation = 7 * 24 * time.Hour
 )
 
 // TetragonVersionFamily is the pinned major.minor version family internal/

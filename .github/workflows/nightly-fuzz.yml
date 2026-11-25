@@ -33,6 +33,8 @@ jobs:
             package: ./internal/guard/...
           - target: FuzzStoreIndex
             package: ./internal/store/...
+          - target: FuzzConfig
+            package: ./internal/config/...
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -60,5 +62,6 @@ jobs:
             internal/policydoc/testdata/fuzz/**
             internal/guard/testdata/fuzz/**
             internal/store/testdata/fuzz/**
+            internal/config/testdata/fuzz/**
           if-no-files-found: ignore
           retention-days: 30
