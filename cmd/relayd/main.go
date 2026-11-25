@@ -126,9 +126,22 @@ func run(configPath, tpmDevicePath string, auditor agent.Auditor) error {
 	// Part C1: host facts, refusing enforcement bundles if missing or
 	// stale (hostprobe.Load already fails closed on exactly that;
 	// consuming its Capabilities into guard-rail decisions is 6b's
-	// bundle-processing job). Recorded here only as an audit signal.
-	bootID, _ := hostprobe.CurrentBootID()
-	_, fresh := hostprobe.Load(hostprobe.HostFactsPath, bootID)
+	// bundle-processing job).
+	//
+	// R6A-2: CurrentBootID's own error (e.g. /proc/sys/kernel/random/
+	// boot_id unreadable) used to be silently discarded; it is now a
+	// named audit record, since an operator trying to understand why
+	// every enforcement bundle is being rejected needs to know whether
+	// the cause was a stale probe (the branch below) or the agent
+	// itself being unable to even determine the current boot. Either
+	// way Load already fails closed (bootID == "" never matches a
+	// facts file's own BootID), so this is diagnostics only -- it does
+	// not change Load's fail-closed behavior.
+	bootID, bootIDErr := hostprobe.CurrentBootID()
+	if bootIDErr != nil {
+		auditor.Record(agent.AuditEvent{Step: "host_facts_boot_id", Detail: "failed to read the current boot_id; host facts will be treated as stale until this succeeds", Err: bootIDErr})
+	}
+	hostCaps, fresh := hostprobe.Load(hostprobe.HostFactsPath, bootID)
 	if !fresh {
 		auditor.Record(agent.AuditEvent{Step: "host_facts", Detail: "host facts missing or stale; enforcement bundles will be rejected (REJECTED_CAPABILITY) once step 6b processes bundles"})
 	}
@@ -202,15 +215,43 @@ func run(configPath, tpmDevicePath string, auditor agent.Auditor) error {
 	// a known limitation in docs/reports/step-06a.md rather than built
 	// against a chain this step can never actually produce end to end.
 
-	return runUntilSignal(auditor)
+	assembled := &assembledAgent{
+		HostCaps:       hostCaps,
+		HostFactsFresh: fresh,
+	}
+	return runUntilSignal(auditor, assembled)
+}
+
+// assembledAgent holds the components run() builds that outlive its own
+// local scope: handed to runUntilSignal today, and (R6A-2) to a later
+// step's bundle-processing wiring, so host facts are read from
+// hostprobe.HostFactsPath exactly once per process lifetime -- never
+// re-read from disk by whatever eventually wires them into the
+// guardrails' HostCapabilities (architecture doc 7.5's G8 host-capability
+// guardrail). Grows as later parts of this step (D3's session runner)
+// need more of run()'s components to outlive run() itself.
+type assembledAgent struct {
+	// HostCaps and HostFactsFresh are hostprobe.Load's result for this
+	// boot (R6A-2). HostFactsFresh mirrors whether HostCaps reflects a
+	// current, successfully-read probe or hostprobe's fail-closed
+	// value; 6b's guardrail wiring must still check HostFactsFresh
+	// itself before trusting HostCaps, since a HostCaps obtained from a
+	// stale/missing probe is the same fail-closed value Load always
+	// returns in that case, not a zero value that would be mistaken
+	// for "no capabilities configured."
+	HostCaps       *hostprobe.Capabilities
+	HostFactsFresh bool
 }
 
 // runUntilSignal implements Part C4's sd_notify/watchdog/clean-shutdown
 // contract: READY once startup completes, a watchdog keepalive every half
 // of WatchdogSec (packaging/systemd/tetragon-relay.service: 30s, so every
 // 15s here), and a clean return (never touching anything Tetragon has
-// loaded) on SIGTERM/SIGINT.
-func runUntilSignal(auditor agent.Auditor) error {
+// loaded) on SIGTERM/SIGINT. assembled is not yet consumed here (step
+// 6a's R6A-1/D3 commits extend this loop to use it); accepting it now
+// means run()'s components are threaded through rather than discarded.
+func runUntilSignal(auditor agent.Auditor, assembled *assembledAgent) error {
+	_ = assembled
 	notifySocket := os.Getenv("NOTIFY_SOCKET")
 	if err := sdNotify(notifySocket, "READY=1"); err != nil {
 		auditor.Record(agent.AuditEvent{Step: "sd_notify", Detail: "READY=1 failed", Err: err})
