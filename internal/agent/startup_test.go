@@ -618,6 +618,59 @@ func TestStartup_MultiVersionChain_TooManyFilesIsConfigError(t *testing.T) {
 	}
 }
 
+// TestStartup_PersistedRootWithValidHMACButFailingTrustVerificationIsTampered
+// implements step-04b-review.md's answer to open question 3: "Add a test
+// asserting that Startup rejects (as tamper) a persisted root whose bytes
+// carry a valid HMAC but fail trust verification." internal/store's own
+// HMAC only ever covers index integrity (the bytes are exactly what this
+// package itself wrote); it says nothing about whether those bytes parse
+// or self-verify as valid trust-root metadata -- store.PersistTrustRoot
+// does not parse raw at all (store has no internal/trust dependency), so
+// garbage bytes persist with a perfectly valid HMAC. internal/agent's own
+// re-verification with trust.LoadInitialRoot at every startup is the
+// layer that must catch this (docs/reports/step-04b.md's open question 3
+// answer, repeated in step-04b-review.md: "the agent's re-verification...
+// is the right layer").
+func TestStartup_PersistedRootWithValidHMACButFailingTrustVerificationIsTampered(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	sealer := &store.FakeKeySealer{Key: []byte("agent-test-key-0123456789abcdef")}
+	counter := store.NewFakeMonotonicCounter()
+	st, err := store.Open(dir, sealer, counter)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	// PersistTrustRoot computes a correct index HMAC over whatever bytes
+	// it is given -- it never parses them. This is exactly how an
+	// attacker with the HMAC key (but not a valid root signature) could
+	// forge a persisted root: the store-level integrity check passes,
+	// but the bytes are not valid trust-root metadata at all.
+	if err := st.PersistTrustRoot([]byte("not a valid root envelope at all"), 1); err != nil {
+		t.Fatalf("PersistTrustRoot: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	auditor := &agent.FakeAuditor{}
+	cfg := agent.Config{StoreDir: dir, Sealer: sealer, Counter: counter, Auditor: auditor}
+	if _, err := agent.Startup(cfg, now); !errors.Is(err, store.ErrTampered) {
+		t.Fatalf("err = %v, want store.ErrTampered", err)
+	}
+	found := false
+	for _, e := range auditor.Events {
+		if e.Step == "trust_root" && e.Err != nil {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no trust_root audit event recording the parse failure; events = %+v", auditor.Events)
+	}
+}
+
 func TestStartup_SealerUnavailable(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	cfg, _ := testConfig(t, nil)
