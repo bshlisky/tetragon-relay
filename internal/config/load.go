@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/user"
+	"path/filepath"
 	"strconv"
 	"syscall"
 
@@ -143,6 +144,61 @@ func validateConfigFileInfo(fi os.FileInfo, path string) error {
 	return nil
 }
 
+// checkParentDir implements step-06a-review B7: the directory containing
+// relay.yaml must be owned by root, must not itself be (or be reached
+// through, at its own final path component) a symlink, and must not be
+// writable by group or other -- otherwise a non-root principal with write
+// access to the directory could replace relay.yaml out from under
+// openConfigFile's own O_NOFOLLOW check (which only protects against
+// relay.yaml's own path component being a symlink, not against the
+// directory holding it being attacker-writable). The directory is opened
+// with O_DIRECTORY|O_NOFOLLOW (mirroring openConfigFile's own descriptor-
+// based check, not a path-based Lstat) and checked via Fstat on that
+// descriptor.
+func checkParentDir(path string) error {
+	dir := filepath.Dir(path)
+	d, err := os.OpenFile(dir, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0) //nolint:gosec // G304: dir is derived from the operator-configured --config flag (Part C)
+	if err != nil {
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			return fmt.Errorf("%w: %s", ErrConfigParentDirNotFound, dir)
+		case errors.Is(err, syscall.ELOOP), errors.Is(err, syscall.ENOTDIR):
+			return fmt.Errorf("%w: %s", ErrConfigParentDirIsSymlink, dir)
+		default:
+			return fmt.Errorf("config: open directory %s: %w", dir, err)
+		}
+	}
+	defer func() { _ = d.Close() }()
+
+	fi, err := d.Stat()
+	if err != nil {
+		return fmt.Errorf("config: fstat %s: %w", dir, err)
+	}
+	return validateParentDirInfo(fi, dir)
+}
+
+// validateParentDirInfo is checkParentDir's policy, factored out as a
+// pure function of an os.FileInfo for the same unit-testability reason as
+// validateConfigFileInfo above.
+func validateParentDirInfo(fi os.FileInfo, dir string) error {
+	if !fi.IsDir() {
+		// Unreachable given O_DIRECTORY (the open itself would have
+		// failed with ENOTDIR), kept as a defensive invariant.
+		return fmt.Errorf("%w: %s", ErrConfigParentDirIsSymlink, dir)
+	}
+	if mode := fi.Mode().Perm(); mode&0o022 != 0 {
+		return fmt.Errorf("%w: %s has mode %o (writable by group or other)", ErrConfigParentDirWritable, dir, mode)
+	}
+	st, err := statT(fi)
+	if err != nil {
+		return err
+	}
+	if uint32(st.Uid) != 0 { //nolint:unconvert // Uid's width differs across platforms
+		return fmt.Errorf("%w: %s is owned by uid %d", ErrConfigParentDirNotOwnedByRoot, dir, st.Uid)
+	}
+	return nil
+}
+
 // readOpenedConfigFile reads f's bytes from the current offset (f is
 // openConfigFile's already O_NOFOLLOW-opened, already fstat-checked
 // descriptor -- not re-opened by path), bounded by
@@ -169,6 +225,9 @@ func Load(path string) (*Config, error) {
 	}
 	defer func() { _ = f.Close() }()
 
+	if err := checkParentDir(path); err != nil {
+		return nil, err
+	}
 	raw, err := readOpenedConfigFile(f, path)
 	if err != nil {
 		return nil, err
@@ -180,7 +239,7 @@ func Load(path string) (*Config, error) {
 // ingestion (internal/yamlharden, shared with internal/policydoc),
 // closed-schema strict decoding, and field validation/defaulting. Split
 // out from Load so FuzzConfig (Part B5) and tests can exercise it without
-// touching the filesystem or Part B1/B6's ownership checks.
+// touching the filesystem or Part B1/B6/B7's ownership checks.
 func parse(raw []byte) (*Config, error) {
 	// internal/yamlharden.Parse applies the same hardening rules
 	// internal/policydoc uses for policy YAML (anchors, aliases,

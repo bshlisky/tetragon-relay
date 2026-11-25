@@ -158,6 +158,77 @@ func TestOpenConfigFile_WrongGroup(t *testing.T) {
 	}
 }
 
+// --- B7: parent directory checks ---
+
+func TestCheckParentDir_NotFound(t *testing.T) {
+	err := checkParentDir(filepath.Join(t.TempDir(), "doesnotexist", "relay.yaml"))
+	if !errors.Is(err, ErrConfigParentDirNotFound) {
+		t.Fatalf("error = %v, want ErrConfigParentDirNotFound", err)
+	}
+}
+
+func TestCheckParentDir_Symlink(t *testing.T) {
+	base := t.TempDir()
+	realDir := filepath.Join(base, "real")
+	if err := os.Mkdir(realDir, 0o750); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	linkDir := filepath.Join(base, "etc-tetragon-relay")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	err := checkParentDir(filepath.Join(linkDir, "relay.yaml"))
+	if !errors.Is(err, ErrConfigParentDirIsSymlink) {
+		t.Fatalf("error = %v, want ErrConfigParentDirIsSymlink", err)
+	}
+}
+
+func TestCheckParentDir_WritableByGroup(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o770); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	if err := checkParentDir(filepath.Join(dir, "relay.yaml")); !errors.Is(err, ErrConfigParentDirWritable) {
+		t.Fatalf("error = %v, want ErrConfigParentDirWritable", err)
+	}
+}
+
+func TestCheckParentDir_WritableByOther(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o707); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	if err := checkParentDir(filepath.Join(dir, "relay.yaml")); !errors.Is(err, ErrConfigParentDirWritable) {
+		t.Fatalf("error = %v, want ErrConfigParentDirWritable", err)
+	}
+}
+
+func TestCheckParentDir_NotOwnedByRoot(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("test process is root; cannot exercise the non-root-owner refusal")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o750); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	if err := checkParentDir(filepath.Join(dir, "relay.yaml")); !errors.Is(err, ErrConfigParentDirNotOwnedByRoot) {
+		t.Fatalf("error = %v, want ErrConfigParentDirNotOwnedByRoot", err)
+	}
+}
+
+func TestCheckParentDir_SecureDirAccepted(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("a non-root test process cannot create a root-owned directory to exercise the accept path")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o750); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	if err := checkParentDir(filepath.Join(dir, "relay.yaml")); err != nil {
+		t.Fatalf("checkParentDir on a root-owned, non-group/other-writable directory: %v", err)
+	}
+}
+
 // --- reading ---
 
 func TestReadOpenedConfigFile_TooLarge(t *testing.T) {

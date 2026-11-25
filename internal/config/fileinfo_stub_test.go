@@ -65,3 +65,34 @@ func TestValidateConfigFileInfo_AllBranches(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateParentDirInfo_AllBranches(t *testing.T) {
+	rootOwned := statT64(0, 100)
+	tests := []struct {
+		name    string
+		fi      fileInfoStub
+		wantErr error
+	}{
+		{"not a directory", fileInfoStub{mode: 0o750, isDir: false, sys: rootOwned}, ErrConfigParentDirIsSymlink},
+		{"writable by group", fileInfoStub{mode: os.ModeDir | 0o770, isDir: true, sys: rootOwned}, ErrConfigParentDirWritable},
+		{"writable by other", fileInfoStub{mode: os.ModeDir | 0o707, isDir: true, sys: rootOwned}, ErrConfigParentDirWritable},
+		{"cannot verify ownership", fileInfoStub{mode: os.ModeDir | 0o750, isDir: true, sys: nil}, ErrConfigCannotVerifyOwnership},
+		{"not owned by root", fileInfoStub{mode: os.ModeDir | 0o750, isDir: true, sys: statT64(1000, 100)}, ErrConfigParentDirNotOwnedByRoot},
+		{"accepted", fileInfoStub{mode: os.ModeDir | 0o750, isDir: true, sys: rootOwned}, nil},
+		{"accepted, no group/other bits at all", fileInfoStub{mode: os.ModeDir | 0o700, isDir: true, sys: rootOwned}, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateParentDirInfo(tc.fi, "/etc/tetragon-relay")
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("validateParentDirInfo: %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("error = %v, want %v", err, tc.wantErr)
+			}
+		})
+	}
+}

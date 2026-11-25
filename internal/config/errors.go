@@ -26,6 +26,17 @@ var (
 	// ErrConfigTooLarge is returned when relay.yaml exceeds limits.MaxConfigFileBytes.
 	ErrConfigTooLarge = errors.New("config: relay.yaml exceeds the maximum allowed size")
 
+	// --- B7: parent directory checks ---
+
+	// ErrConfigParentDirNotFound is returned when relay.yaml's containing directory does not exist.
+	ErrConfigParentDirNotFound = errors.New("config: relay.yaml's parent directory not found")
+	// ErrConfigParentDirIsSymlink is returned when relay.yaml's containing directory is (or is reached through) a symlink.
+	ErrConfigParentDirIsSymlink = errors.New("config: relay.yaml's parent directory must not be a symlink")
+	// ErrConfigParentDirNotOwnedByRoot is returned when relay.yaml's containing directory is not owned by root.
+	ErrConfigParentDirNotOwnedByRoot = errors.New("config: relay.yaml's parent directory must be owned by root")
+	// ErrConfigParentDirWritable is returned when relay.yaml's containing directory is writable by group or other.
+	ErrConfigParentDirWritable = errors.New("config: relay.yaml's parent directory must not be writable by group or other")
+
 	// --- B2: parsing ---
 
 	// ErrConfigParse is returned when relay.yaml does not decode into the closed schema (including unknown fields).
