@@ -2,7 +2,6 @@ package agent
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"time"
 
@@ -28,11 +27,12 @@ import (
 // not retry Startup expecting self-heal, and must not unload or change
 // anything Tetragon currently has loaded.
 //
-// A historical root whose OWN 365-day validity has since elapsed is NOT
-// tamper (architecture doc 7.6 already treats an expired root as "stop
-// accepting new bundles, keep enforcing LKG" at the ordinary
-// verification layer, not evidence of forgery): that domain's
-// re-verification is skipped and audited instead.
+// A historical root whose OWN 365-day validity has since elapsed does NOT
+// skip the signature check (docs/reviews/step-04c-review.md R4C-2): expiry
+// is a rule about accepting NEW bundles, and a signature's validity does
+// not change with time, so reverifyDomainLKG uses (*trust.Root)'s
+// ProvenanceVerifier, not TargetsVerifier, and only AUDITS the expiry as
+// operational staleness rather than letting it change the outcome.
 func reverifyLKG(st *store.Store, now time.Time, auditor Auditor) error {
 	domains, err := st.Domains()
 	if err != nil {
@@ -58,18 +58,19 @@ func reverifyDomainLKG(st *store.Store, domain string, now time.Time, auditor Au
 		}
 		return nil
 	}
-	if len(set.RawEnvelope) == 0 {
-		// An LKGSet persisted before ADR 0025 (or by a test/fixture that
-		// never set RawEnvelope) has nothing to re-verify against.
-		// Treated as "nothing to check," not tamper: this package did
-		// not create such a record, and refusing to boot because of
-		// data this step did not require before would be exactly the
-		// kind of silent-widening-into-a-new-requirement this project's
-		// working agreement warns against for anything OTHER than a
-		// genuine security check. A future, fuller migration step may
-		// choose to require it; this step does not.
-		auditor.Record(AuditEvent{Step: "lkg_reverify", Detail: fmt.Sprintf("domain %q: no raw envelope recorded (pre-R4B-2 record); skipped", domain)})
-		return nil
+	if len(set.RawEnvelope) == 0 || set.RootVersion == 0 {
+		// docs/reviews/step-04c-review.md R4C-1: there are no genuine
+		// pre-R4B-2 records anywhere (internal/store's LKG schema was
+		// introduced in step 4b and has never been deployed without
+		// this re-verification step), and a missing raw envelope or
+		// root version is exactly the attack ADR 0025 defends against
+		// -- an attacker who can forge a valid store index HMAC
+		// rewrites the LKG blob with altered policies and simply omits
+		// raw_envelope/root_version, which would otherwise skip
+		// re-verification entirely and trust the altered set. Fail
+		// closed instead.
+		auditor.Record(AuditEvent{Step: "lkg_reverify", Detail: fmt.Sprintf("domain %q: LKG has no raw envelope or root version recorded", domain)})
+		return fmt.Errorf("%w: domain %q: LKG has no raw envelope or root version recorded", store.ErrTampered, domain)
 	}
 
 	rootRaw, ok, err := st.RootAtVersion(set.RootVersion)
@@ -85,14 +86,13 @@ func reverifyDomainLKG(st *store.Store, domain string, now time.Time, auditor Au
 		return fmt.Errorf("%w: domain %q: recorded root version %d failed to parse: %w", store.ErrTampered, domain, set.RootVersion, err)
 	}
 
-	verifier, err := root.TargetsVerifier(now)
-	if err != nil {
-		if errors.Is(err, trust.ErrRootMetadataExpired) {
-			auditor.Record(AuditEvent{Step: "lkg_reverify", Detail: fmt.Sprintf("domain %q: root version %d has expired; re-verification skipped (LKG keeps enforcing)", domain, set.RootVersion)})
-			return nil
-		}
-		return fmt.Errorf("agent: domain %q: build verifier for root version %d: %w", domain, set.RootVersion, err)
+	// R4C-2: expiry of the historical root's OWN metadata validity must
+	// not skip the signature check -- it is audited as operational
+	// staleness only, never as a reason to trust an unverified envelope.
+	if !now.Before(root.Expires) {
+		auditor.Record(AuditEvent{Step: "lkg_reverify", Detail: fmt.Sprintf("domain %q: root version %d has expired; re-verification continues anyway (LKG keeps enforcing)", domain, set.RootVersion)})
 	}
+	verifier := root.ProvenanceVerifier()
 
 	env, err := dsse.ParseEnvelope(set.RawEnvelope, limits.MaxEnvelopeBytes, limits.MaxJSONDepth)
 	if err != nil {
