@@ -112,6 +112,48 @@ func TestRoot_TargetsVerifier_ExpiryBoundary(t *testing.T) {
 	}
 }
 
+// TestRoot_ProvenanceVerifier_IgnoresExpiry covers docs/reviews/step-04c-review.md
+// R4C-2: unlike TargetsVerifier, ProvenanceVerifier takes no "now" and must
+// still verify a genuine signature even when built from root metadata whose
+// own validity has already elapsed -- and must still reject a signature
+// that does not meet the targets role's threshold, expiry notwithstanding.
+func TestRoot_ProvenanceVerifier_IgnoresExpiry(t *testing.T) {
+	// Already expired relative to any realistic "now" used elsewhere in
+	// this test file.
+	longExpired := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	env, _, targetsKey, _ := standardRoot(t, 1, longExpired)
+	root, err := trust.LoadInitialRoot(env)
+	if err != nil {
+		t.Fatalf("LoadInitialRoot: %v", err)
+	}
+
+	// TargetsVerifier, the acceptance-path entry point, correctly
+	// refuses: this root's metadata is expired.
+	if _, err := root.TargetsVerifier(time.Now()); !errors.Is(err, trust.ErrRootMetadataExpired) {
+		t.Fatalf("TargetsVerifier err = %v, want ErrRootMetadataExpired", err)
+	}
+
+	pv := root.ProvenanceVerifier()
+	genuine := signEnvelope("application/vnd.relay.reverify-test+json", []byte(`{"x":1}`), targetsKey)
+	genuineEnv, err := parseEnvForTest(genuine)
+	if err != nil {
+		t.Fatalf("parse genuine envelope: %v", err)
+	}
+	if err := pv.Verify(genuineEnv); err != nil {
+		t.Fatalf("ProvenanceVerifier.Verify(genuine) = %v, want nil (expiry must not block a valid signature)", err)
+	}
+
+	other := mustKey(t)
+	forged := signEnvelope("application/vnd.relay.reverify-test+json", []byte(`{"x":1}`), other)
+	forgedEnv, err := parseEnvForTest(forged)
+	if err != nil {
+		t.Fatalf("parse forged envelope: %v", err)
+	}
+	if err := pv.Verify(forgedEnv); !errors.Is(err, trust.ErrThresholdNotMet) {
+		t.Fatalf("ProvenanceVerifier.Verify(forged) = %v, want ErrThresholdNotMet", err)
+	}
+}
+
 func TestRoot_Update_Valid(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	env, rootKeys, _, _ := standardRoot(t, 1, now.Add(24*time.Hour))

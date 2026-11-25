@@ -386,3 +386,24 @@ func (r *Root) TargetsVerifier(now time.Time) (Verifier, error) {
 	}
 	return &targetsVerifier{keys: r.keys, role: r.roles.Targets, requireLogProof: r.RequireLogProof}, nil
 }
+
+// ProvenanceVerifier returns a Verifier that checks signatures and role
+// thresholds (including RequireKeyTypes) against this root's targets role,
+// REGARDLESS of whether the root metadata has expired as of any particular
+// time.
+//
+// This must NEVER be used to decide whether to accept a new bundle:
+// TargetsVerifier is the sole acceptance-path entry point, and its expiry
+// check enforces a rule about what may be accepted now. A signature's
+// validity does not change with time, so ProvenanceVerifier exists solely
+// to re-confirm the provenance of an ALREADY-accepted artifact (the
+// startup LKG re-verification in internal/agent, ADR 0025 as amended by
+// docs/reviews/step-04c-review.md R4C-2): without it, an attacker able to
+// forge a valid store index HMAC could point an altered LKG at any
+// sufficiently old retained root version and have re-verification skip
+// the signature check entirely, since within a year of normal operation
+// every older retained root will have expired. Call sites are enforced by
+// internal/agent's TestProvenanceVerifier_OnlyCalledFromAgentReverify.
+func (r *Root) ProvenanceVerifier() Verifier {
+	return &targetsVerifier{keys: r.keys, role: r.roles.Targets, requireLogProof: r.RequireLogProof}
+}
