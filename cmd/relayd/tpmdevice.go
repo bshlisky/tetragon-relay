@@ -19,3 +19,14 @@ func openTPMDevice(path string) (transport.TPMCloser, error) {
 	}
 	return tpm.OpenDevice(path)
 }
+
+// tpmDeviceFlag implements R6A-3: a production build (no test build
+// tags) never even defines a --tpm-device flag, so passing one is
+// rejected by the standard flag package itself ("flag provided but not
+// defined") rather than accepted and then refused by openTPMDevice
+// above. Only the testtpm build (tpmdevice_testtpm.go) defines the flag,
+// for CI/E3's swtpm-backed runs.
+func tpmDeviceFlag() *string {
+	device := productionTPMDevice
+	return &device
+}

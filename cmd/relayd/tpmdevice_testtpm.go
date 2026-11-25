@@ -3,6 +3,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"strings"
 
@@ -28,4 +29,12 @@ func openTPMDevice(path string) (transport.TPMCloser, error) {
 		return tt, nil
 	}
 	return linuxtpm.Open(path)
+}
+
+// tpmDeviceFlag defines --tpm-device, only under the testtpm build tag
+// (R6A-3): a production build has no such flag at all (tpmdevice.go),
+// so passing one to a production binary is rejected by the standard
+// flag package as unknown, not silently accepted and then refused.
+func tpmDeviceFlag() *string {
+	return flag.String("tpm-device", productionTPMDevice, "TPM resource manager device (testtpm builds also accept tcp:host:port for a software TPM)")
 }

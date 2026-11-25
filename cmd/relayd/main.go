@@ -50,7 +50,13 @@ const (
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	configPath := flag.String("config", defaultConfigPath, "path to relay.yaml")
-	tpmDevice := flag.String("tpm-device", productionTPMDevice, "TPM resource manager device (production builds accept only /dev/tpmrm0)")
+	// R6A-3: tpmDeviceFlag only defines a --tpm-device flag under the
+	// testtpm build tag (tpmdevice_testtpm.go); a production build
+	// (tpmdevice.go) returns a fixed pointer to productionTPMDevice and
+	// defines no flag at all, so docs/prompts/step-06a.md's "only
+	// --config and --version" is enforced by the standard flag package
+	// itself rejecting an unknown --tpm-device in that build.
+	tpmDevice := tpmDeviceFlag()
 	flag.Parse()
 
 	if *showVersion {
