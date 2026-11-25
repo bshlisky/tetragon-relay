@@ -24,6 +24,7 @@ import (
 	"github.com/bshlisky/tetragon-relay/internal/agent"
 	"github.com/bshlisky/tetragon-relay/internal/apply"
 	"github.com/bshlisky/tetragon-relay/internal/config"
+	"github.com/bshlisky/tetragon-relay/internal/controlclient"
 	"github.com/bshlisky/tetragon-relay/internal/hostprobe"
 	"github.com/bshlisky/tetragon-relay/internal/identity"
 	"github.com/bshlisky/tetragon-relay/internal/tetra"
@@ -204,32 +205,94 @@ func run(configPath, tpmDevicePath string, auditor agent.Auditor) error {
 		return fmt.Errorf("load persisted identity: %w", loadErr)
 	}
 
-	if len(certManager.Chain()) == 0 {
-		auditor.Record(agent.AuditEvent{Step: "identity", Detail: "no persisted identity and no production Enroller available; staying UNENROLLED (architecture doc 5.2/5.3 enrollment is not yet wired into this binary)"})
+	liveness, err := agent.NewLivenessRegistry(time.Now)
+	if err != nil {
+		return fmt.Errorf("new liveness registry: %w", err)
 	}
-	// Part C/D: the control stream (internal/controlclient.Dial, the
-	// Hello/HelloAck exchange, and ControlLoop's message loop) requires
-	// a client certificate this build cannot obtain without a real
-	// Enroller (above). Driving that connection, and the reconnect/
-	// heartbeat/DEGRADED-timer orchestration around it, is recorded as
-	// a known limitation in docs/reports/step-06a.md rather than built
-	// against a chain this step can never actually produce end to end.
 
 	assembled := &assembledAgent{
 		HostCaps:       hostCaps,
 		HostFactsFresh: fresh,
+		Liveness:       liveness,
 	}
+
+	// Part D3/C2: a production build's Enroller always refuses to
+	// enroll (buildEnroller), so len(certManager.Chain()) == 0 here in
+	// every production build -- the session runner below is simply
+	// never started, and this host stays UNENROLLED exactly as before
+	// this step. A host with a persisted identity chain (e.g. from a
+	// future real enrollment flow, or the testca build's own Enroller)
+	// does reach the "once an identity exists" session runner D3 asks
+	// for.
+	if len(certManager.Chain()) == 0 {
+		auditor.Record(agent.AuditEvent{Step: "identity", Detail: "no persisted identity and no production Enroller available; staying UNENROLLED (architecture doc 5.2/5.3 enrollment is not yet wired into this binary)"})
+		return runUntilSignal(auditor, assembled)
+	}
+
+	sessionCtx, cancelSession := context.WithCancel(context.Background())
+	sm, err := agent.NewStateMachine(auditor)
+	if err != nil {
+		cancelSession()
+		return fmt.Errorf("new state machine: %w", err)
+	}
+	// An identity already exists: these two transitions are vacuously
+	// true bookkeeping (D3's own precondition for RunSession), not a
+	// real enrollment flow -- this build has none (C2).
+	if err := sm.Fire(agent.EventJoinTokenValid); err != nil {
+		cancelSession()
+		return fmt.Errorf("enter ENROLLING: %w", err)
+	}
+	if err := sm.Fire(agent.EventSVIDIssued); err != nil {
+		cancelSession()
+		return fmt.Errorf("enter CONNECTING: %w", err)
+	}
+
+	snapshotProvider := &agent.RealSnapshotProvider{Store: startupResult.Store, Client: tetraClient, Scopes: cfg.AllowedScopes}
+	controlLoop, err := agent.NewControlLoop(sm, auditor, time.Now, snapshotProvider, &agent.RealIdentityRotator{CertManager: certManager})
+	if err != nil {
+		cancelSession()
+		return fmt.Errorf("new control loop: %w", err)
+	}
+
+	buildDigest, _ := agentBuildDigest() // best-effort; see buildHelloFields
+
+	sessionCfg := agent.SessionConfig{
+		Connector: &agent.RealConnector{
+			Config: func() controlclient.Config {
+				return controlclient.Config{
+					Endpoints:          cfg.ControllerEndpoints,
+					ControllerSPIFFEID: cfg.ControllerSPIFFEID,
+					ControllerCABundle: enrollmentBundle,
+					ClientCertificate:  clientCertificate(certManager.Chain(), hostSigner),
+					Clock:              time.Now,
+				}
+			},
+		},
+		Hello: func() controlclient.HelloFields {
+			return buildHelloFields(sessionCtx, cfg, startupResult, tetraClient, bootID, buildDigest, snapshotProvider)
+		},
+		ControlLoop:       controlLoop,
+		Clock:             time.Now,
+		Auditor:           auditor,
+		Liveness:          liveness,
+		HeartbeatInterval: cfg.HeartbeatInterval,
+	}
+
+	sessionDone := make(chan error, 1)
+	go func() { sessionDone <- agent.RunSession(sessionCtx, sessionCfg) }()
+	assembled.CancelSession = cancelSession
+	assembled.SessionDone = sessionDone
+
 	return runUntilSignal(auditor, assembled)
 }
 
 // assembledAgent holds the components run() builds that outlive its own
-// local scope: handed to runUntilSignal today, and (R6A-2) to a later
-// step's bundle-processing wiring, so host facts are read from
-// hostprobe.HostFactsPath exactly once per process lifetime -- never
+// local scope: handed to runUntilSignal, and (HostCaps/HostFactsFresh)
+// to a later step's bundle-processing wiring, so host facts are read
+// from hostprobe.HostFactsPath exactly once per process lifetime -- never
 // re-read from disk by whatever eventually wires them into the
 // guardrails' HostCapabilities (architecture doc 7.5's G8 host-capability
-// guardrail). Grows as later parts of this step (D3's session runner)
-// need more of run()'s components to outlive run() itself.
+// guardrail).
 type assembledAgent struct {
 	// HostCaps and HostFactsFresh are hostprobe.Load's result for this
 	// boot (R6A-2). HostFactsFresh mirrors whether HostCaps reflects a
@@ -241,17 +304,31 @@ type assembledAgent struct {
 	// for "no capabilities configured."
 	HostCaps       *hostprobe.Capabilities
 	HostFactsFresh bool
+
+	// Liveness is R6A-1's registry: runUntilSignal's watchdog loop
+	// withholds WATCHDOG=1 unless every component registered in it
+	// (today: only the session runner, if one was started below) has
+	// reported within its own allowed interval.
+	Liveness *agent.LivenessRegistry
+
+	// CancelSession and SessionDone are non-nil only when a session
+	// runner was actually started (an identity exists, D3);
+	// runUntilSignal cancels the session's context on SIGTERM/SIGINT
+	// and waits (briefly) for it to stop before returning, so shutdown
+	// never leaves a reconnect loop running past process exit.
+	CancelSession func()
+	SessionDone   <-chan error
 }
 
 // runUntilSignal implements Part C4's sd_notify/watchdog/clean-shutdown
 // contract: READY once startup completes, a watchdog keepalive every half
 // of WatchdogSec (packaging/systemd/tetragon-relay.service: 30s, so every
-// 15s here), and a clean return (never touching anything Tetragon has
-// loaded) on SIGTERM/SIGINT. assembled is not yet consumed here (step
-// 6a's R6A-1/D3 commits extend this loop to use it); accepting it now
-// means run()'s components are threaded through rather than discarded.
+// 15s here) -- withheld, per R6A-1, unless assembled.Liveness reports
+// every registered component as healthy -- and a clean return (never
+// touching anything Tetragon has loaded) on SIGTERM/SIGINT, which also
+// stops the session runner (if one is running) and waits briefly for it
+// to exit.
 func runUntilSignal(auditor agent.Auditor, assembled *assembledAgent) error {
-	_ = assembled
 	notifySocket := os.Getenv("NOTIFY_SOCKET")
 	if err := sdNotify(notifySocket, "READY=1"); err != nil {
 		auditor.Record(agent.AuditEvent{Step: "sd_notify", Detail: "READY=1 failed", Err: err})
@@ -269,12 +346,42 @@ func runUntilSignal(auditor agent.Auditor, assembled *assembledAgent) error {
 		case <-sigCh:
 			auditor.Record(agent.AuditEvent{Step: "shutdown", Detail: "signal received; stopping (Tetragon policies left unchanged)"})
 			_ = sdNotify(notifySocket, "STOPPING=1")
+			stopSession(auditor, assembled)
 			return nil
 		case <-watchdogTicker.C:
-			if err := sdNotify(notifySocket, "WATCHDOG=1"); err != nil {
-				auditor.Record(agent.AuditEvent{Step: "sd_notify", Detail: "WATCHDOG=1 failed", Err: err})
+			// R6A-1: the watchdog proves only that this select loop is
+			// still scheduled, not that every long-running component
+			// (today: the session runner) is making progress. Withhold
+			// the ping -- and name the stale component in an audit
+			// record -- unless every registered component reported
+			// within its own allowed interval; systemd restarts relayd
+			// after WatchdogSec (30s) if the ping stays withheld.
+			if healthy, stale, staleFor := assembled.Liveness.Healthy(); healthy {
+				if err := sdNotify(notifySocket, "WATCHDOG=1"); err != nil {
+					auditor.Record(agent.AuditEvent{Step: "sd_notify", Detail: "WATCHDOG=1 failed", Err: err})
+				}
+			} else {
+				auditor.Record(agent.AuditEvent{Step: "watchdog_withheld", Detail: fmt.Sprintf("component %q has not reported in %s; withholding WATCHDOG=1", stale, staleFor)})
 			}
 		}
+	}
+}
+
+// stopSession cancels the session runner's context (if one was started)
+// and waits briefly for it to stop, so SIGTERM never leaves a reconnect
+// loop running past process exit.
+func stopSession(auditor agent.Auditor, assembled *assembledAgent) {
+	if assembled.CancelSession == nil {
+		return
+	}
+	assembled.CancelSession()
+	select {
+	case err := <-assembled.SessionDone:
+		if err != nil {
+			auditor.Record(agent.AuditEvent{Step: "session_shutdown", Err: err})
+		}
+	case <-time.After(5 * time.Second):
+		auditor.Record(agent.AuditEvent{Step: "session_shutdown", Detail: "session runner did not stop within 5s of cancellation"})
 	}
 }
 
