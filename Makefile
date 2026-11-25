@@ -54,6 +54,27 @@ coverage90:
 	done; \
 	exit $$fail
 
+COVER_TPM_PKG := internal/tpm
+
+# step-05a prompt D1/D4: internal/tpm's tests skip (not fail) without a
+# real swtpm on PATH, so neither of these is part of the main `ci` target
+# -- only the dedicated `tpm` CI job (which installs swtpm) runs them,
+# where they genuinely exercise every test against a real TPM 2.0
+# implementation, not report a false-low coverage number from mostly
+# skipped tests.
+.PHONY: tpm-test
+tpm-test:
+	$(GO) test -race -count=1 -v ./$(COVER_TPM_PKG)/...
+
+.PHONY: coverage-tpm
+coverage-tpm:
+	@echo "== $(COVER_TPM_PKG) (>=90% gate; step-05a prompt D4) =="; \
+	$(GO) test -count=1 -covermode=count -coverprofile=/tmp/tetragon-relay-tpm.out ./$(COVER_TPM_PKG)/... >/dev/null; \
+	line=$$($(GO) tool cover -func=/tmp/tetragon-relay-tpm.out | tail -1); \
+	echo "$$line"; \
+	pct=$$(echo "$$line" | awk '{print $$NF}' | tr -d '%'); \
+	awk -v p="$$pct" 'BEGIN { exit !(p+0 >= 90) }' || { echo "$(COVER_TPM_PKG) coverage $$pct% is below the required 90%"; exit 1; }
+
 .PHONY: fuzz-short
 fuzz-short:
 	$(GO) test -run=NONE -fuzz=FuzzStrictJSON -fuzztime=60s ./internal/strictjson/...

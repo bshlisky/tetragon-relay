@@ -48,6 +48,17 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # step-05a prompt C1/D1: internal/tpm's tests (and internal/agent's
+      # tpmwiring tests, which build on them) need a real TPM 2.0
+      # implementation, not a mock, to actually exercise the TPM command
+      # flows this step adds. Installed here, before the race/coverage
+      # steps below, so those steps' internal/tpm and internal/agent
+      # runs are the real thing, not skipped (docs/decisions/0027-tpm-
+      # library-and-software-tpm.md: swtpm chosen over the cgo-based
+      # go-tpm-tools simulator).
+      - name: Install swtpm (software TPM for internal/tpm's tests)
+        run: sudo apt-get update && sudo apt-get install -y swtpm swtpm-tools
+
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
@@ -76,8 +87,14 @@ jobs:
       - name: Per-package coverage gate (internal/dsse, internal/strictjson, internal/trust, internal/verify, internal/policydoc, internal/guard >= 95%)
         run: make coverage
 
-      - name: Per-package coverage gate (internal/tetra, internal/apply, internal/hostprobe >= 90%; step 3 Part E5)
+      - name: Per-package coverage gate (internal/tetra, internal/apply, internal/hostprobe, internal/agent >= 90%; step 3 Part E5)
         run: make coverage90
+
+      - name: Per-package coverage gate (internal/tpm >= 90%, against the real swtpm; step-05a prompt D4)
+        run: make coverage-tpm
+
+      - name: internal/tpm verbose test output (step-05a prompt D1: "at least one CI job must exercise the real TPM command flows")
+        run: make tpm-test
 
       - name: Fuzz smoke (60s per target)
         run: make fuzz-short
