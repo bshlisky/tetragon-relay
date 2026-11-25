@@ -449,6 +449,83 @@ func TestStartupDegradedCondition_ReportsWhenPersistedRootRequiresUnavailableMLD
 	}
 }
 
+// TestStartup_HybridRotationPersistedAndReloaded implements
+// docs/reports/step-04b.md's "Known limitations" item for Part E3: "a
+// hybrid rotation persisted and reloaded" -- a root rotating into a
+// hybrid ecdsa+mldsa targets role, persisted, then a fresh Open reloading
+// it.
+func TestStartup_HybridRotationPersistedAndReloaded(t *testing.T) {
+	now := fixedNow()
+	r1, r2, r3 := mustTestECDSAKey(t), mustTestECDSAKey(t), mustTestECDSAKey(t)
+	v1Root := buildECDSARoot(t, 1, now, []*ecdsa.PrivateKey{r1, r2, r3}, nil)
+
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	sealer := &testSealer{key: []byte("agent-internal-test-key-0123456")}
+	counter := &testCounter{}
+	cfg := Config{StoreDir: dir, Sealer: sealer, Counter: counter, InitialRootBytes: v1Root, Auditor: &FakeAuditor{}}
+
+	res, err := Startup(cfg, now)
+	if err != nil {
+		t.Fatalf("first Startup: %v", err)
+	}
+	if err := res.Store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	r4, r5, r6 := mustTestECDSAKey(t), mustTestECDSAKey(t), mustTestECDSAKey(t)
+	v2Root := buildHybridTargetsRootChained(t, 2, now, []*ecdsa.PrivateKey{r4, r5, r6}, []*ecdsa.PrivateKey{r1, r2})
+	cfg.InitialRootBytes = v2Root
+
+	res2, err := Startup(cfg, now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("rotation Startup: %v", err)
+	}
+	if res2.TrustRoot.Version != 2 {
+		t.Fatalf("Version after rotation = %d, want 2", res2.TrustRoot.Version)
+	}
+	requireHybridTargets(t, res2.TrustRoot)
+	if err := res2.Store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Reload: a fresh Open/Startup with no RPM-shipped root configured
+	// at all must reconstruct the exact same hybrid root purely from
+	// the persisted bytes.
+	cfg.InitialRootBytes = nil
+	res3, err := Startup(cfg, now.Add(2*time.Hour))
+	if err != nil {
+		t.Fatalf("reload Startup: %v", err)
+	}
+	defer func() { _ = res3.Store.Close() }()
+	if res3.FirstBoot {
+		t.Fatalf("FirstBoot = true on a reload, want false")
+	}
+	if res3.TrustRoot.Version != 2 {
+		t.Fatalf("Version after reload = %d, want 2", res3.TrustRoot.Version)
+	}
+	requireHybridTargets(t, res3.TrustRoot)
+}
+
+func requireHybridTargets(t *testing.T, root *trust.Root) {
+	t.Helper()
+	role := root.TargetsRole()
+	var hasECDSA, hasMLDSA bool
+	for _, kt := range role.RequireKeyTypes {
+		switch kt {
+		case trust.KeyTypeECDSAP384:
+			hasECDSA = true
+		case trust.KeyTypeMLDSA87:
+			hasMLDSA = true
+		}
+	}
+	if !hasECDSA || !hasMLDSA {
+		t.Fatalf("targets role RequireKeyTypes = %v, want both ecdsa-p384 and mldsa-87", role.RequireKeyTypes)
+	}
+}
+
 func TestCheckMLDSARequirement_FlagsEachRoleNeedingIt(t *testing.T) {
 	caps := Capabilities{MLDSAAvailable: false}
 
