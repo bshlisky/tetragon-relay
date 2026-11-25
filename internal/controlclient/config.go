@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"time"
 )
 
 // Config is everything the mTLS client needs to dial the controller
@@ -43,6 +44,16 @@ type Config struct {
 	// (ADR 0022's not-yet-agile list; PQC itself stays deferred, never
 	// enabled by default here).
 	Groups []tls.CurveID
+
+	// Clock returns the time BuildTLSConfig's VerifyConnection check
+	// uses as x509.VerifyOptions.CurrentTime when verifying the
+	// server's certificate chain (step-05b-review.md R5B-1). Required:
+	// a nil Clock is a configuration error (Validate), matching this
+	// project's "no time.Now in internal/" convention (ADR 0008) --
+	// production callers pass time.Now; tests inject a fixed or
+	// stepped clock so certificate-validity edges (not yet valid, just
+	// expired) are deterministic rather than racing the wall clock.
+	Clock func() time.Time
 }
 
 var (
@@ -54,6 +65,11 @@ var (
 	ErrEmptyControllerBundle = errors.New("controlclient: config: controller CA bundle is empty")
 	// ErrNoClientCertificate is returned by Config.Validate when ClientCertificate is unset.
 	ErrNoClientCertificate = errors.New("controlclient: config: client certificate is not set")
+	// ErrNoClock is returned by Config.Validate when Clock is nil
+	// (step-05b-review.md R5B-1: the clock used for server certificate
+	// verification must be injected, never read from the wall clock
+	// implicitly).
+	ErrNoClock = errors.New("controlclient: config: clock is not set")
 )
 
 // Validate rejects any configuration whose zero value would silently
@@ -70,6 +86,9 @@ func (c Config) Validate() error {
 	}
 	if len(c.ClientCertificate.Certificate) == 0 || c.ClientCertificate.PrivateKey == nil {
 		return ErrNoClientCertificate
+	}
+	if c.Clock == nil {
+		return ErrNoClock
 	}
 	return nil
 }

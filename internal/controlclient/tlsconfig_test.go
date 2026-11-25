@@ -13,7 +13,20 @@ import (
 	"time"
 )
 
+// fixedClock returns a func() time.Time pinned to t, for deterministic
+// certificate-validity boundary tests (step-05b-review.md R5B-1).
+func fixedClock(t time.Time) func() time.Time {
+	return func() time.Time { return t }
+}
+
 func testCertAndKey(t *testing.T, uri string) (*x509.Certificate, *ecdsa.PrivateKey) {
+	t.Helper()
+	return testCertAndKeyValidity(t, uri, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+}
+
+// testCertAndKeyValidity is testCertAndKey with an explicit validity
+// window, for boundary tests (step-05b-review.md R5B-1).
+func testCertAndKeyValidity(t *testing.T, uri string, notBefore, notAfter time.Time) (*x509.Certificate, *ecdsa.PrivateKey) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
 	if err != nil {
@@ -30,8 +43,8 @@ func testCertAndKey(t *testing.T, uri string) (*x509.Certificate, *ecdsa.Private
 	template := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
 		Subject:               pkix.Name{CommonName: "test"},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(time.Hour),
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
 		BasicConstraintsValid: true,
 		// IsCA/KeyUsageCertSign: these self-signed test certs double as
 		// their own trust anchor in Dial tests (ControllerCABundle =
@@ -67,6 +80,7 @@ func testConfig(t *testing.T, controllerSPIFFEID string, caBundle []*x509.Certif
 		ControllerSPIFFEID: controllerSPIFFEID,
 		ControllerCABundle: caBundle,
 		ClientCertificate:  testClientCert(t),
+		Clock:              time.Now,
 	}
 }
 
@@ -174,6 +188,52 @@ func TestVerifyConnection_Rejections(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := tlsCfg.VerifyConnection(tc.cs); err == nil {
 				t.Fatalf("VerifyConnection accepted a connection that should have been rejected")
+			}
+		})
+	}
+}
+
+// TestVerifyConnection_ClockBoundaries is step-05b-review.md R5B-1's
+// regression test: certificate-validity edges (not yet valid, just
+// expired) must be checked against Config.Clock, not the wall clock, so
+// they are deterministic here instead of racing real time.
+func TestVerifyConnection_ClockBoundaries(t *testing.T) {
+	wantSPIFFE := "spiffe://mgmt.example.internal/mgmt/controller"
+	notBefore := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	notAfter := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	serverCert, _ := testCertAndKeyValidity(t, wantSPIFFE, notBefore, notAfter)
+
+	tests := []struct {
+		name    string
+		clock   time.Time
+		wantErr bool
+	}{
+		{"one second before NotBefore: rejected", notBefore.Add(-time.Second), true},
+		{"exactly NotBefore: accepted", notBefore, false},
+		{"mid-validity: accepted", notBefore.Add(12 * time.Hour), false},
+		{"one second before NotAfter: accepted", notAfter.Add(-time.Second), false},
+		{"exactly NotAfter: accepted (crypto/x509 treats NotAfter as inclusive)", notAfter, false},
+		{"one second after NotAfter: rejected", notAfter.Add(time.Second), true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig(t, wantSPIFFE, []*x509.Certificate{serverCert})
+			cfg.Clock = fixedClock(tc.clock)
+			tlsCfg, err := BuildTLSConfig(cfg)
+			if err != nil {
+				t.Fatalf("BuildTLSConfig: %v", err)
+			}
+			cs := tls.ConnectionState{
+				Version:          tls.VersionTLS13,
+				CipherSuite:      tls.TLS_AES_256_GCM_SHA384,
+				PeerCertificates: []*x509.Certificate{serverCert},
+			}
+			err = tlsCfg.VerifyConnection(cs)
+			if tc.wantErr && err == nil {
+				t.Fatalf("VerifyConnection accepted a certificate that should be invalid at %v (validity [%v, %v))", tc.clock, notBefore, notAfter)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("VerifyConnection rejected a certificate that should be valid at %v: %v", tc.clock, err)
 			}
 		})
 	}

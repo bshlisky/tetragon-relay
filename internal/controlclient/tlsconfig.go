@@ -96,6 +96,11 @@ func BuildTLSConfig(cfg Config) (*tls.Config, error) {
 			Roots:         rootPool,
 			Intermediates: intermediates,
 			KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+			// step-05b-review.md R5B-1: use the injected clock, not
+			// the zero value (which leaf.Verify treats as time.Now()
+			// internally), so certificate-validity edges are
+			// deterministic and testable.
+			CurrentTime: cfg.Clock(),
 		}); err != nil {
 			return fmt.Errorf("controlclient: server certificate chain does not verify against the controller CA bundle: %w", err)
 		}

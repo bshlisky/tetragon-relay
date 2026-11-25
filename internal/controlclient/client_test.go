@@ -52,6 +52,7 @@ func TestDial_Success(t *testing.T) {
 		ControllerSPIFFEID: serverSPIFFE,
 		ControllerCABundle: []*x509.Certificate{serverCert}, // self-signed: the cert is its own root
 		ClientCertificate:  testClientCert(t),
+		Clock:              time.Now,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -83,6 +84,7 @@ func TestDial_WrongSPIFFEIDNeverBecomesReady(t *testing.T) {
 		ControllerSPIFFEID: "spiffe://mgmt.example.internal/mgmt/collector", // wrong on purpose
 		ControllerCABundle: []*x509.Certificate{serverCert},
 		ClientCertificate:  testClientCert(t),
+		Clock:              time.Now,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -98,6 +100,7 @@ func TestDial_UnreachableEndpointRetriesUntilCanceled(t *testing.T) {
 		ControllerSPIFFEID: "spiffe://mgmt.example.internal/mgmt/controller",
 		ControllerCABundle: []*x509.Certificate{ca},
 		ClientCertificate:  testClientCert(t),
+		Clock:              time.Now,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()

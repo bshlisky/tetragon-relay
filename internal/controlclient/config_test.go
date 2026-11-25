@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestConfig_Validate(t *testing.T) {
@@ -14,6 +15,7 @@ func TestConfig_Validate(t *testing.T) {
 		ControllerSPIFFEID: "spiffe://mgmt.example.internal/mgmt/controller",
 		ControllerCABundle: []*x509.Certificate{ca},
 		ClientCertificate:  testClientCert(t),
+		Clock:              time.Now,
 	}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("Validate on a valid config: %v", err)
@@ -28,6 +30,7 @@ func TestConfig_Validate(t *testing.T) {
 		{"empty controller spiffe id", func(c Config) Config { c.ControllerSPIFFEID = ""; return c }, ErrEmptyControllerSPIFFE},
 		{"empty controller bundle", func(c Config) Config { c.ControllerCABundle = nil; return c }, ErrEmptyControllerBundle},
 		{"no client certificate", func(c Config) Config { c.ClientCertificate = tls.Certificate{}; return c }, ErrNoClientCertificate},
+		{"no clock", func(c Config) Config { c.Clock = nil; return c }, ErrNoClock},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

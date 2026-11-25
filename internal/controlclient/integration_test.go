@@ -190,7 +190,7 @@ func TestIntegration_EnrollConnectHelloAck(t *testing.T) {
 	defer cancel()
 	conn, err := controlclient.Dial(ctx, controlclient.Config{
 		Endpoints: []string{addr}, ControllerSPIFFEID: controllerSPIFFE,
-		ControllerCABundle: []*x509.Certificate{ca.CACertificate()}, ClientCertificate: agentCert,
+		ControllerCABundle: []*x509.Certificate{ca.CACertificate()}, ClientCertificate: agentCert, Clock: time.Now,
 	})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -232,7 +232,7 @@ func TestIntegration_ServerWrongSPIFFEID_ClientRefuses(t *testing.T) {
 	wrongSPIFFE := "spiffe://" + trustDomain + "/mgmt/collector" // NOT what the server actually presents
 	_, err = controlclient.Dial(ctx, controlclient.Config{
 		Endpoints: []string{addr}, ControllerSPIFFEID: wrongSPIFFE,
-		ControllerCABundle: []*x509.Certificate{ca.CACertificate()}, ClientCertificate: agentCert,
+		ControllerCABundle: []*x509.Certificate{ca.CACertificate()}, ClientCertificate: agentCert, Clock: time.Now,
 	})
 	if err == nil {
 		t.Fatalf("Dial unexpectedly succeeded despite the server presenting a different SPIFFE ID")
@@ -261,7 +261,7 @@ func TestIntegration_ClientCertForOtherHostUUID_ServerRefuses(t *testing.T) {
 	defer cancel()
 	conn, err := controlclient.Dial(ctx, controlclient.Config{
 		Endpoints: []string{addr}, ControllerSPIFFEID: controllerSPIFFE,
-		ControllerCABundle: []*x509.Certificate{ca.CACertificate()}, ClientCertificate: agentCert,
+		ControllerCABundle: []*x509.Certificate{ca.CACertificate()}, ClientCertificate: agentCert, Clock: time.Now,
 	})
 	if err != nil {
 		t.Fatalf("Dial: %v (TLS layer should still succeed; the server refuses at the application layer)", err)
@@ -316,7 +316,7 @@ func TestIntegration_ServerTLS12Refused(t *testing.T) {
 	defer cancel()
 	_, err = controlclient.Dial(ctx, controlclient.Config{
 		Endpoints: []string{lis.Addr().String()}, ControllerSPIFFEID: controllerSPIFFE,
-		ControllerCABundle: []*x509.Certificate{ca.CACertificate()}, ClientCertificate: agentCert,
+		ControllerCABundle: []*x509.Certificate{ca.CACertificate()}, ClientCertificate: agentCert, Clock: time.Now,
 	})
 	if err == nil {
 		t.Fatalf("Dial unexpectedly succeeded against a TLS 1.2-only server")
@@ -364,7 +364,7 @@ func TestIntegration_ExpiredClientCertificateRefused(t *testing.T) {
 	defer cancel()
 	_, err = controlclient.Dial(ctx, controlclient.Config{
 		Endpoints: []string{addr}, ControllerSPIFFEID: controllerSPIFFE,
-		ControllerCABundle: []*x509.Certificate{ca.CACertificate()}, ClientCertificate: expiredClientCert,
+		ControllerCABundle: []*x509.Certificate{ca.CACertificate()}, ClientCertificate: expiredClientCert, Clock: time.Now,
 	})
 	if err == nil {
 		t.Fatalf("Dial unexpectedly succeeded with an expired client certificate")
