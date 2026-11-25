@@ -71,19 +71,16 @@ func TestCounter_ProvisionOpenReadIncrement(t *testing.T) {
 }
 
 func TestCounter_DeleteAndRedefineNeverGoesBackward(t *testing.T) {
-	// TPM 2.0 spec NV counter semantics (cited in
-	// docs/decisions/0027-tpm-library-and-software-tpm.md and
-	// docs/reports/step-05a.md section 12): "An NV counter is a 64-bit
-	// value that can only increment. At the beginning of the first
-	// increment command, it's initialized to the largest value that any
-	// counter has ever had on the TPM. This includes counter indexes
-	// currently defined and counters that were defined in the past but
-	// are no longer on the TPM. Thus a counter can never roll back, even
-	// by deleting and re-creating the index." (Arthur, Challener,
-	// Goldman, "A Practical Guide to TPM 2.0", ch. 11 "NV Indexes";
-	// consistent with TCG TPM Library Spec Part 1, Architecture, NV
-	// counter behavior). This test proves it against a real TPM 2.0
-	// implementation, not just cites it.
+	// TPM 2.0 spec NV counter semantics (cited in full in
+	// docs/reports/step-05a.md section 12, R5A-2): TCG Trusted Platform
+	// Module Library, Part 1: Architecture, Family "2.0", Level 00,
+	// Revision 01.59 (November 8, 2019), section 37.2.6.3 "NV Counter
+	// Index": "the TPM will initialize the 8-octet counter value such
+	// that the first increment will set a value that is greater than any
+	// value that a counter Index with the same Name has had over the
+	// lifetime of the TPM" (NOTE 4: "a counter with a particular Name
+	// cannot be rolled back by deleting it and redefining it"). This test
+	// proves it against a real TPM 2.0 implementation, not just cites it.
 	tt := startSWTPM(t)
 	handle := testCounterHandle
 

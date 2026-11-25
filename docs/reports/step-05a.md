@@ -343,16 +343,30 @@ explains why swtpm was chosen over that cgo-based alternative).
 
 ## 12. NV-counter deletion/redefinition citation and test result
 
-**Citation**: Will Arthur, David Challener, Kenneth Goldman, *A Practical Guide to TPM 2.0*
-(Apress, 2015), Chapter 11, "NV Indexes," "NV Counter Index": "An NV counter is a 64-bit
-value that can only increment. At the beginning of the first increment command, it's
-initialized to the largest value that any counter has ever had on the TPM. This includes
-counter indexes currently defined and counters that were defined in the past but are no
-longer on the TPM. Thus a counter can never roll back, even by deleting and re-creating the
-index." This matches the TCG Trusted Platform Module Library Specification, Family "2.0,"
-Part 1 (Architecture)'s own description of NV counter semantics (the "largest value any
-counter has ever held" global-monotonicity rule), which the book's authors (two of whom are
-TPM 2.0 spec editors) are restating in prose.
+**Citation (R5A-2, replacing the secondary-source citation this section previously used)**:
+TCG Trusted Platform Module Library, **Part 1: Architecture**, Family "2.0", Level 00,
+**Revision 01.59** (November 8, 2019), **section 37.2.6.3 "NV Counter Index"** (within
+section 37.2 "NV Indices" → "Updating an Index"):
+
+> "On each TPM2_NV_Increment() the TPM checks the TPMA_NV_WRITTEN attribute of the Index. If
+> it is CLEAR, then the TPM will initialize the 8-octet counter value such that the first
+> increment will set a value that is greater than any value that a counter Index with the
+> same Name has had over the lifetime of the TPM. The TPMA_NV_WRITTEN attribute will be SET."
+>
+> NOTE 1: "This check ensures that an Index cannot be deleted and another Index with the same
+> Name defined with a lower value."
+>
+> NOTE 4: "Since no counter can ever repeat a previous value ever contained in any NV Counter
+> Index, a counter with a particular Name cannot be rolled back by deleting it and redefining
+> it."
+
+This text was located and confirmed directly (not re-derived from a secondary source): the
+PDF at `https://www.cs.wm.edu/~smherwig/readings/manuals/tcg/tpm2-part1-architecture.pdf`
+(Revision 01.59, the TCG-published Part 1: Architecture document; page 221-222 of that PDF)
+was fetched and its section 37.2.6.3 text is quoted verbatim above. The previous citation to
+Arthur/Challener/Goldman, *A Practical Guide to TPM 2.0* (Apress, 2015), Chapter 11, was a
+secondary source restating this same spec text in prose; it is removed, not merely
+supplemented, per the review's "replace it with the TCG... section" instruction.
 
 **Test result**: `TestCounter_DeleteAndRedefineNeverGoesBackward`
 (`internal/tpm/counter_test.go`) provisions a counter, increments it three times, then
