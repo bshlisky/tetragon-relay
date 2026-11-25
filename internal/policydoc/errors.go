@@ -1,6 +1,10 @@
 package policydoc
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/bshlisky/tetragon-relay/internal/yamlharden"
+)
 
 // Every rejection this package can produce has a distinct sentinel (or
 // wraps one with %w), per the project's "typed errors for every rejection"
@@ -9,25 +13,33 @@ import "errors"
 // errors.Is.
 var (
 	// --- B1: YAML hardening ---
+	//
+	// docs/prompts/step-06a.md Part B2: these are now aliases of
+	// internal/yamlharden's own sentinels (the hardening rules were
+	// extracted there, shared with internal/config). Aliasing keeps
+	// every existing errors.Is(err, policydoc.ErrYAMLXxx) call in this
+	// package's own tests (and any external caller) working unchanged:
+	// an alias is the identical error value, not a new one.
 
-	ErrMultipleYAMLDocuments = errors.New("policydoc: more than one YAML document")
-	ErrEmptyYAMLDocument     = errors.New("policydoc: empty YAML document")
-	ErrYAMLAlias             = errors.New("policydoc: YAML aliases are not allowed")
-	ErrYAMLAnchor            = errors.New("policydoc: YAML anchors are not allowed")
-	ErrYAMLMergeKey          = errors.New("policydoc: YAML merge keys (<<) are not allowed")
-	ErrYAMLExplicitTag       = errors.New("policydoc: explicit YAML tags are not allowed")
-	ErrYAMLDuplicateKey      = errors.New("policydoc: duplicate YAML mapping key")
-	ErrYAMLNonStringKey      = errors.New("policydoc: non-string YAML mapping key")
-	ErrYAMLMaxDepth          = errors.New("policydoc: YAML nesting exceeds maximum depth")
-	ErrYAMLTooManyNodes      = errors.New("policydoc: YAML document has too many nodes")
-	ErrYAMLScalarTooLarge    = errors.New("policydoc: YAML scalar exceeds maximum size")
-	ErrYAMLTooManyKeys       = errors.New("policydoc: YAML mapping has too many keys")
-	ErrYAMLInvalidUTF8       = errors.New("policydoc: YAML document is not valid UTF-8")
-	ErrYAMLByteOrderMark     = errors.New("policydoc: YAML document has a byte-order mark")
-	ErrYAMLNULByte           = errors.New("policydoc: YAML document contains a NUL byte")
-	ErrYAMLControlChar       = errors.New("policydoc: YAML document contains a disallowed control character")
-	ErrYAMLAmbiguousScalar   = errors.New("policydoc: unquoted scalar is ambiguous under YAML 1.1")
-	ErrYAMLParse             = errors.New("policydoc: YAML syntax error")
+	ErrMultipleYAMLDocuments      = yamlharden.ErrMultipleYAMLDocuments
+	ErrEmptyYAMLDocument          = yamlharden.ErrEmptyYAMLDocument
+	ErrYAMLAlias                  = yamlharden.ErrYAMLAlias
+	ErrYAMLAnchor                 = yamlharden.ErrYAMLAnchor
+	ErrYAMLMergeKey               = yamlharden.ErrYAMLMergeKey
+	ErrYAMLExplicitTag            = yamlharden.ErrYAMLExplicitTag
+	ErrYAMLDuplicateKey           = yamlharden.ErrYAMLDuplicateKey
+	ErrYAMLNonStringKey           = yamlharden.ErrYAMLNonStringKey
+	ErrYAMLMaxDepth               = yamlharden.ErrYAMLMaxDepth
+	ErrYAMLTooManyNodes           = yamlharden.ErrYAMLTooManyNodes
+	ErrYAMLScalarTooLarge         = yamlharden.ErrYAMLScalarTooLarge
+	ErrYAMLTooManyKeys            = yamlharden.ErrYAMLTooManyKeys
+	ErrYAMLInvalidUTF8            = yamlharden.ErrYAMLInvalidUTF8
+	ErrYAMLByteOrderMark          = yamlharden.ErrYAMLByteOrderMark
+	ErrYAMLNULByte                = yamlharden.ErrYAMLNULByte
+	ErrYAMLControlChar            = yamlharden.ErrYAMLControlChar
+	ErrYAMLAmbiguousScalar        = yamlharden.ErrYAMLAmbiguousScalar
+	ErrYAMLParse                  = yamlharden.ErrYAMLParse
+	ErrYAMLInvisibleOrControlChar = yamlharden.ErrYAMLInvisibleOrControlChar
 
 	// --- B2/B3: JSON conversion, duplicate keys, schema ---
 
@@ -58,15 +70,12 @@ var (
 
 	// --- A1 (step 3 prompt, architect review R2D-1): escape-decoded
 	// control and invisible characters ---
-
-	// ErrYAMLInvisibleOrControlChar is returned when a decoded scalar
-	// (key or value, after YAML escape processing) contains a Unicode
-	// category Cc code point other than tab/LF/CR, any category Cf code
-	// point, U+2028, U+2029, or a noncharacter. checkRawBytes only
-	// inspects the raw document bytes, which a quoted scalar's escape
-	// sequences (\0, \u202e, ...) bypass entirely; this check runs on
-	// every decoded scalar value instead.
-	ErrYAMLInvisibleOrControlChar = errors.New("policydoc: scalar contains a disallowed control or invisible character")
+	//
+	// ErrYAMLInvisibleOrControlChar is aliased above, in the B1 group
+	// (it is now internal/yamlharden's sentinel); kept documented here
+	// since ErrHookIdentifierWhitespace/ErrSelectorValueWhitespace
+	// below are its narrower, field-specific siblings from the same
+	// architect review.
 
 	// ErrHookIdentifierWhitespace is returned when a hook identifier
 	// (kprobe call, tracepoint subsystem/event, uprobe path/symbols,

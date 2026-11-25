@@ -42,60 +42,6 @@ func TestScalarToCanonicalValue_BinaryAndUnsupportedTag(t *testing.T) {
 	}
 }
 
-func TestWalk_UnexpectedKindAndUnbalancedMapping(t *testing.T) {
-	h := &hardenedYAML{}
-	if err := h.walk(&yaml.Node{Kind: 99}, 1); err == nil {
-		t.Fatalf("expected error for unknown node kind")
-	}
-
-	h2 := &hardenedYAML{}
-	odd := &yaml.Node{
-		Kind: yaml.MappingNode,
-		Content: []*yaml.Node{
-			{Kind: yaml.ScalarNode, Tag: "!!str", Value: "onlykey"},
-		},
-	}
-	if err := h2.walkMapping(odd, 1); err == nil {
-		t.Fatalf("expected error for unbalanced mapping")
-	}
-}
-
-func TestParseHardenedYAML_TopLevelNotMapping(t *testing.T) {
-	if _, err := parseHardenedYAML([]byte("- a\n- b\n")); err == nil {
-		t.Fatalf("expected error for a top-level sequence")
-	}
-}
-
-func TestWalkMapping_AliasAsKey(t *testing.T) {
-	// An anchor must be rejected outright (B1), which means a real YAML
-	// document can never reach the alias-as-key branch below through a
-	// live anchor/alias pair (the anchor itself is always rejected
-	// first, in document order). Exercised directly, as a defensive
-	// branch, the same way the synthetic-node tests above do.
-	h := &hardenedYAML{}
-	n := &yaml.Node{
-		Kind: yaml.MappingNode,
-		Content: []*yaml.Node{
-			{Kind: yaml.AliasNode},
-			{Kind: yaml.ScalarNode, Tag: "!!str", Value: "y"},
-		},
-	}
-	if err := h.walkMapping(n, 1); !errors.Is(err, ErrYAMLAlias) {
-		t.Fatalf("error = %v, want ErrYAMLAlias", err)
-	}
-}
-
-func TestParseHardenedYAML_TooManyNodes(t *testing.T) {
-	var sb strings.Builder
-	sb.WriteString("a:\n")
-	for i := 0; i < 25000; i++ {
-		sb.WriteString("- x\n")
-	}
-	if _, err := parseHardenedYAML([]byte(sb.String())); !errors.Is(err, ErrYAMLTooManyNodes) {
-		t.Fatalf("error = %v, want ErrYAMLTooManyNodes", err)
-	}
-}
-
 func TestTypedModelActionWalk_MatchReturnActions(t *testing.T) {
 	d := &rawDoc{
 		Spec: rawSpec{
@@ -159,44 +105,6 @@ func TestRenderNumber_UnexpectedType(t *testing.T) {
 	notNumeric := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!timestamp", Value: "2020-01-01T00:00:00Z"}
 	if _, err := renderNumber(notNumeric); err == nil {
 		t.Fatalf("expected an unexpected-type error")
-	}
-}
-
-func TestWalkMapping_KeySideRejections(t *testing.T) {
-	longKey := strings.Repeat("a", 5000)
-	cases := []struct {
-		name string
-		n    *yaml.Node
-		want error
-	}{
-		{"key_anchor", mappingWithKey(&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "x", Anchor: "n"}), ErrYAMLAnchor},
-		{"key_explicit_tag", mappingWithKey(&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "x", Style: yaml.TaggedStyle}), ErrYAMLExplicitTag},
-		{"key_too_long", mappingWithKey(&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: longKey}), ErrYAMLScalarTooLarge},
-		{"key_ambiguous", mappingWithKey(&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "yes"}), ErrYAMLAmbiguousScalar},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			h := &hardenedYAML{}
-			if err := h.walkMapping(tc.n, 1); !errors.Is(err, tc.want) {
-				t.Fatalf("error = %v, want %v", err, tc.want)
-			}
-		})
-	}
-}
-
-func mappingWithKey(key *yaml.Node) *yaml.Node {
-	return &yaml.Node{
-		Kind: yaml.MappingNode,
-		Content: []*yaml.Node{
-			key,
-			{Kind: yaml.ScalarNode, Tag: "!!str", Value: "v"},
-		},
-	}
-}
-
-func TestParseHardenedYAML_SyntaxError(t *testing.T) {
-	if _, err := parseHardenedYAML([]byte("a: [1,2\n")); !errors.Is(err, ErrYAMLParse) {
-		t.Fatalf("error = %v, want ErrYAMLParse", err)
 	}
 }
 

@@ -191,18 +191,6 @@ spec:
 	}
 }
 
-func TestCheckRawBytes_ControlChars(t *testing.T) {
-	if err := checkRawBytes([]byte{0x7F}); !errors.Is(err, ErrYAMLControlChar) {
-		t.Fatalf("DEL: error = %v, want ErrYAMLControlChar", err)
-	}
-	if err := checkRawBytes([]byte("a\u0085b")); !errors.Is(err, ErrYAMLControlChar) {
-		t.Fatalf("C1 control (NEL): error = %v, want ErrYAMLControlChar", err)
-	}
-	if err := checkRawBytes([]byte("a\tb\nc\rd")); err != nil {
-		t.Fatalf("tab/LF/CR rejected: %v", err)
-	}
-}
-
 func TestCompileTracingPolicySchema_CompileError(t *testing.T) {
 	bad := `
 apiVersion: apiextensions.k8s.io/v1
