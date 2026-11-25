@@ -93,7 +93,7 @@ jobs:
       - name: Per-package coverage gate (internal/tpm >= 90%, against the real swtpm; step-05a prompt D4)
         run: make coverage-tpm
 
-      - name: internal/tpm verbose test output (step-05a prompt D1: "at least one CI job must exercise the real TPM command flows")
+      - name: "internal/tpm verbose test output (step-05a prompt D1: at least one CI job must exercise the real TPM command flows)"
         run: make tpm-test
 
       - name: Fuzz smoke (60s per target)
