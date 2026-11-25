@@ -13,6 +13,9 @@ import (
 
 func TestHostSigner_FirstBootSignVerifyAndPersistAcrossReopen(t *testing.T) {
 	tt := startSWTPM(t)
+	if _, err := ProvisionSRK(tt, nil); err != nil {
+		t.Fatalf("ProvisionSRK: %v", err)
+	}
 	dir := t.TempDir()
 	blobPath := filepath.Join(dir, "host-signer.json")
 
@@ -62,6 +65,9 @@ func TestHostSigner_FirstBootSignVerifyAndPersistAcrossReopen(t *testing.T) {
 
 func TestHostSigner_KeyCannotBeDuplicated(t *testing.T) {
 	tt := startSWTPM(t)
+	if _, err := ProvisionSRK(tt, nil); err != nil {
+		t.Fatalf("ProvisionSRK: %v", err)
+	}
 	dir := t.TempDir()
 	blobPath := filepath.Join(dir, "host-signer.json")
 
@@ -104,6 +110,9 @@ func TestHostSigner_KeyCannotBeDuplicated(t *testing.T) {
 
 func TestHostSigner_RotateCreatesNewKeyAndRetireRemovesOld(t *testing.T) {
 	tt := startSWTPM(t)
+	if _, err := ProvisionSRK(tt, nil); err != nil {
+		t.Fatalf("ProvisionSRK: %v", err)
+	}
 	dir := t.TempDir()
 	activePath := filepath.Join(dir, "host-signer.json")
 	retiredPath := filepath.Join(dir, "host-signer.retired.json")

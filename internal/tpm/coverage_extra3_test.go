@@ -152,14 +152,21 @@ func TestLoadHostSigner_UnparsablePublicAreaIsError(t *testing.T) {
 	}
 }
 
-func TestKeySealer_UnsealCreateSRKFailureSurfaces(t *testing.T) {
+func TestKeySealer_UnsealOpenSRKFailureSurfaces(t *testing.T) {
 	rtpm := startSWTPM(t)
+	if _, err := ProvisionSRK(rtpm, nil); err != nil {
+		t.Fatalf("ProvisionSRK: %v", err)
+	}
 	dir := t.TempDir()
 	blobPath := filepath.Join(dir, "sealed.json")
 	if _, err := NewKeySealer(rtpm, blobPath); err != nil {
 		t.Fatalf("NewKeySealer: %v", err)
 	}
-	f := &faultTPM{inner: rtpm, failCommand: cc(tpm2.TPMCCCreatePrimary), failOnCall: 1}
+	// Unseal looks up the already-provisioned, persistent SRK via
+	// TPM2_ReadPublic (OpenSRK) rather than creating one (ADR 0029): a
+	// failure there must surface as ErrUnsealFailed, not a silent
+	// fallback to creating a new SRK under the owner hierarchy.
+	f := &faultTPM{inner: rtpm, failCommand: cc(tpm2.TPMCCReadPublic), failOnCall: 1}
 	k := &KeySealer{t: f, blobPath: blobPath}
 	if _, err := k.Unseal(); !errors.Is(err, ErrUnsealFailed) {
 		t.Fatalf("err = %v, want ErrUnsealFailed", err)

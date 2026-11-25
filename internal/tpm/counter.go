@@ -20,18 +20,31 @@ const DefaultCounterHandle = tpm2.TPMHandle(0x01500020)
 // spec: an NV counter is always an 8-byte value).
 const counterDataSize = 8
 
+// DefaultCounterAuthValue is this project's fixed authorization value for
+// the NV counter index: empty. docs/decisions/0029-no-tpm-owner-
+// authorization-at-runtime.md explains why an empty authValue is safe
+// here specifically: rollback protection comes from the TPM's own
+// counter-monotonicity guarantee, not from secrecy of who may read or
+// increment the index, and relayd is the only process on the host with
+// access to the TPM device at all.
+var DefaultCounterAuthValue []byte
+
 // expectedCounterAttributes is this project's fixed NV index attribute
-// set (docs/prompts/step-05a.md C3): an owner-authorized counter, no
-// platform, auth-value, or policy access path, no dictionary-attack
-// lockout (NV indices are not subject to DA in the same way as
-// authValue-protected objects, but NoDA documents the intent explicitly
-// and matches this project's other object templates).
+// set (docs/decisions/0029-no-tpm-owner-authorization-at-runtime.md,
+// superseding docs/prompts/step-05a.md C3's owner-authorized shape): a
+// self-authorized counter (its own authValue, set at provisioning time,
+// gates both read and increment), no platform or policy access path, no
+// dictionary-attack lockout (NV indices are not subject to DA in the same
+// way as authValue-protected objects, but NoDA documents the intent
+// explicitly and matches this project's other object templates).
+// Deliberately NOT OwnerWrite/OwnerRead: relayd must never need TPM
+// owner-hierarchy authorization at runtime (ADR 0029, R5A-1).
 func expectedCounterAttributes() tpm2.TPMANV {
 	return tpm2.TPMANV{
-		OwnerWrite: true,
-		OwnerRead:  true,
-		NT:         tpm2.TPMNTCounter,
-		NoDA:       true,
+		AuthWrite: true,
+		AuthRead:  true,
+		NT:        tpm2.TPMNTCounter,
+		NoDA:      true,
 	}
 }
 
@@ -87,15 +100,18 @@ func validateCounterIndex(pub *tpm2.TPMSNVPublic, handle tpm2.TPMHandle) error {
 	return nil
 }
 
-// ProvisionCounter defines the NV counter index at handle if absent, or
-// validates that an already-present index at that handle matches this
-// project's expected shape. It requires owner authorization (an empty
-// owner-hierarchy auth in this design, matching CreateSRK) and is called
-// exactly once, by the root-run relay-probe's --provision-tpm mode
-// (docs/prompts/step-05a.md C3), never by relayd itself. It is idempotent:
-// calling it again against an already-correctly-provisioned index is a
-// no-op.
-func ProvisionCounter(t transport.TPM, handle tpm2.TPMHandle) error {
+// ProvisionCounter defines the NV counter index at handle (with its own
+// authValue, DefaultCounterAuthValue) if absent, or validates that an
+// already-present index at that handle matches this project's expected
+// shape. Defining the index still requires TPM owner-hierarchy
+// authorization (ownerAuth; empty unless the host's TPM has an owner
+// password set) -- that one-time, provisioning-only use of the owner
+// hierarchy is unchanged by ADR 0029, which is scoped to removing owner
+// authorization from relayd's READ/INCREMENT path, not from provisioning
+// itself. Called exactly once, by the root-run relay-probe's
+// --provision-tpm mode, never by relayd. It is idempotent: calling it
+// again against an already-correctly-provisioned index is a no-op.
+func ProvisionCounter(t transport.TPM, handle tpm2.TPMHandle, ownerAuth []byte) error {
 	pub, _, ok, err := readNVPublic(t, handle)
 	if err != nil {
 		return err
@@ -104,7 +120,8 @@ func ProvisionCounter(t transport.TPM, handle tpm2.TPMHandle) error {
 		return validateCounterIndex(pub, handle)
 	}
 	def := tpm2.NVDefineSpace{
-		AuthHandle: tpm2.TPMRHOwner,
+		AuthHandle: tpm2.AuthHandle{Handle: tpm2.TPMRHOwner, Auth: tpm2.PasswordAuth(ownerAuth)},
+		Auth:       tpm2.TPM2BAuth{Buffer: DefaultCounterAuthValue},
 		PublicInfo: tpm2.New2B[tpm2.TPMSNVPublic](tpm2.TPMSNVPublic{
 			NVIndex:    handle,
 			NameAlg:    tpm2.TPMAlgSHA256,
@@ -173,7 +190,9 @@ func (c *Counter) Read() (uint64, error) {
 
 // Increment implements store.MonotonicCounter: TPM2_NV_Increment, then a
 // fresh read-back of the new value (the TPM does not return the new value
-// directly from TPM2_NV_Increment).
+// directly from TPM2_NV_Increment). Authorized with the index's own
+// authValue (DefaultCounterAuthValue) via its AuthWrite attribute, never
+// TPM owner-hierarchy authorization (ADR 0029, R5A-1).
 func (c *Counter) Increment() (uint64, error) {
 	_, name, ok, err := readNVPublic(c.t, c.handle)
 	if err != nil {
@@ -183,7 +202,7 @@ func (c *Counter) Increment() (uint64, error) {
 		return 0, ErrCounterNotProvisioned
 	}
 	inc := tpm2.NVIncrement{
-		AuthHandle: tpm2.AuthHandle{Handle: tpm2.TPMRHOwner, Auth: tpm2.PasswordAuth(nil)},
+		AuthHandle: tpm2.AuthHandle{Handle: c.handle, Name: name, Auth: tpm2.PasswordAuth(DefaultCounterAuthValue)},
 		NVIndex:    tpm2.NamedHandle{Handle: c.handle, Name: name},
 	}
 	if _, err := inc.Execute(c.t); err != nil {
@@ -199,9 +218,12 @@ func (c *Counter) Increment() (uint64, error) {
 	return c.readValue(newName)
 }
 
+// readValue is authorized with the index's own authValue
+// (DefaultCounterAuthValue) via its AuthRead attribute, never TPM
+// owner-hierarchy authorization (ADR 0029, R5A-1).
 func (c *Counter) readValue(name tpm2.TPM2BName) (uint64, error) {
 	rd := tpm2.NVRead{
-		AuthHandle: tpm2.AuthHandle{Handle: tpm2.TPMRHOwner, Auth: tpm2.PasswordAuth(nil)},
+		AuthHandle: tpm2.AuthHandle{Handle: c.handle, Name: name, Auth: tpm2.PasswordAuth(DefaultCounterAuthValue)},
 		NVIndex:    tpm2.NamedHandle{Handle: c.handle, Name: name},
 		Size:       counterDataSize,
 	}

@@ -46,9 +46,10 @@ const (
 // decrypt), ECC P-384 if the TPM supports it, else P-256
 // (docs/decisions/0028-host-signing-key-curve-fallback.md). The private
 // key handle never leaves the TPM; HostSigner re-loads the sealed
-// public/private blob under a freshly created SRK on every Sign call,
-// the same "no cached TPM session/handle across calls" discipline
-// KeySealer uses.
+// public/private blob under the project's persistent SRK (OpenSRK,
+// docs/decisions/0029-no-tpm-owner-authorization-at-runtime.md) on every
+// Sign call, the same "no cached loaded-object handle across calls"
+// discipline KeySealer uses.
 type HostSigner struct {
 	t         transport.TPM
 	blobPath  string
@@ -169,11 +170,10 @@ func createHostSigner(t transport.TPM, blobPath string) error {
 	if err != nil {
 		return err
 	}
-	srkHandle, srkName, err := CreateSRK(t)
+	srkHandle, srkName, err := OpenSRK(t)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = FlushSRK(t, srkHandle) }()
 
 	create := tpm2.Create{
 		ParentHandle: tpm2.AuthHandle{Handle: srkHandle, Name: srkName, Auth: tpm2.PasswordAuth(nil)},
@@ -262,11 +262,10 @@ func (h *HostSigner) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) ([
 		return nil, fmt.Errorf("tpm: digest is %d bytes, want %d for curve %s", len(digest), coordSize, h.curve)
 	}
 
-	srkHandle, srkName, err := CreateSRK(h.t)
+	srkHandle, srkName, err := OpenSRK(h.t)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = FlushSRK(h.t, srkHandle) }()
 
 	load := tpm2.Load{
 		ParentHandle: tpm2.AuthHandle{Handle: srkHandle, Name: srkName, Auth: tpm2.PasswordAuth(nil)},

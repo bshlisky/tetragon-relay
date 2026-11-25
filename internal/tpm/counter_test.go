@@ -22,12 +22,12 @@ func TestCounter_ProvisionOpenReadIncrement(t *testing.T) {
 		t.Fatalf("OpenCounter before provisioning: err = %v, want ErrCounterNotProvisioned", err)
 	}
 
-	if err := ProvisionCounter(tt, testCounterHandle); err != nil {
+	if err := ProvisionCounter(tt, testCounterHandle, nil); err != nil {
 		t.Fatalf("ProvisionCounter: %v", err)
 	}
 	// Idempotent: provisioning an already-correct index is a no-op, not
 	// an error.
-	if err := ProvisionCounter(tt, testCounterHandle); err != nil {
+	if err := ProvisionCounter(tt, testCounterHandle, nil); err != nil {
 		t.Fatalf("ProvisionCounter (second call): %v", err)
 	}
 
@@ -87,7 +87,7 @@ func TestCounter_DeleteAndRedefineNeverGoesBackward(t *testing.T) {
 	tt := startSWTPM(t)
 	handle := testCounterHandle
 
-	if err := ProvisionCounter(tt, handle); err != nil {
+	if err := ProvisionCounter(tt, handle, nil); err != nil {
 		t.Fatalf("ProvisionCounter: %v", err)
 	}
 	c, err := OpenCounter(tt, handle)
@@ -120,7 +120,7 @@ func TestCounter_DeleteAndRedefineNeverGoesBackward(t *testing.T) {
 	if _, err := undef.Execute(tt); err != nil {
 		t.Fatalf("NVUndefineSpace: %v", err)
 	}
-	if err := ProvisionCounter(tt, handle); err != nil {
+	if err := ProvisionCounter(tt, handle, nil); err != nil {
 		t.Fatalf("ProvisionCounter (redefine): %v", err)
 	}
 	c2, err := OpenCounter(tt, handle)
@@ -157,7 +157,7 @@ func TestProvisionCounter_RefusesIndexWithWrongAttributes(t *testing.T) {
 		t.Fatalf("NVDefineSpace (wrong type): %v", err)
 	}
 
-	if err := ProvisionCounter(tt, handle); !errors.Is(err, ErrNVIndexAttributeMismatch) {
+	if err := ProvisionCounter(tt, handle, nil); !errors.Is(err, ErrNVIndexAttributeMismatch) {
 		t.Fatalf("ProvisionCounter: err = %v, want ErrNVIndexAttributeMismatch", err)
 	}
 	if _, err := OpenCounter(tt, handle); !errors.Is(err, ErrNVIndexAttributeMismatch) {

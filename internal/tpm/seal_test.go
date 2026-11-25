@@ -10,6 +10,9 @@ import (
 
 func TestKeySealer_FirstBootThenUnsealRoundTrip(t *testing.T) {
 	tt := startSWTPM(t)
+	if _, err := ProvisionSRK(tt, nil); err != nil {
+		t.Fatalf("ProvisionSRK: %v", err)
+	}
 	dir := t.TempDir()
 	blobPath := filepath.Join(dir, "sealed-hmac-key.json")
 
@@ -78,6 +81,9 @@ func TestKeySealer_UnsealCorruptBlobIsErrUnsealFailed(t *testing.T) {
 
 func TestKeySealer_UnsealBitFlippedPrivateBlobIsErrUnsealFailed(t *testing.T) {
 	tt := startSWTPM(t)
+	if _, err := ProvisionSRK(tt, nil); err != nil {
+		t.Fatalf("ProvisionSRK: %v", err)
+	}
 	dir := t.TempDir()
 	blobPath := filepath.Join(dir, "sealed-hmac-key.json")
 

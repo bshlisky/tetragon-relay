@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -74,6 +75,70 @@ func TestRun_ProvisionTPM_MissingDeviceFails(t *testing.T) {
 	}, devNull, devNull)
 	if code != 1 {
 		t.Fatalf("run(--provision-tpm) with a missing device = %d, want 1", code)
+	}
+}
+
+// TestRun_ProvisionTPM_UnreadableOwnerAuthFileFails covers
+// --tpm-owner-auth-file's own error path: readOwnerAuthFile must fail
+// closed (never silently fall back to an empty owner authorization) when
+// the operator explicitly configured a file that cannot be read, and it
+// must do so BEFORE even opening the TPM device (docs/decisions/0029-no-
+// tpm-owner-authorization-at-runtime.md's documented operator procedure
+// depends on this: a typo'd path must be a clear provisioning failure,
+// not a silent "proceeded with empty owner authorization").
+func TestRun_ProvisionTPM_UnreadableOwnerAuthFileFails(t *testing.T) {
+	dir := t.TempDir()
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = devNull.Close() }()
+	code := run([]string{
+		"--provision-tpm",
+		"--tpm-device", dir + "/no-such-tpmrm0",
+		"--tpm-owner-auth-file", dir + "/no-such-owner-auth-file",
+	}, devNull, devNull)
+	if code != 1 {
+		t.Fatalf("run(--provision-tpm --tpm-owner-auth-file <missing>) = %d, want 1", code)
+	}
+}
+
+// TestRun_ProvisionTPM_OwnerAuthFileReadOK confirms --tpm-owner-auth-file
+// itself reads successfully (trailing newline stripped) and that
+// provisioning proceeds to (and fails at) the TPM device open step, not
+// the owner-auth-file read step -- i.e. the file read happens and
+// succeeds, it does not become the reason provisioning fails here.
+func TestRun_ProvisionTPM_OwnerAuthFileReadOK(t *testing.T) {
+	dir := t.TempDir()
+	authFile := dir + "/owner-auth"
+	if err := os.WriteFile(authFile, []byte("hunter2\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = devNull.Close() }()
+	stderrPath := dir + "/stderr"
+	stderrFile, err := os.Create(stderrPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stderrFile.Close() }()
+	code := run([]string{
+		"--provision-tpm",
+		"--tpm-device", dir + "/no-such-tpmrm0",
+		"--tpm-owner-auth-file", authFile,
+	}, devNull, stderrFile)
+	if code != 1 {
+		t.Fatalf("run(--provision-tpm --tpm-owner-auth-file <valid>) = %d, want 1 (missing device)", code)
+	}
+	stderrOut, err := os.ReadFile(stderrPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(stderrOut), "owner auth file") {
+		t.Fatalf("stderr mentions the owner auth file read failing, want the device-open failure instead: %s", stderrOut)
 	}
 }
 

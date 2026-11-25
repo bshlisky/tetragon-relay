@@ -28,7 +28,10 @@ func TestStoreRoundTrip_RealSealerAndCounterSurviveSimulatedRestart(t *testing.T
 	blobPath := filepath.Join(dir, "sealed-hmac-key.json")
 	counterHandle := testCounterHandle
 
-	if err := ProvisionCounter(tt, counterHandle); err != nil {
+	if _, err := ProvisionSRK(tt, nil); err != nil {
+		t.Fatalf("ProvisionSRK: %v", err)
+	}
+	if err := ProvisionCounter(tt, counterHandle, nil); err != nil {
 		t.Fatalf("ProvisionCounter: %v", err)
 	}
 
@@ -106,7 +109,10 @@ func TestStoreRoundTrip_RollbackOfOlderCopyIsDetectedViaRealCounter(t *testing.T
 	}
 	blobPath := filepath.Join(dir, "sealed-hmac-key.json")
 	counterHandle := testCounterHandle
-	if err := ProvisionCounter(tt, counterHandle); err != nil {
+	if _, err := ProvisionSRK(tt, nil); err != nil {
+		t.Fatalf("ProvisionSRK: %v", err)
+	}
+	if err := ProvisionCounter(tt, counterHandle, nil); err != nil {
 		t.Fatalf("ProvisionCounter: %v", err)
 	}
 

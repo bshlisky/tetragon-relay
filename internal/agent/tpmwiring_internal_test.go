@@ -79,7 +79,10 @@ func mustFreePortForAgentTest(t *testing.T) int {
 
 func TestBuildTPMComponents_Success(t *testing.T) {
 	rtpm := startSWTPMForAgentTest(t)
-	if err := tpm.ProvisionCounter(rtpm, tpm.DefaultCounterHandle); err != nil {
+	if _, err := tpm.ProvisionSRK(rtpm, nil); err != nil {
+		t.Fatalf("ProvisionSRK: %v", err)
+	}
+	if err := tpm.ProvisionCounter(rtpm, tpm.DefaultCounterHandle, nil); err != nil {
 		t.Fatalf("ProvisionCounter: %v", err)
 	}
 	dir := t.TempDir()
@@ -104,6 +107,9 @@ func TestBuildTPMComponents_Success(t *testing.T) {
 
 func TestBuildTPMComponents_CounterNotProvisionedIsErrTPMRequired(t *testing.T) {
 	rtpm := startSWTPMForAgentTest(t)
+	if _, err := tpm.ProvisionSRK(rtpm, nil); err != nil {
+		t.Fatalf("ProvisionSRK: %v", err)
+	}
 	dir := t.TempDir()
 	if _, err := BuildTPMComponents(rtpm, filepath.Join(dir, "sealed.json")); !errors.Is(err, ErrTPMRequired) {
 		t.Fatalf("err = %v, want ErrTPMRequired", err)
@@ -112,10 +118,24 @@ func TestBuildTPMComponents_CounterNotProvisionedIsErrTPMRequired(t *testing.T) 
 
 func TestBuildTPMComponents_SealerFailureIsErrTPMRequired(t *testing.T) {
 	rtpm := startSWTPMForAgentTest(t)
+	if _, err := tpm.ProvisionSRK(rtpm, nil); err != nil {
+		t.Fatalf("ProvisionSRK: %v", err)
+	}
 	// A sealed-key blob path under a nonexistent parent directory makes
 	// tpm.NewKeySealer's first-boot write fail.
 	bad := filepath.Join(t.TempDir(), "no-such-subdir", "sealed.json")
 	if _, err := BuildTPMComponents(rtpm, bad); !errors.Is(err, ErrTPMRequired) {
+		t.Fatalf("err = %v, want ErrTPMRequired", err)
+	}
+}
+
+func TestBuildTPMComponents_SRKNotProvisionedIsErrTPMRequired(t *testing.T) {
+	rtpm := startSWTPMForAgentTest(t)
+	if err := tpm.ProvisionCounter(rtpm, tpm.DefaultCounterHandle, nil); err != nil {
+		t.Fatalf("ProvisionCounter: %v", err)
+	}
+	dir := t.TempDir()
+	if _, err := BuildTPMComponents(rtpm, filepath.Join(dir, "sealed.json")); !errors.Is(err, ErrTPMRequired) {
 		t.Fatalf("err = %v, want ErrTPMRequired", err)
 	}
 }

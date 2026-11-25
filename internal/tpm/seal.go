@@ -32,9 +32,9 @@ type sealedKeyFile struct {
 }
 
 // KeySealer implements store.KeySealer (internal/store/seal.go) by sealing
-// the HMAC key to this host's TPM, under an SRK recreated from SRKTemplate
-// on every operation -- there is no persistent SRK handle and no cached
-// key in this struct; see Unseal.
+// the HMAC key to this host's TPM, under the project's persistent SRK
+// (OpenSRK, docs/decisions/0029-no-tpm-owner-authorization-at-runtime.md)
+// -- there is no cached key in this struct; see Unseal.
 type KeySealer struct {
 	t        transport.TPM
 	blobPath string
@@ -73,11 +73,10 @@ func (k *KeySealer) firstBoot() error {
 	}
 	defer zero(key)
 
-	srkHandle, srkName, err := CreateSRK(k.t)
+	srkHandle, srkName, err := OpenSRK(k.t)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = FlushSRK(k.t, srkHandle) }()
 
 	create := tpm2.Create{
 		ParentHandle: tpm2.AuthHandle{Handle: srkHandle, Name: srkName, Auth: tpm2.PasswordAuth(nil)},
@@ -127,9 +126,9 @@ func sealedObjectTemplate() tpm2.TPM2BPublic {
 
 // Unseal implements store.KeySealer. It is called on every store Open and
 // Save (that interface's own contract): rather than caching the key in
-// k, it re-creates the SRK and re-loads/re-unseals the blob every time, so
-// there is exactly one place in this process' memory the key ever exists
-// at once -- the slice this function returns.
+// k, it re-loads and re-unseals the blob under the persistent SRK every
+// time, so there is exactly one place in this process' memory the key
+// ever exists at once -- the slice this function returns.
 func (k *KeySealer) Unseal() ([]byte, error) {
 	raw, err := os.ReadFile(k.blobPath)
 	if err != nil {
@@ -154,11 +153,10 @@ func (k *KeySealer) Unseal() ([]byte, error) {
 		return nil, fmt.Errorf("%w: decode sealed key private: %w", ErrUnsealFailed, err)
 	}
 
-	srkHandle, srkName, err := CreateSRK(k.t)
+	srkHandle, srkName, err := OpenSRK(k.t)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUnsealFailed, err)
 	}
-	defer func() { _ = FlushSRK(k.t, srkHandle) }()
 
 	load := tpm2.Load{
 		ParentHandle: tpm2.AuthHandle{Handle: srkHandle, Name: srkName, Auth: tpm2.PasswordAuth(nil)},

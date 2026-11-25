@@ -9,6 +9,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -32,14 +33,15 @@ func run(args []string, stdout, stderr *os.File) int {
 	tetragonBinaryPath := fs.String("tetragon-binary", "/usr/local/bin/tetragon", "path to the Tetragon daemon binary to hash")
 	factsPath := fs.String("facts-path", hostprobe.HostFactsPath, "where to write the host facts file (ignored with --report)")
 	relayGroup := fs.String("relay-group", "tetragon-relay", "group that should own the facts file (ignored with --report)")
-	provisionTPM := fs.Bool("provision-tpm", false, "provision the TPM NV counter index used for store rollback protection, then exit (requires owner authorization; run once, before the agent's first start)")
+	provisionTPM := fs.Bool("provision-tpm", false, "provision the persistent SRK and the TPM NV counter index used for store rollback protection, then exit (run once, before the agent's first start)")
 	tpmDevice := fs.String("tpm-device", "/dev/tpmrm0", "TPM resource manager device path (--provision-tpm only; architecture doc 8.6 -- never /dev/tpm0)")
+	tpmOwnerAuthFile := fs.String("tpm-owner-auth-file", "", "root-only file containing the TPM owner hierarchy's authorization value (--provision-tpm only; omit if the host's TPM has no owner password set, the common case -- docs/decisions/0029-no-tpm-owner-authorization-at-runtime.md). relayd itself never reads this file or any owner authorization.")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
 	if *provisionTPM {
-		if err := provisionTPMCounter(*tpmDevice); err != nil {
+		if err := provisionTPMComponents(*tpmDevice, *tpmOwnerAuthFile); err != nil {
 			_, _ = fmt.Fprintf(stderr, "relay-probe: provision TPM: %v\n", err)
 			return 1
 		}
@@ -79,22 +81,61 @@ func run(args []string, stdout, stderr *os.File) int {
 	return 0
 }
 
-// provisionTPMCounter opens the TPM resource manager device and
-// provisions (or validates an already-correct) NV counter index at
-// tpm.DefaultCounterHandle (docs/prompts/step-05a.md C3). Run once, by
-// this root-run command via the unit's ExecStartPre=+
+// provisionTPMComponents opens the TPM resource manager device and
+// provisions (or validates already-correct) persistent SRK
+// (tpm.ProvisionSRK) and NV counter index (tpm.ProvisionCounter) at
+// tpm.DefaultCounterHandle (docs/decisions/0029-no-tpm-owner-
+// authorization-at-runtime.md, superseding docs/prompts/step-05a.md C3).
+// Run once, by this root-run command via the unit's ExecStartPre=+
 // (packaging/systemd/tetragon-relay.service); relayd itself (unprivileged)
-// never defines or undefines this index, only reads and increments it
-// (internal/tpm.OpenCounter). Idempotent: running it again against an
-// already-correctly-provisioned index is a no-op, so it is safe to run on
-// every unit start, not just the first.
-func provisionTPMCounter(devicePath string) error {
+// never creates/persists the SRK or defines/undefines the counter index,
+// only loads/reads/increments them (internal/tpm.OpenSRK,
+// internal/tpm.OpenCounter) with no TPM owner-hierarchy authorization at
+// all. Idempotent: running it again against already-correctly-provisioned
+// objects is a no-op, so it is safe to run on every unit start, not just
+// the first.
+//
+// ownerAuthFile is optional. If set, it names a root-only file whose
+// exact contents (with at most one trailing newline stripped) are used as
+// the TPM owner hierarchy's authorization value for this one provisioning
+// run -- the operator procedure for a host whose TPM already has an owner
+// password set by the site's provisioning standard (ADR 0029). If empty,
+// provisioning uses an empty owner authorization, matching the common
+// case of a TPM with no owner password. This value is read exactly once,
+// here, and is never read by relayd.
+func provisionTPMComponents(devicePath, ownerAuthFile string) error {
+	ownerAuth, err := readOwnerAuthFile(ownerAuthFile)
+	if err != nil {
+		return err
+	}
 	dev, err := tpm.OpenDevice(devicePath)
 	if err != nil {
 		return fmt.Errorf("open TPM device %s: %w", devicePath, err)
 	}
 	defer func() { _ = dev.Close() }()
-	return tpm.ProvisionCounter(dev, tpm.DefaultCounterHandle)
+	if _, err := tpm.ProvisionSRK(dev, ownerAuth); err != nil {
+		return fmt.Errorf("provision SRK: %w", err)
+	}
+	if err := tpm.ProvisionCounter(dev, tpm.DefaultCounterHandle, ownerAuth); err != nil {
+		return fmt.Errorf("provision NV counter: %w", err)
+	}
+	return nil
+}
+
+// readOwnerAuthFile reads the TPM owner authorization value from path, or
+// returns nil (empty authorization) if path is empty. A non-empty path
+// that cannot be read is a hard error: provisioning never silently falls
+// back to an empty owner authorization when the operator explicitly
+// configured a file to read it from.
+func readOwnerAuthFile(path string) ([]byte, error) {
+	if path == "" {
+		return nil, nil
+	}
+	raw, err := os.ReadFile(path) //nolint:gosec // G304: path is an explicit, operator-supplied flag, read once by this root-run provisioning command, never from untrusted input
+	if err != nil {
+		return nil, fmt.Errorf("read TPM owner auth file %s: %w", path, err)
+	}
+	return bytes.TrimSuffix(raw, []byte("\n")), nil
 }
 
 func lookupGID(name string) (int, error) {

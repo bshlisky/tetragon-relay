@@ -37,7 +37,10 @@ func TestTPMRealDeviceRoundTrip(t *testing.T) {
 	}
 	defer func() { _ = dev.Close() }()
 
-	if err := ProvisionCounter(dev, DefaultCounterHandle); err != nil {
+	if _, err := ProvisionSRK(dev, nil); err != nil {
+		t.Fatalf("ProvisionSRK: %v", err)
+	}
+	if err := ProvisionCounter(dev, DefaultCounterHandle, nil); err != nil {
 		t.Fatalf("ProvisionCounter: %v", err)
 	}
 

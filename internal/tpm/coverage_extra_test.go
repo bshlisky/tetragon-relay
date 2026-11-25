@@ -102,6 +102,9 @@ func TestFlushSRK_InvalidHandleIsError(t *testing.T) {
 
 func TestCreateHostSigner_SealFailureSurfaces(t *testing.T) {
 	rtpm := startSWTPM(t)
+	if _, err := ProvisionSRK(rtpm, nil); err != nil {
+		t.Fatalf("ProvisionSRK: %v", err)
+	}
 	f := &faultTPM{inner: rtpm, failCommand: cc(tpm2.TPMCCCreate), failOnCall: 1}
 	dir := t.TempDir()
 	if err := createHostSigner(f, filepath.Join(dir, "new.json")); !errors.Is(err, ErrTPMCommand) {
@@ -109,11 +112,13 @@ func TestCreateHostSigner_SealFailureSurfaces(t *testing.T) {
 	}
 }
 
-func TestCreateHostSigner_CreateSRKFailureSurfaces(t *testing.T) {
+func TestCreateHostSigner_SRKNotProvisionedIsError(t *testing.T) {
+	// relayd never creates the signing key's SRK parent itself (ADR
+	// 0029): createHostSigner before relay-probe --provision-tpm has run
+	// must fail closed with ErrSRKNotProvisioned.
 	rtpm := startSWTPM(t)
-	f := &faultTPM{inner: rtpm, failCommand: cc(tpm2.TPMCCCreatePrimary), failOnCall: 1}
 	dir := t.TempDir()
-	if err := createHostSigner(f, filepath.Join(dir, "new.json")); err == nil {
-		t.Fatalf("createHostSigner unexpectedly succeeded despite CreatePrimary failure")
+	if err := createHostSigner(rtpm, filepath.Join(dir, "new.json")); !errors.Is(err, ErrSRKNotProvisioned) {
+		t.Fatalf("err = %v, want ErrSRKNotProvisioned", err)
 	}
 }

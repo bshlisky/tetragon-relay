@@ -48,4 +48,18 @@ var (
 	// reports both unavailable). This project never falls back to a
 	// software key (docs/prompts/step-05a.md C4).
 	ErrNoSupportedSigningCurve = errors.New("tpm: no supported signing curve (P-384 or P-256) available")
+
+	// ErrSRKNotProvisioned is returned by OpenSRK when neither
+	// TCGStandardSRKHandle nor ProjectSRKHandle holds a persistent object
+	// matching SRKTemplate (docs/decisions/0029-no-tpm-owner-authorization-
+	// at-runtime.md): relay-probe --provision-tpm should have run first.
+	// relayd itself never creates or persists the SRK, only reads it.
+	ErrSRKNotProvisioned = errors.New("tpm: SRK not provisioned")
+
+	// ErrSRKHandleMismatch is returned by ProvisionSRK when
+	// ProjectSRKHandle already holds a persistent object whose template
+	// does not match SRKTemplate -- a collision with something else using
+	// that handle, or evidence of tampering with the object's own
+	// definition. Provisioning never overwrites or adopts it.
+	ErrSRKHandleMismatch = errors.New("tpm: SRK handle exists with unexpected template")
 )

@@ -22,18 +22,32 @@ func TestWriteFileAtomic_NonexistentDirIsError(t *testing.T) {
 	}
 }
 
-func TestKeySealer_CreateSRKFailureSurfaces(t *testing.T) {
+func TestProvisionSRK_CreatePrimaryFailureSurfaces(t *testing.T) {
 	rtpm := startSWTPM(t)
 	f := &faultTPM{inner: rtpm, failCommand: cc(tpm2.TPMCCCreatePrimary), failOnCall: 1}
+	if _, err := ProvisionSRK(f, nil); !errors.Is(err, ErrTPMCommand) {
+		t.Fatalf("err = %v, want ErrTPMCommand", err)
+	}
+}
+
+func TestKeySealer_SRKNotProvisionedIsError(t *testing.T) {
+	// relayd never creates or persists the SRK itself (ADR 0029): a
+	// KeySealer opened before relay-probe --provision-tpm has run must
+	// fail closed, not fall back to creating one under the owner
+	// hierarchy the way step 5a's code did.
+	rtpm := startSWTPM(t)
 	dir := t.TempDir()
 	blobPath := filepath.Join(dir, "sealed.json")
-	if _, err := NewKeySealer(f, blobPath); err == nil {
-		t.Fatalf("NewKeySealer unexpectedly succeeded despite CreatePrimary failure")
+	if _, err := NewKeySealer(rtpm, blobPath); !errors.Is(err, ErrSRKNotProvisioned) {
+		t.Fatalf("err = %v, want ErrSRKNotProvisioned", err)
 	}
 }
 
 func TestKeySealer_SealFailureSurfaces(t *testing.T) {
 	rtpm := startSWTPM(t)
+	if _, err := ProvisionSRK(rtpm, nil); err != nil {
+		t.Fatalf("ProvisionSRK: %v", err)
+	}
 	f := &faultTPM{inner: rtpm, failCommand: cc(tpm2.TPMCCCreate), failOnCall: 1}
 	dir := t.TempDir()
 	blobPath := filepath.Join(dir, "sealed.json")
@@ -44,6 +58,9 @@ func TestKeySealer_SealFailureSurfaces(t *testing.T) {
 
 func TestKeySealer_LoadFailureIsErrUnsealFailed(t *testing.T) {
 	rtpm := startSWTPM(t)
+	if _, err := ProvisionSRK(rtpm, nil); err != nil {
+		t.Fatalf("ProvisionSRK: %v", err)
+	}
 	dir := t.TempDir()
 	blobPath := filepath.Join(dir, "sealed.json")
 	if _, err := NewKeySealer(rtpm, blobPath); err != nil {
@@ -58,6 +75,9 @@ func TestKeySealer_LoadFailureIsErrUnsealFailed(t *testing.T) {
 
 func TestKeySealer_UnsealCommandFailureIsErrUnsealFailed(t *testing.T) {
 	rtpm := startSWTPM(t)
+	if _, err := ProvisionSRK(rtpm, nil); err != nil {
+		t.Fatalf("ProvisionSRK: %v", err)
+	}
 	dir := t.TempDir()
 	blobPath := filepath.Join(dir, "sealed.json")
 	if _, err := NewKeySealer(rtpm, blobPath); err != nil {
@@ -73,14 +93,14 @@ func TestKeySealer_UnsealCommandFailureIsErrUnsealFailed(t *testing.T) {
 func TestProvisionCounter_DefineSpaceFailureSurfaces(t *testing.T) {
 	rtpm := startSWTPM(t)
 	f := &faultTPM{inner: rtpm, failCommand: cc(tpm2.TPMCCNVDefineSpace), failOnCall: 1}
-	if err := ProvisionCounter(f, testCounterHandle); !errors.Is(err, ErrTPMCommand) {
+	if err := ProvisionCounter(f, testCounterHandle, nil); !errors.Is(err, ErrTPMCommand) {
 		t.Fatalf("err = %v, want ErrTPMCommand", err)
 	}
 }
 
 func TestCounter_ReadPublicFailureSurfaces(t *testing.T) {
 	rtpm := startSWTPM(t)
-	if err := ProvisionCounter(rtpm, testCounterHandle); err != nil {
+	if err := ProvisionCounter(rtpm, testCounterHandle, nil); err != nil {
 		t.Fatalf("ProvisionCounter: %v", err)
 	}
 	f := &faultTPM{inner: rtpm, failCommand: cc(tpm2.TPMCCNVReadPublic), failOnCall: 1}
@@ -96,7 +116,7 @@ func TestCounter_ReadPublicFailureSurfaces(t *testing.T) {
 
 func TestCounter_IncrementCommandFailureSurfaces(t *testing.T) {
 	rtpm := startSWTPM(t)
-	if err := ProvisionCounter(rtpm, testCounterHandle); err != nil {
+	if err := ProvisionCounter(rtpm, testCounterHandle, nil); err != nil {
 		t.Fatalf("ProvisionCounter: %v", err)
 	}
 	c, err := OpenCounter(rtpm, testCounterHandle)
@@ -111,7 +131,7 @@ func TestCounter_IncrementCommandFailureSurfaces(t *testing.T) {
 
 func TestCounter_ReadAfterIncrementFailureSurfaces(t *testing.T) {
 	rtpm := startSWTPM(t)
-	if err := ProvisionCounter(rtpm, testCounterHandle); err != nil {
+	if err := ProvisionCounter(rtpm, testCounterHandle, nil); err != nil {
 		t.Fatalf("ProvisionCounter: %v", err)
 	}
 	c, err := OpenCounter(rtpm, testCounterHandle)
@@ -129,7 +149,7 @@ func TestCounter_ReadAfterIncrementFailureSurfaces(t *testing.T) {
 
 func TestCounter_NVReadFailureSurfaces(t *testing.T) {
 	rtpm := startSWTPM(t)
-	if err := ProvisionCounter(rtpm, testCounterHandle); err != nil {
+	if err := ProvisionCounter(rtpm, testCounterHandle, nil); err != nil {
 		t.Fatalf("ProvisionCounter: %v", err)
 	}
 	c, err := OpenCounter(rtpm, testCounterHandle)
@@ -167,6 +187,9 @@ func TestDetectSigningCurve_NoCurveSupportedIsError(t *testing.T) {
 
 func TestSign_LoadFailureSurfaces(t *testing.T) {
 	rtpm := startSWTPM(t)
+	if _, err := ProvisionSRK(rtpm, nil); err != nil {
+		t.Fatalf("ProvisionSRK: %v", err)
+	}
 	dir := t.TempDir()
 	blobPath := filepath.Join(dir, "host-signer.json")
 	hs, err := NewOrLoadHostSigner(rtpm, blobPath)
@@ -182,6 +205,9 @@ func TestSign_LoadFailureSurfaces(t *testing.T) {
 
 func TestSign_SignCommandFailureSurfaces(t *testing.T) {
 	rtpm := startSWTPM(t)
+	if _, err := ProvisionSRK(rtpm, nil); err != nil {
+		t.Fatalf("ProvisionSRK: %v", err)
+	}
 	dir := t.TempDir()
 	blobPath := filepath.Join(dir, "host-signer.json")
 	hs, err := NewOrLoadHostSigner(rtpm, blobPath)
@@ -197,6 +223,9 @@ func TestSign_SignCommandFailureSurfaces(t *testing.T) {
 
 func TestSign_WrongDigestLengthIsError(t *testing.T) {
 	rtpm := startSWTPM(t)
+	if _, err := ProvisionSRK(rtpm, nil); err != nil {
+		t.Fatalf("ProvisionSRK: %v", err)
+	}
 	dir := t.TempDir()
 	blobPath := filepath.Join(dir, "host-signer.json")
 	hs, err := NewOrLoadHostSigner(rtpm, blobPath)

@@ -18,14 +18,14 @@ func TestReadNVPublic_GenericFailureIsErrTPMCommand(t *testing.T) {
 func TestProvisionCounter_ReadPublicGenericFailureSurfaces(t *testing.T) {
 	rtpm := startSWTPM(t)
 	f := &alwaysFailCommand{inner: rtpm, failCommand: cc(tpm2.TPMCCNVReadPublic)}
-	if err := ProvisionCounter(f, testCounterHandle); !errors.Is(err, ErrTPMCommand) {
+	if err := ProvisionCounter(f, testCounterHandle, nil); !errors.Is(err, ErrTPMCommand) {
 		t.Fatalf("err = %v, want ErrTPMCommand", err)
 	}
 }
 
 func TestOpenCounter_ReadPublicGenericFailureSurfaces(t *testing.T) {
 	rtpm := startSWTPM(t)
-	if err := ProvisionCounter(rtpm, testCounterHandle); err != nil {
+	if err := ProvisionCounter(rtpm, testCounterHandle, nil); err != nil {
 		t.Fatalf("ProvisionCounter: %v", err)
 	}
 	f := &alwaysFailCommand{inner: rtpm, failCommand: cc(tpm2.TPMCCNVReadPublic)}
@@ -79,7 +79,7 @@ func TestCounter_Increment_NotProvisionedSurfaces(t *testing.T) {
 
 func TestCounter_Increment_PreReadGenericFailureSurfaces(t *testing.T) {
 	rtpm := startSWTPM(t)
-	if err := ProvisionCounter(rtpm, testCounterHandle); err != nil {
+	if err := ProvisionCounter(rtpm, testCounterHandle, nil); err != nil {
 		t.Fatalf("ProvisionCounter: %v", err)
 	}
 	c := &Counter{t: &alwaysFailCommand{inner: rtpm, failCommand: cc(tpm2.TPMCCNVReadPublic)}, handle: testCounterHandle}
