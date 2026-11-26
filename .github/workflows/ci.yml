@@ -343,8 +343,13 @@ jobs:
             exit 1
           fi
           chmod +x "${tetragon_bin}"
-          dirname "${tetragon_bin}" >> "$GITHUB_PATH"
-          echo "TETRAGON_BIN=${tetragon_bin}" >> "$GITHUB_ENV"
+          # /usr/local/bin/tetragon: the exact path the real unit's
+          # host-facts ExecStartPre hashes (--tetragon-binary), and the
+          # binary the Tetragon unit below runs, so the hash is of the
+          # running daemon.
+          sudo install -o root -g root -m 0755 "${tetragon_bin}" /usr/local/bin/tetragon
+          echo "TETRAGON_BIN=/usr/local/bin/tetragon" >> "$GITHUB_ENV"
+          echo "TETRAGON_BPF_LIB=$(dirname "${tetragon_bin}")/../lib/tetragon/bpf" >> "$GITHUB_ENV"
 
       - name: Create relay-managed group and socket directories
         run: |
@@ -356,13 +361,12 @@ jobs:
 
       - name: Start Tetragon (root, transient unit) on the unix socket
         run: |
-          bpf_lib_dir="$(dirname "${TETRAGON_BIN}")/../lib/tetragon/bpf"
           sudo systemd-run --unit=tetragon --collect \
             --property=Type=simple \
             "${TETRAGON_BIN}" \
             --server-address unix:///var/run/tetragon/tetragon.sock \
             --tracing-policy-dir /etc/tetragon/tetragon.tp.d \
-            --bpf-lib "${bpf_lib_dir}"
+            --bpf-lib "${TETRAGON_BPF_LIB}"
           sleep 3
           if ! sudo systemctl is-active --quiet tetragon.service; then
             echo "Tetragon did not start; log:" >&2
@@ -376,9 +380,11 @@ jobs:
         run: |
           set -euo pipefail
           sudo mkdir -p /usr/libexec/tetragon-relay
-          go build -o /tmp/relayd-prod ./cmd/relayd
-          sudo cp /tmp/relayd-prod /usr/libexec/tetragon-relay/relayd-prod
-          sudo chmod 0755 /usr/libexec/tetragon-relay/relayd-prod
+          # The production binary goes at the real unit's own ExecStart
+          # path, so S1/S2 run the unit with no drop-in at all.
+          go build -o /tmp/relayd ./cmd/relayd
+          sudo cp /tmp/relayd /usr/libexec/tetragon-relay/relayd
+          sudo chmod 0755 /usr/libexec/tetragon-relay/relayd
           go build -o /tmp/relay-probe ./cmd/relay-probe
           sudo cp /tmp/relay-probe /usr/libexec/tetragon-relay/relay-probe
           sudo chmod 0755 /usr/libexec/tetragon-relay/relay-probe
@@ -423,10 +429,7 @@ jobs:
       - name: Dump relayd unit logs (always, for debugging)
         if: always()
         run: |
-          for u in e3-relayd-s1 e3-relayd-s2 e3-relayd-s3 e3-relayd-s4 e3-relayd-s5 e3-relayd-s6; do
-            echo "=== journalctl -u ${u} ==="
-            sudo journalctl -u "${u}" --no-pager 2>&1 || true
-          done
+          sudo journalctl -u tetragon-relay --no-pager 2>&1 || true
 
       - name: Stop Tetragon
         if: always()
