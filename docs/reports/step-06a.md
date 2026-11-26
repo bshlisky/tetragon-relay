@@ -528,3 +528,9 @@ that actually drives this table through a live process: it fires `EventHelloAck`
 ## 14. E3 integration evidence per scenario
 
 None. E3 is not done (section 9).
+
+## Progress log
+
+One dated line per push: commit, what changed, the CI result observed.
+
+- 2026-11-26 `90195d2` (with `ae23da3`, `217873c`, `cb4572d`): testtpm `--tpm-device tcp:<cmd>,<platform>`; controller key moved out of relayd's trust dir; relay-probe `--provision-tpm` before S1/S2. Run 45854346976: ci ✓, integration ✓, e3 ✗. S1 PASS, S2 PASS. S3–S6 FAIL: `TPM_RC_INTEGRITY` in testenroll ("load host signing key") and relayd-e3 ("unseal failed"), because S1/S2's store and host-signer blobs are bound to the vtpm `/dev/tpmrm0` while S3–S6 used a second TCP swtpm. The architect then required the real unit file (with its ExecStartPre lines) instead of systemd-run translation.
