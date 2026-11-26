@@ -74,6 +74,23 @@ log() { echo "== $* =="; }
 # ---------------------------------------------------------------------
 
 setup_users_and_dirs() {
+	log "disabling swtpm's AppArmor profile"
+	# Ubuntu's swtpm package ships an AppArmor profile that only
+	# allow-lists /var/lib/libvirt/swtpm/** for NVRAM/lock file access
+	# (github.com/stefanberger/swtpm/issues/852,
+	# bugs.launchpad.net/ubuntu/+source/swtpm/+bug/2072524): any other
+	# --tpmstate dir=... path -- including both of this script's own --
+	# fails with "SWTPM_NVRAM_Lock_Dir: Could not open lockfile:
+	# Permission denied" regardless of the directory's actual Unix
+	# ownership/mode, which is what the first two E3 runs (45809746645,
+	# 45813954637) both hit. Unloading the profile (rather than
+	# relocating both state directories under /var/lib/libvirt/swtpm/,
+	# a libvirt-owned path this project has no other reason to touch)
+	# is a CI-environment accommodation, not a production security
+	# change: relayd's own sandbox (reproduced verbatim below) is
+	# completely unaffected.
+	sudo apparmor_parser -R /etc/apparmor.d/usr.bin.swtpm 2>/dev/null || true
+
 	log "users and groups"
 	sudo groupadd -f tetragon-relay
 	getent group tss >/dev/null || sudo groupadd tss
@@ -100,9 +117,16 @@ setup_users_and_dirs() {
 	# denied") since that system user has no home directory and -- not
 	# yet root-mapped into any session keyring -- cannot necessarily
 	# acquire libtpms' own NVRAM lock the way an interactive user can.
-	mkdir -p "${SWTPM_STATE_DIR}"
+	# /var/lib itself is root-owned, so creating a new directory under
+	# it still needs sudo even though the directory's CONTENTS should
+	# end up owned by this script's own user.
+	sudo mkdir -p "${SWTPM_STATE_DIR}"
+	sudo chown "$(id -u):$(id -g)" "${SWTPM_STATE_DIR}"
+
+	# SWTPM_CHARDEV_STATE_DIR is used only by a root-run swtpm (sudo
+	# swtpm chardev, below -- vtpm-proxy's /dev/vtpmx ioctl needs root
+	# regardless), so it stays root-owned; no chown needed or wanted.
 	sudo mkdir -p "${SWTPM_CHARDEV_STATE_DIR}"
-	sudo chown tetragon-relay:tetragon-relay "${SWTPM_CHARDEV_STATE_DIR}"
 }
 
 # start_swtpm_chardev provides /dev/tpmrm0 for S1/S2 (the PRODUCTION
