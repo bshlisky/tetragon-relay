@@ -413,6 +413,22 @@ jobs:
           sudo chmod 0755 /opt/e3bin/testenroll /opt/e3bin/e3controller /opt/e3bin/e3tetra /opt/e3bin/e3root
           echo "BIN_DIR=/opt/e3bin" >> "$GITHUB_ENV"
 
+      - name: Verify the production unit file (systemd-analyze verify)
+        # docs/reviews/step-06a-e3-decisions.md D4: any warning or error
+        # fails the job. Runs here, after every binary the unit's
+        # ExecStartPre/ExecStart lines name is installed at its real
+        # path and tetragon.service (BindsTo=) exists, so verify's
+        # executable and dependency checks see a complete host.
+        run: |
+          set -uo pipefail
+          out="$(sudo systemd-analyze verify "${GITHUB_WORKSPACE}/packaging/systemd/tetragon-relay.service" 2>&1)"
+          rc=$?
+          printf '%s\n' "${out}"
+          if [ "${rc}" -ne 0 ] || [ -n "${out}" ]; then
+            echo "systemd-analyze verify reported problems (rc=${rc})" >&2
+            exit 1
+          fi
+
       - name: Run E3 scenarios (S1-S6)
         run: |
           # sg tetragon-relay (not just the usermod -a -G above): a group

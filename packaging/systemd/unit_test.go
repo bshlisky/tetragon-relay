@@ -163,3 +163,25 @@ func TestProductionUnit_ReadWritePathsExactlySectionEightSix(t *testing.T) {
 		}
 	}
 }
+
+// TestProductionUnit_NoInlineComments: systemd treats "#" as a comment
+// only at the start of a line (systemd.syntax(7)); an inline "# ..." is
+// part of the value. E3 run 45858158620's journal showed systemd
+// rejecting two such lines ("Failed to parse boolean value ... no
+// # needs /dev/tpmrm0"; IPAddressAllow "Invalid address prefix ... #").
+// docs/reviews/step-06a-e3-decisions.md D4.
+func TestProductionUnit_NoInlineComments(t *testing.T) {
+	data, err := os.ReadFile(unitFilePath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, ";") {
+			continue
+		}
+		if strings.Contains(trimmed, "#") {
+			t.Errorf("line %d has an inline '#', which systemd parses as part of the value: %q", i+1, line)
+		}
+	}
+}
