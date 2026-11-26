@@ -81,6 +81,9 @@ jobs:
       - name: Verify vendored Tetragon API bindings hash
         run: make verify-tetragon-api
 
+      - name: "Verify production relayd's symbol table has no testca/testenroll symbol (step-06a-e3-prompt.md C1)"
+        run: make verify-no-test-symbols
+
       - name: Test with race detector and coverage
         run: go test -race -count=1 -cover ./...
 

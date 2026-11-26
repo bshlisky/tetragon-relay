@@ -165,5 +165,34 @@ verify-tetragon-api:
 		&& echo "verify-tetragon-api OK" \
 		|| (echo "$(TETRAGON_API_DIR) does not match MANIFEST.sha256 (re-vendoring or tampering); see README.md" && exit 1)
 
+# step-06a-e3-prompt.md C1: a production relayd (no build tags) must
+# never contain any testca/testenroll symbol in its symbol table --
+# "never in production relayd" checked at the binary level, not just by
+# code review of which files a build tag excludes. `go version -m`
+# first confirms the binary itself was built with no -tags at all (a
+# GOFLAGS=-tags=... leak would show up there as a "build -tags=..."
+# line); `go tool nm` then confirms the actual symbol table, which is
+# the authoritative check (a symbol could in principle survive even a
+# tagless build if some future refactor moved test-only code out from
+# behind its build tag).
+.PHONY: verify-no-test-symbols
+verify-no-test-symbols:
+	@set -e; \
+	bin=$$(mktemp); \
+	GOOS=linux $(GO) build -o $$bin ./cmd/relayd; \
+	echo "== go version -m (confirming no build tags) =="; \
+	$(GO) version -m $$bin | grep -E '^\s*build\s' || true; \
+	if $(GO) version -m $$bin | grep -qE '^\s*build\s+-tags='; then \
+		echo "production relayd was built with explicit -tags; verify-no-test-symbols requires a tagless build" >&2; \
+		rm -f $$bin; exit 1; \
+	fi; \
+	echo "== go tool nm (symbol table) =="; \
+	if $(GO) tool nm $$bin 2>/dev/null | grep -iE 'testca|testenroll|TestCA|NewTestEnroller'; then \
+		echo "production relayd's symbol table contains a testca/testenroll symbol (C1 violation)" >&2; \
+		rm -f $$bin; exit 1; \
+	fi; \
+	echo "verify-no-test-symbols OK: no testca/testenroll/TestCA/NewTestEnroller symbol in a tagless relayd build"; \
+	rm -f $$bin
+
 .PHONY: ci
-ci: lint vuln modverify vendor-check verify-crd verify-tetragon-api test-race coverage coverage90 fuzz-short proto breaking verify-repro sbom
+ci: lint vuln modverify vendor-check verify-crd verify-tetragon-api verify-no-test-symbols test-race coverage coverage90 fuzz-short proto breaking verify-repro sbom
