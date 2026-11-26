@@ -90,8 +90,19 @@ setup_users_and_dirs() {
 	sudo chown tetragon-relay:tetragon-relay "${STORE_DIR}" "${SPOOL_DIR}"
 	sudo chmod 0700 "${STORE_DIR}" "${SPOOL_DIR}"
 
-	sudo mkdir -p "${SWTPM_STATE_DIR}" "${SWTPM_CHARDEV_STATE_DIR}"
-	sudo chown tetragon-relay:tetragon-relay "${SWTPM_STATE_DIR}" "${SWTPM_CHARDEV_STATE_DIR}"
+	# SWTPM_STATE_DIR (the tcp: instance) is owned by THIS script's own
+	# (unprivileged runner) user, not tetragon-relay: the tcp: transport
+	# has no filesystem-permission concept at all (any process that can
+	# reach the TCP port can use it), so swtpm itself never needs to run
+	# as tetragon-relay, only relayd's own connection to it matters.
+	# Running it as tetragon-relay previously failed outright
+	# ("SWTPM_NVRAM_Lock_Dir: Could not open lockfile: Permission
+	# denied") since that system user has no home directory and -- not
+	# yet root-mapped into any session keyring -- cannot necessarily
+	# acquire libtpms' own NVRAM lock the way an interactive user can.
+	mkdir -p "${SWTPM_STATE_DIR}"
+	sudo mkdir -p "${SWTPM_CHARDEV_STATE_DIR}"
+	sudo chown tetragon-relay:tetragon-relay "${SWTPM_CHARDEV_STATE_DIR}"
 }
 
 # start_swtpm_chardev provides /dev/tpmrm0 for S1/S2 (the PRODUCTION
@@ -140,11 +151,8 @@ start_swtpm_chardev() {
 }
 
 start_swtpm_tcp() {
-	log "starting swtpm"
-	# shellcheck disable=SC2024 # the log file is deliberately owned by
-	# this script's own (unprivileged) user, not tetragon-relay; nothing
-	# downstream needs it writable by tetragon-relay.
-	sudo -u tetragon-relay swtpm socket \
+	log "starting swtpm (tcp, for cmd/testenroll and the testca,testtpm relayd build)"
+	swtpm socket \
 		--tpmstate "dir=${SWTPM_STATE_DIR}" \
 		--ctrl "type=tcp,port=${SWTPM_CTRL_PORT}" \
 		--server "type=tcp,port=${SWTPM_CMD_PORT}" \
@@ -473,7 +481,8 @@ scenario_s6() {
 
 main() {
 	setup_users_and_dirs
-	start_swtpm_tcp
+	tcp_tpm_ok=true
+	start_swtpm_tcp || tcp_tpm_ok=false
 	write_relay_yaml
 	write_throwaway_ca
 	write_root_json
@@ -492,11 +501,20 @@ main() {
 		scenario_s1
 		scenario_s2
 	fi
-	run_testenroll
-	scenario_s3
-	scenario_s4
-	scenario_s5
-	scenario_s6
+
+	if [ "${tcp_tpm_ok}" = true ]; then
+		run_testenroll
+		scenario_s3
+		scenario_s4
+		scenario_s5
+		scenario_s6
+	else
+		echo "the tcp: swtpm instance never started listening; skipping every scenario that needs it" >&2
+		record_result S3 FAIL
+		record_result S4 FAIL
+		record_result S5 FAIL
+		record_result S6 FAIL
+	fi
 
 	echo
 	echo "== E3 summary =="

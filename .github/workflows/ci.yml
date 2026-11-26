@@ -387,12 +387,22 @@ jobs:
           sudo cp /tmp/relayd-e3 /usr/libexec/tetragon-relay/relayd-e3
           sudo chmod 0755 /usr/libexec/tetragon-relay/relayd-e3
 
-          mkdir -p "${GITHUB_WORKSPACE}/e3bin"
-          go build -tags testca,testtpm -o "${GITHUB_WORKSPACE}/e3bin/testenroll" ./cmd/testenroll
-          go build -tags e3 -o "${GITHUB_WORKSPACE}/e3bin/e3controller" ./cmd/e3controller
-          go build -tags e3 -o "${GITHUB_WORKSPACE}/e3bin/e3tetra" ./cmd/e3tetra
-          go build -tags e3 -o "${GITHUB_WORKSPACE}/e3bin/e3root" ./cmd/e3root
-          echo "BIN_DIR=${GITHUB_WORKSPACE}/e3bin" >> "$GITHUB_ENV"
+          # /opt/e3bin, not $GITHUB_WORKSPACE/e3bin: cmd/testenroll must
+          # run as the tetragon-relay user (sudo -u tetragon-relay), which
+          # cannot traverse into /home/runner/work/... at all (confirmed
+          # by the first E3 run, 45809746645: "sudo: unable to execute
+          # .../e3bin/testenroll: Permission denied") -- the same /home
+          # access problem relayd's own binaries have under ProtectHome,
+          # just hitting plain directory permissions instead of a systemd
+          # sandbox this time.
+          sudo mkdir -p /opt/e3bin
+          go build -tags testca,testtpm -o /tmp/testenroll ./cmd/testenroll
+          go build -tags e3 -o /tmp/e3controller ./cmd/e3controller
+          go build -tags e3 -o /tmp/e3tetra ./cmd/e3tetra
+          go build -tags e3 -o /tmp/e3root ./cmd/e3root
+          sudo cp /tmp/testenroll /tmp/e3controller /tmp/e3tetra /tmp/e3root /opt/e3bin/
+          sudo chmod 0755 /opt/e3bin/testenroll /opt/e3bin/e3controller /opt/e3bin/e3tetra /opt/e3bin/e3root
+          echo "BIN_DIR=/opt/e3bin" >> "$GITHUB_ENV"
 
       - name: Run E3 scenarios (S1-S6)
         run: |
