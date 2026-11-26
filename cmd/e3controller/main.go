@@ -58,6 +58,7 @@ type config struct {
 	minHeartbeats      int
 	heartbeatDeadline  time.Duration
 	reconnectAssertFor time.Duration
+	overallTimeout     time.Duration
 }
 
 func parseFlags(args []string) (config, error) {
@@ -72,6 +73,7 @@ func parseFlags(args []string) (config, error) {
 	fs.IntVar(&c.minHeartbeats, "min-heartbeats", 3, "steady mode: number of Heartbeats to wait for before PASS")
 	fs.DurationVar(&c.heartbeatDeadline, "heartbeat-deadline", 90*time.Second, "steady mode: overall deadline to observe --min-heartbeats")
 	fs.DurationVar(&c.reconnectAssertFor, "reconnect-assert-for", 65*time.Second, "revoke mode: how long to watch for a second connection after sending Terminate{REVOKED} before declaring PASS")
+	fs.DurationVar(&c.overallTimeout, "overall-timeout", 150*time.Second, "hard upper bound on this process's own lifetime: if nothing else has reported a result by then (e.g. no connection ever arrived at all, in either mode), FAIL rather than hang forever")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
@@ -125,7 +127,12 @@ func run(args []string) error {
 	defer grpcServer.Stop()
 
 	fmt.Printf("e3controller: listening on %s, mode=%s\n", lis.Addr(), cfg.mode)
-	return <-resultCh
+	select {
+	case err := <-resultCh:
+		return err
+	case <-time.After(cfg.overallTimeout):
+		return fmt.Errorf("no result after %s (mode=%s): no connection ever completed Hello/HelloAck, or the script itself never finished", cfg.overallTimeout, cfg.mode)
+	}
 }
 
 func readCertPEM(path string) (*x509.Certificate, error) {
