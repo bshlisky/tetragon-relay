@@ -11,17 +11,17 @@
 // this project's existing ones).
 //
 // testenroll:
-//  1. Opens the same TPM (swtpm, over TCP) relayd's own --tpm-device
-//     tcp:host:port (cmd/relayd/tpmdevice_testtpm.go) will use, and
-//     performs the one-time TPM2_Startup sequence a freshly started
-//     swtpm needs (relayd itself never does this -- a production host's
-//     real TPM is already started by firmware long before relayd runs).
-//  2. Provisions the persistent SRK and the TPM NV rollback counter
-//     (tpm.ProvisionSRK, tpm.ProvisionCounter -- the same, idempotent
-//     calls cmd/relay-probe's --provision-tpm makes in production,
-//     invoked here directly since relay-probe's own TPM transport has
-//     no tcp: support and adding it would touch relay-probe's
-//     production code path for no production benefit).
+//  1. Opens the same TPM resource manager device relayd uses
+//     (--tpm-device, default /dev/tpmrm0; in E3 a vtpm-proxy-backed
+//     swtpm, scripts/e3-run.sh) through tpm.OpenDevice, the opener
+//     relayd and relay-probe use. E3 originally ran a second, TCP swtpm
+//     for this tool and the identity scenarios; run 45854346976 showed
+//     why that cannot work: the store and host-signer blobs S1/S2's
+//     production relayd creates are bound to the /dev/tpmrm0 TPM, so a
+//     different TPM rejects them with TPM_RC_INTEGRITY.
+//  2. Does NOT provision the SRK or the NV counter: the real unit's
+//     ExecStartPre=+relay-probe --provision-tpm already did, on the same
+//     device, before S1. A missing SRK is an error here, never repaired.
 //  3. Calls tpm.NewOrLoadHostSigner at the exact path cmd/relayd's own
 //     main() passes (storeDir + "/host-signer.json"), so relayd, started
 //     afterward, loads the identical key.
@@ -59,8 +59,6 @@ import (
 
 	"github.com/bshlisky/tetragon-relay/internal/identity"
 	"github.com/bshlisky/tetragon-relay/internal/tpm"
-	tpm2 "github.com/google/go-tpm/tpm2"
-	"github.com/google/go-tpm/tpm2/transport/tcp"
 )
 
 func main() {
@@ -71,8 +69,7 @@ func main() {
 }
 
 type config struct {
-	tpmCommandAddress  string
-	tpmPlatformAddress string
+	tpmDevice          string
 	storeDir           string
 	trustDomain        string
 	hostUUID           string
@@ -86,8 +83,7 @@ type config struct {
 func parseFlags(args []string) (config, error) {
 	fs := flag.NewFlagSet("testenroll", flag.ContinueOnError)
 	var c config
-	fs.StringVar(&c.tpmCommandAddress, "tpm-command-address", "", "swtpm command-channel address (host:port)")
-	fs.StringVar(&c.tpmPlatformAddress, "tpm-platform-address", "", "swtpm platform/control-channel address (host:port), for the one-time PowerOn+Startup sequence")
+	fs.StringVar(&c.tpmDevice, "tpm-device", "/dev/tpmrm0", "TPM resource manager device, the same one relayd opens")
 	fs.StringVar(&c.storeDir, "store-dir", "/var/lib/tetragon-relay", "relayd's persist directory (same value cmd/relayd's main.go uses); the host signer blob and identity chain are written here")
 	fs.StringVar(&c.trustDomain, "trust-domain", "", "identity.trust_domain (must match relay.yaml)")
 	fs.StringVar(&c.hostUUID, "host-uuid", "", "host.uuid (must match relay.yaml)")
@@ -100,7 +96,7 @@ func parseFlags(args []string) (config, error) {
 		return config{}, err
 	}
 	for name, v := range map[string]string{
-		"tpm-command-address": c.tpmCommandAddress, "trust-domain": c.trustDomain, "host-uuid": c.hostUUID,
+		"tpm-device": c.tpmDevice, "trust-domain": c.trustDomain, "host-uuid": c.hostUUID,
 		"ca-cert-out": c.caCertOut, "controller-cert-out": c.controllerCertOut,
 		"controller-key-out": c.controllerKeyOut, "controller-spiffe-id": c.controllerSPIFFEID,
 	} {
@@ -117,18 +113,11 @@ func run(args []string) error {
 		return err
 	}
 
-	tp, err := openAndStartSWTPM(cfg.tpmCommandAddress, cfg.tpmPlatformAddress)
+	tp, err := tpm.OpenDevice(cfg.tpmDevice)
 	if err != nil {
-		return fmt.Errorf("open/start TPM: %w", err)
+		return fmt.Errorf("open TPM device %s: %w", cfg.tpmDevice, err)
 	}
 	defer func() { _ = tp.Close() }()
-
-	if _, err := tpm.ProvisionSRK(tp, nil); err != nil {
-		return fmt.Errorf("provision SRK: %w", err)
-	}
-	if err := tpm.ProvisionCounter(tp, tpm.DefaultCounterHandle, nil); err != nil {
-		return fmt.Errorf("provision NV counter: %w", err)
-	}
 
 	signer, err := tpm.NewOrLoadHostSigner(tp, cfg.storeDir+"/host-signer.json")
 	if err != nil {
@@ -151,47 +140,9 @@ func run(args []string) error {
 		return fmt.Errorf("issue controller certificate: %w", err)
 	}
 
-	fmt.Printf("testenroll: provisioned TPM, host identity (trust domain %q, host %q) and controller certificate; CA written to %s\n",
+	fmt.Printf("testenroll: host identity (trust domain %q, host %q) and controller certificate; CA written to %s\n",
 		cfg.trustDomain, cfg.hostUUID, cfg.caCertOut)
 	return nil
-}
-
-// openAndStartSWTPM opens tp over TCP and performs the one-time
-// TPM2_Startup sequence a freshly started swtpm (run with "--flags
-// not-need-init") needs before any other TPM command will succeed --
-// the same sequence internal/tpm/swtpm_test.go's own startSWTPM helper
-// and internal/controlclient/integration_test.go's
-// startSWTPMForIntegrationTest both already perform for their own,
-// per-test swtpm instances. testenroll's own swtpm instance is started
-// once by the E3 CI job itself (a long-lived subprocess, not a per-test
-// one), so this -- not a go test's t.Cleanup -- is the one place that
-// sequence runs for it.
-func openAndStartSWTPM(commandAddress, platformAddress string) (*tcp.TPM, error) {
-	var tt *tcp.TPM
-	var err error
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		tt, err = tcp.Open(tcp.Config{CommandAddress: commandAddress, PlatformAddress: platformAddress})
-		if err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("connect to swtpm at %s: %w", commandAddress, err)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	// swtpm with --flags not-need-init starts already powered on;
-	// ignore a platform PowerOn failure for that reason (the same
-	// "already on" case internal/tpm's own swtpm_test.go documents) and
-	// proceed straight to TPM2_Startup, which is always required
-	// regardless.
-	_ = tt.PowerOn()
-	su := tpm2.Startup{StartupType: tpm2.TPMSUClear}
-	if _, err := su.Execute(tt); err != nil {
-		_ = tt.Close()
-		return nil, fmt.Errorf("TPM2_Startup: %w", err)
-	}
-	return tt, nil
 }
 
 // enrollHost builds the host's CSR from signer (the TPM-held key) and
