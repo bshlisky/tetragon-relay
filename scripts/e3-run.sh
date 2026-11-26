@@ -180,13 +180,28 @@ start_swtpm_chardev() {
 			# the same thing a real system's udev TPM rule would do.
 			sudo chgrp tss "${PROD_TPM_DEVICE}"
 			sudo chmod 0660 "${PROD_TPM_DEVICE}"
-			return 0
+			provision_prod_tpm
+			return
 		fi
 		sleep 0.2
 	done
 	echo "${PROD_TPM_DEVICE} did not appear" >&2
 	cat /tmp/swtpm-chardev.log >&2 || true
 	return 1
+}
+
+# provision_prod_tpm runs exactly what the production unit's first
+# ExecStartPre=+ line runs (packaging/systemd/tetragon-relay.service:
+# relay-probe --provision-tpm --tpm-device /dev/tpmrm0, as root, outside
+# relayd's sandbox), once, before S1/S2. systemd_run_properties drops
+# ExecStartPre, so without this the production build met an
+# unprovisioned TPM and refused to start (E3 run 45817131291, S1/S2:
+# "key sealer: tpm: SRK not provisioned") -- the correct production
+# behavior, not a sandbox problem. relayd itself still never uses
+# owner-hierarchy authorization (ADR 0029).
+provision_prod_tpm() {
+	log "provisioning the SRK and NV counter on ${PROD_TPM_DEVICE} (the unit's ExecStartPre=+ step)"
+	sudo "${RELAYD_DIR}/relay-probe" --provision-tpm --tpm-device "${PROD_TPM_DEVICE}"
 }
 
 start_swtpm_tcp() {

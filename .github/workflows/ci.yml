@@ -379,6 +379,9 @@ jobs:
           go build -o /tmp/relayd-prod ./cmd/relayd
           sudo cp /tmp/relayd-prod /usr/libexec/tetragon-relay/relayd-prod
           sudo chmod 0755 /usr/libexec/tetragon-relay/relayd-prod
+          go build -o /tmp/relay-probe ./cmd/relay-probe
+          sudo cp /tmp/relay-probe /usr/libexec/tetragon-relay/relay-probe
+          sudo chmod 0755 /usr/libexec/tetragon-relay/relay-probe
 
       - name: "Build relayd (E3: -tags testca,testtpm) and the E3 harness tools"
         run: |
