@@ -269,16 +269,19 @@ func TestRunSession_TerminateRevokedStopsReconnecting(t *testing.T) {
 		Terminate: &controlv1.Terminate{Reason: controlv1.Terminate_REVOKED},
 	}}
 
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("RunSession returned %v, want nil", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("RunSession did not return after Terminate{REVOKED}")
+	// D1 (step-06a-e3-decisions.md): REVOKED parks; RunSession keeps
+	// running, never reconnects, and returns only when ctx is canceled.
+	deadline = time.Now().Add(2 * time.Second)
+	for sm.Current() != StateRevoked && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
 	}
 	if sm.Current() != StateRevoked {
 		t.Fatalf("state = %s, want REVOKED", sm.Current())
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("RunSession returned (%v) after Terminate{REVOKED}; want it parked", err)
+	case <-time.After(200 * time.Millisecond):
 	}
 
 	connector.mu.Lock()
@@ -286,6 +289,122 @@ func TestRunSession_TerminateRevokedStopsReconnecting(t *testing.T) {
 	connector.mu.Unlock()
 	if calls != 1 {
 		t.Fatalf("Connector.Connect called %d times after REVOKED, want 1 (no reconnect)", calls)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunSession returned %v on shutdown, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("parked RunSession did not return on ctx cancel")
+	}
+}
+
+// steppedClock is a liveness clock the test advances explicitly.
+type steppedClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *steppedClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *steppedClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	c.now = c.now.Add(d)
+	c.mu.Unlock()
+}
+
+// revokedSession starts RunSession with its StateMachine already in
+// REVOKED (as after a persisted revocation, D2), a stepped liveness
+// clock and a 1ms park-loop touch interval.
+func revokedSession(t *testing.T, parkTick func()) (*LivenessRegistry, *steppedClock, *fakeConnector, context.CancelFunc, chan error) {
+	t.Helper()
+	cl, sm, _, _ := newSessionTestFixtures(t)
+	if err := sm.Fire(EventTerminateRevoked); err != nil {
+		t.Fatalf("EventTerminateRevoked: %v", err)
+	}
+	clock := &steppedClock{now: time.Unix(1000, 0)}
+	reg, err := NewLivenessRegistry(clock.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connector := &fakeConnector{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- RunSession(ctx, SessionConfig{
+			Connector:         connector,
+			Hello:             func() controlclient.HelloFields { return controlclient.HelloFields{} },
+			ControlLoop:       cl,
+			Clock:             func() time.Time { return time.Unix(0, 0) },
+			Auditor:           cl.Auditor,
+			Liveness:          reg,
+			HeartbeatInterval: time.Hour,
+			touchInterval:     time.Millisecond,
+			parkTick:          parkTick,
+		})
+	}()
+	return reg, clock, connector, cancel, done
+}
+
+// TestRunSession_RevokedParkKeepsLivenessHealthy: D1. Over 100 simulated
+// seconds (five times sessionLivenessMaxInterval) the parked session
+// keeps touching, so the registry stays healthy and the watchdog would
+// keep being fed; Connect is never called.
+func TestRunSession_RevokedParkKeepsLivenessHealthy(t *testing.T) {
+	reg, clock, connector, cancel, done := revokedSession(t, nil)
+	defer cancel()
+	for i := 0; i < 10; i++ {
+		clock.Advance(10 * time.Second)
+		time.Sleep(20 * time.Millisecond) // many 1ms park ticks
+		if healthy, stale, age := reg.Healthy(); !healthy {
+			t.Fatalf("step %d: registry unhealthy while parked: %q stale for %s", i, stale, age)
+		}
+	}
+	connector.mu.Lock()
+	calls := connector.calls
+	connector.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("Connect called %d times while REVOKED, want 0", calls)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("RunSession = %v, want nil", err)
+	}
+}
+
+// TestRunSession_BlockedParkLoopGoesStale: D1. If the park loop itself
+// hangs, session_runner goes stale, so the watchdog is withheld.
+func TestRunSession_BlockedParkLoopGoesStale(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	reg, clock, _, cancel, done := revokedSession(t, func() {
+		once.Do(func() { close(entered) })
+		<-release
+	})
+	defer func() {
+		close(release)
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("RunSession = %v, want nil", err)
+		}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("park loop never ticked")
+	}
+	clock.Advance(sessionLivenessMaxInterval + time.Second)
+	healthy, stale, _ := reg.Healthy()
+	if healthy || stale != sessionLivenessComponent {
+		t.Fatalf("Healthy() = %v, %q; want false, %q", healthy, stale, sessionLivenessComponent)
 	}
 }
 

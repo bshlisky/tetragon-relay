@@ -58,6 +58,21 @@ type SessionConfig struct {
 	// if positive; tests use a short interval so they do not block for
 	// 15 real seconds.
 	HeartbeatInterval time.Duration
+
+	// touchInterval overrides sessionLivenessTouchInterval for the park
+	// loop if positive, and parkTick, if non-nil, runs on every park-loop
+	// tick before the liveness touch. Both are unexported: only this
+	// package's tests set them (a short interval, and a hook that blocks
+	// to prove a hung park loop goes stale). Zero values are production.
+	touchInterval time.Duration
+	parkTick      func()
+}
+
+func (c SessionConfig) parkTouchInterval() time.Duration {
+	if c.touchInterval > 0 {
+		return c.touchInterval
+	}
+	return sessionLivenessTouchInterval
 }
 
 func (c SessionConfig) validate() error {
@@ -92,11 +107,12 @@ func (c SessionConfig) heartbeatInterval() time.Duration {
 // full-jitter backoff, applied inside Connector; DEGRADED after 5
 // minutes without a stream; Terminate{REVOKED} stops reconnecting).
 //
-// RunSession returns nil on any clean stop: ctx canceled, or
-// Terminate{REVOKED} received (cfg.ControlLoop's StateMachine is left in
-// StateRevoked; architecture doc 8.4's REVOKED -> UNENROLLED transition
-// is an explicit operator re-enrollment action this step does not
-// drive). It registers itself with cfg.Liveness under
+// RunSession returns nil when ctx is canceled. On Terminate{REVOKED}
+// (or if cfg.ControlLoop's StateMachine is already REVOKED when it is
+// called) it parks (see park) instead of returning: no further
+// connection, liveness still reported. Architecture doc 8.4's
+// REVOKED -> UNENROLLED transition is an explicit operator
+// re-enrollment action this step does not drive. It registers itself with cfg.Liveness under
 // sessionLivenessComponent as its first action (R6A-1).
 //
 // Deviation from a literal reading of architecture doc 6.3 step 4
@@ -125,6 +141,9 @@ func RunSession(ctx context.Context, cfg SessionConfig) error {
 	for {
 		if ctx.Err() != nil {
 			return nil //nolint:nilerr // ctx cancellation is RunSession's clean-stop signal, not a failure to report upward.
+		}
+		if cfg.ControlLoop.SM.Current() == StateRevoked {
+			return park(ctx, cfg, touch)
 		}
 
 		stream, closeStream, err := connectWithDegradedWatch(ctx, cfg, touch)
@@ -158,8 +177,36 @@ func RunSession(ctx context.Context, cfg SessionConfig) error {
 				cfg.Auditor.Record(AuditEvent{Step: "session_state_transition_failed", Detail: "-> CONNECTING (stream lost)", Err: ferr})
 			}
 		}
-		if !reconnect {
+		if !reconnect && cfg.ControlLoop.SM.Current() != StateRevoked {
 			return nil
+		}
+		// REVOKED: the next iteration's check parks.
+	}
+}
+
+// park implements docs/reviews/step-06a-e3-decisions.md D1. Once
+// REVOKED, RunSession neither returns nor touches the network: it idles
+// until ctx is done (shutdown; operator re-enrollment, ADR 0023, also
+// ends the process's session), touching liveness on every tick. It stays
+// registered, so the watchdog keeps being fed while it idles and is
+// withheld if this loop itself ever hangs. E3 run 45858158620 (S4)
+// showed the old behavior: RunSession returned, session_runner went
+// stale, systemd's watchdog killed relayd, and the new process
+// reconnected.
+func park(ctx context.Context, cfg SessionConfig, touch func()) error {
+	cfg.Auditor.Record(AuditEvent{Step: "session_parked", Detail: "REVOKED: no controller connection until shutdown or operator re-enrollment"})
+	ticker := time.NewTicker(cfg.parkTouchInterval())
+	defer ticker.Stop()
+	touch()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if cfg.parkTick != nil {
+				cfg.parkTick()
+			}
+			touch()
 		}
 	}
 }
