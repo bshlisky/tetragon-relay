@@ -56,6 +56,8 @@ BASELINE_POLICY_NAME=e3-baseline
 SWTPM_CMD_PORT=12321
 SWTPM_CTRL_PORT=12322
 SWTPM_STATE_DIR=/var/lib/tetragon-relay-swtpm
+SWTPM_CHARDEV_STATE_DIR=/var/lib/tetragon-relay-swtpm-chardev
+PROD_TPM_DEVICE=/dev/tpmrm0
 
 EXTRA_SYSTEMD_RUN_ARGS=()
 RESULTS=()
@@ -88,11 +90,56 @@ setup_users_and_dirs() {
 	sudo chown tetragon-relay:tetragon-relay "${STORE_DIR}" "${SPOOL_DIR}"
 	sudo chmod 0700 "${STORE_DIR}" "${SPOOL_DIR}"
 
-	sudo mkdir -p "${SWTPM_STATE_DIR}"
-	sudo chown tetragon-relay:tetragon-relay "${SWTPM_STATE_DIR}"
+	sudo mkdir -p "${SWTPM_STATE_DIR}" "${SWTPM_CHARDEV_STATE_DIR}"
+	sudo chown tetragon-relay:tetragon-relay "${SWTPM_STATE_DIR}" "${SWTPM_CHARDEV_STATE_DIR}"
 }
 
-start_swtpm() {
+# start_swtpm_chardev provides /dev/tpmrm0 for S1/S2 (the PRODUCTION
+# relayd build, which only ever accepts exactly that path,
+# cmd/relayd/tpmdevice.go). The kernel's tpm_vtpm_proxy driver
+# (docs.kernel.org/security/tpm/tpm_vtpm_proxy.html) creates a real
+# /dev/tpmN character device backed by a userspace emulator -- the
+# kernel's own in-kernel TPM resource manager then creates the matching
+# /dev/tpmrmN automatically, the same pairing a real TPM 2.0 device's
+# /dev/tpmrm0 comes from, so this is not a shortcut around DeviceAllow=
+# /dev/tpmrm0 rw: the production unit's actual device-access rule is
+# exercised against a real character device, not reinterpreted. This is
+# a SEPARATE, throwaway TPM instance from SWTPM_STATE_DIR's (the tcp:
+# one S3-S6 use): S1/S2 never enroll an identity or touch anything the
+# other scenarios' TPM state would need to agree with.
+start_swtpm_chardev() {
+	log "starting swtpm (chardev/vtpm-proxy, for /dev/tpmrm0)"
+	sudo modprobe tpm_vtpm_proxy || true
+	if [ ! -e /dev/vtpmx ]; then
+		echo "tpm_vtpm_proxy did not create /dev/vtpmx; cannot provide /dev/tpmrm0 in this environment" >&2
+		return 1
+	fi
+	# shellcheck disable=SC2024 # log file owned by this script's own
+	# user, which is fine; nothing downstream needs it root-owned.
+	sudo swtpm chardev --vtpm-proxy --tpm2 \
+		--tpmstate "dir=${SWTPM_CHARDEV_STATE_DIR}" \
+		--flags not-need-init >/tmp/swtpm-chardev.log 2>&1 &
+	for _ in $(seq 1 50); do
+		if [ -e "${PROD_TPM_DEVICE}" ]; then
+			# Group "tss" (already SupplementaryGroups=tss in the real
+			# unit, reproduced by systemd_run_properties) is this
+			# project's own convention for TPM device access
+			# (packaging/systemd/tetragon-relay.service); the kernel
+			# creates the device root:root by default, so it must be
+			# re-grouped for the sandboxed process to actually open it,
+			# the same thing a real system's udev TPM rule would do.
+			sudo chgrp tss "${PROD_TPM_DEVICE}"
+			sudo chmod 0660 "${PROD_TPM_DEVICE}"
+			return 0
+		fi
+		sleep 0.2
+	done
+	echo "${PROD_TPM_DEVICE} did not appear" >&2
+	cat /tmp/swtpm-chardev.log >&2 || true
+	return 1
+}
+
+start_swtpm_tcp() {
 	log "starting swtpm"
 	# shellcheck disable=SC2024 # the log file is deliberately owned by
 	# this script's own (unprivileged) user, not tetragon-relay; nothing
@@ -225,13 +272,6 @@ systemd_run_properties() {
 			# address), same restrictiveness, different address because the
 			# real one does not exist in CI.
 			val="127.0.0.1/32"
-			;;
-		DeviceAllow)
-			# /dev/tpmrm0 does not exist on a GitHub-hosted runner at all
-			# (E3 relayd reaches the TPM over tcp:, cmd/relayd/
-			# tpmdevice_testtpm.go); omit rather than reference a
-			# nonexistent device node.
-			continue
 			;;
 		esac
 		printf -- '--property=%s=%s\n' "${key}" "${val}"
@@ -433,16 +473,25 @@ scenario_s6() {
 
 main() {
 	setup_users_and_dirs
-	start_swtpm
+	start_swtpm_tcp
 	write_relay_yaml
 	write_throwaway_ca
 	write_root_json
 	preload_baseline_policy
 
 	# C5: the two identity-free scenarios first, then testenroll, then
-	# the identity scenarios.
-	scenario_s1
-	scenario_s2
+	# the identity scenarios. S1/S2 additionally need their own
+	# /dev/tpmrm0 (the production build's crypto self-test/store/host-
+	# signer sequence runs unconditionally, before the UNENROLLED branch
+	# C2 describes -- it is not actually identity-free at the TPM level,
+	# only enrollment-free).
+	if ! start_swtpm_chardev; then
+		record_result S1 FAIL
+		record_result S2 FAIL
+	else
+		scenario_s1
+		scenario_s2
+	fi
 	run_testenroll
 	scenario_s3
 	scenario_s4
