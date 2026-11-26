@@ -112,7 +112,15 @@ func RunSession(ctx context.Context, cfg SessionConfig) error {
 		return err
 	}
 	cfg.Liveness.Register(sessionLivenessComponent, sessionLivenessMaxInterval)
-	touch := func() { cfg.Liveness.Touch(sessionLivenessComponent) }
+	// e3StalledComponent is always "" outside a testca build
+	// (e3hooks.go): this check compiles away to "if false" there, so
+	// Touch always runs in production. step-06a-e3-prompt.md S6.
+	touch := func() {
+		if e3StalledComponent() == sessionLivenessComponent {
+			return
+		}
+		cfg.Liveness.Touch(sessionLivenessComponent)
+	}
 
 	for {
 		if ctx.Err() != nil {
@@ -178,7 +186,14 @@ func connectWithDegradedWatch(ctx context.Context, cfg SessionConfig, touch func
 		resultCh <- result{stream, closer, err}
 	}()
 
-	degradedTimer := time.NewTimer(limits.ControlConnectDegradedTimeout)
+	degradedTimeout := limits.ControlConnectDegradedTimeout
+	if o := e3DegradedTimeoutOverride(); o > 0 {
+		// Always 0 outside a testca build (e3hooks.go); step-06a-e3-
+		// prompt.md S5 explicitly permits shortening this threshold
+		// only through a testca-tagged constant override.
+		degradedTimeout = o
+	}
+	degradedTimer := time.NewTimer(degradedTimeout)
 	defer degradedTimer.Stop()
 	touchTicker := time.NewTicker(sessionLivenessTouchInterval)
 	defer touchTicker.Stop()
