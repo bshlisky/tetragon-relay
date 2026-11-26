@@ -3,9 +3,12 @@
 package hostprobe
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 // TestPlatformStatOpenFile_Linux exercises the real fstat/fstatfs path:
@@ -46,4 +49,49 @@ func TestPlatformStatOpenFile_Linux(t *testing.T) {
 		}
 		check(t, "/dev/shm", true)
 	})
+}
+
+func TestPlatformStatOpenFile_ClosedDescriptor(t *testing.T) {
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	if _, err := platformStatOpenFile(f); !errors.Is(err, ErrHostFactsUnreadable) {
+		t.Fatalf("platformStatOpenFile(closed) = %v, want ErrHostFactsUnreadable", err)
+	}
+}
+
+func TestPlatformStatOpenFile_NotTmpfsOrNotRegular(t *testing.T) {
+	// /proc is procfs and a directory: neither regular nor tmpfs.
+	f, err := os.Open("/proc")
+	if err != nil {
+		t.Skipf("/proc: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	info, err := platformStatOpenFile(f)
+	if err != nil {
+		t.Fatalf("platformStatOpenFile(/proc): %v", err)
+	}
+	if info.regular || info.onTmpfs {
+		t.Fatalf("info = %+v, want regular=false onTmpfs=false", info)
+	}
+}
+
+func TestSpecialBits(t *testing.T) {
+	cases := []struct {
+		mode uint32
+		want os.FileMode
+	}{
+		{0, 0},
+		{unix.S_ISUID, os.ModeSetuid},
+		{unix.S_ISGID, os.ModeSetgid},
+		{unix.S_ISVTX, os.ModeSticky},
+		{unix.S_ISUID | unix.S_ISGID | unix.S_ISVTX, os.ModeSetuid | os.ModeSetgid | os.ModeSticky},
+	}
+	for _, tc := range cases {
+		if got := specialBits(tc.mode); got != tc.want {
+			t.Errorf("specialBits(%#o) = %v, want %v", tc.mode, got, tc.want)
+		}
+	}
 }

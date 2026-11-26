@@ -117,6 +117,27 @@ func TestLoad_FailsClosed(t *testing.T) {
 		})
 	}
 
+	t.Run("read_error", func(t *testing.T) {
+		// A directory passes the (faked) stat rule but fails the read.
+		withStat(t, goodStat)
+		c, err := Load(t.TempDir())
+		if !errors.Is(err, ErrHostFactsUnreadable) {
+			t.Fatalf("Load(dir) error = %v, want ErrHostFactsUnreadable", err)
+		}
+		assertFailClosed(t, c)
+	})
+
+	t.Run("stat_error", func(t *testing.T) {
+		restore := statOpenFile
+		statOpenFile = func(*os.File) (fileInfo, error) { return fileInfo{}, ErrHostFactsUnreadable }
+		t.Cleanup(func() { statOpenFile = restore })
+		c, err := Load(valid)
+		if !errors.Is(err, ErrHostFactsUnreadable) {
+			t.Fatalf("Load error = %v, want ErrHostFactsUnreadable", err)
+		}
+		assertFailClosed(t, c)
+	})
+
 	t.Run("symlink_not_followed", func(t *testing.T) {
 		withStat(t, goodStat)
 		link := filepath.Join(dir, "link.json")
