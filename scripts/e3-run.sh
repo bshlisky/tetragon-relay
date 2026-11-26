@@ -58,6 +58,12 @@ SWTPM_CTRL_PORT=12322
 SWTPM_STATE_DIR=/var/lib/tetragon-relay-swtpm
 SWTPM_CHARDEV_STATE_DIR=/var/lib/tetragon-relay-swtpm-chardev
 PROD_TPM_DEVICE=/dev/tpmrm0
+# The testtpm relayd build's --tpm-device for swtpm: both the command and
+# the platform (control) channel, which go-tpm's tcp.Open always dials
+# (cmd/relayd/tpmdevice_testtpm.go). 127.0.0.1, not localhost: the unit's
+# IPAddressAllow is 127.0.0.1/32, so a localhost that resolves to ::1
+# would be refused by the sandbox.
+E3_TPM_DEVICE="tcp:127.0.0.1:${SWTPM_CMD_PORT},127.0.0.1:${SWTPM_CTRL_PORT}"
 
 EXTRA_SYSTEMD_RUN_ARGS=()
 RESULTS=()
@@ -410,7 +416,7 @@ scenario_s3() {
 	ctrl_pid=$!
 	sleep 1
 
-	start_relayd_unit e3-relayd-s3 "${RELAYD_DIR}/relayd-e3" --config "${RELAY_YAML}" --tpm-device "tcp:localhost:${SWTPM_CMD_PORT}"
+	start_relayd_unit e3-relayd-s3 "${RELAYD_DIR}/relayd-e3" --config "${RELAY_YAML}" --tpm-device "${E3_TPM_DEVICE}"
 	wait "${ctrl_pid}"
 	ctrl_status=$?
 	stop_unit e3-relayd-s3
@@ -433,7 +439,7 @@ scenario_s4() {
 	ctrl_pid=$!
 	sleep 1
 
-	start_relayd_unit e3-relayd-s4 "${RELAYD_DIR}/relayd-e3" --config "${RELAY_YAML}" --tpm-device "tcp:localhost:${SWTPM_CMD_PORT}"
+	start_relayd_unit e3-relayd-s4 "${RELAYD_DIR}/relayd-e3" --config "${RELAY_YAML}" --tpm-device "${E3_TPM_DEVICE}"
 	wait "${ctrl_pid}"
 	ctrl_status=$?
 	stop_unit e3-relayd-s4
@@ -458,7 +464,7 @@ scenario_s4() {
 scenario_s5() {
 	log "S5: controller unavailable; Tetragon keeps enforcing"
 	EXTRA_SYSTEMD_RUN_ARGS=(--setenv=RELAYD_E3_DEGRADED_TIMEOUT=10s)
-	start_relayd_unit e3-relayd-s5 "${RELAYD_DIR}/relayd-e3" --config "${RELAY_YAML}" --tpm-device "tcp:localhost:${SWTPM_CMD_PORT}"
+	start_relayd_unit e3-relayd-s5 "${RELAYD_DIR}/relayd-e3" --config "${RELAY_YAML}" --tpm-device "${E3_TPM_DEVICE}"
 	EXTRA_SYSTEMD_RUN_ARGS=()
 	sleep 20
 	ok=true
@@ -482,7 +488,7 @@ scenario_s6() {
 	ctrl_pid=$!
 
 	EXTRA_SYSTEMD_RUN_ARGS=(--setenv=RELAYD_E3_STALL_COMPONENT=session_runner)
-	start_relayd_unit e3-relayd-s6 "${RELAYD_DIR}/relayd-e3" --config "${RELAY_YAML}" --tpm-device "tcp:localhost:${SWTPM_CMD_PORT}"
+	start_relayd_unit e3-relayd-s6 "${RELAYD_DIR}/relayd-e3" --config "${RELAY_YAML}" --tpm-device "${E3_TPM_DEVICE}"
 	EXTRA_SYSTEMD_RUN_ARGS=()
 
 	wait "${ctrl_pid}" || true # just needs to observe the first heartbeat; its own exit code is not S6's pass/fail signal
