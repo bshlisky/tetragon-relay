@@ -148,6 +148,7 @@ func TestRunSession_ConnectsReachesSteadyAndHeartbeats(t *testing.T) {
 			Clock:             func() time.Time { return time.Unix(0, 0) },
 			Auditor:           cl.Auditor,
 			Liveness:          reg,
+			Revocations:       &fakeRevocations{},
 			HeartbeatInterval: 10 * time.Millisecond,
 		})
 	}()
@@ -201,6 +202,7 @@ func TestRunSession_StreamLossReconnects(t *testing.T) {
 			Clock:             func() time.Time { return time.Unix(0, 0) },
 			Auditor:           cl.Auditor,
 			Liveness:          reg,
+			Revocations:       &fakeRevocations{},
 			HeartbeatInterval: time.Hour, // no heartbeats; isolate the reconnect behavior
 		})
 	}()
@@ -253,6 +255,7 @@ func TestRunSession_TerminateRevokedStopsReconnecting(t *testing.T) {
 			Clock:             func() time.Time { return time.Unix(0, 0) },
 			Auditor:           cl.Auditor,
 			Liveness:          reg,
+			Revocations:       &fakeRevocations{},
 			HeartbeatInterval: time.Hour,
 		})
 	}()
@@ -345,6 +348,7 @@ func revokedSession(t *testing.T, parkTick func()) (*LivenessRegistry, *steppedC
 			Clock:             func() time.Time { return time.Unix(0, 0) },
 			Auditor:           cl.Auditor,
 			Liveness:          reg,
+			Revocations:       &fakeRevocations{},
 			HeartbeatInterval: time.Hour,
 			touchInterval:     time.Millisecond,
 			parkTick:          parkTick,
@@ -423,6 +427,7 @@ func TestRunSession_ConnectTimeoutEntersDegraded(t *testing.T) {
 			Clock:             func() time.Time { return time.Unix(0, 0) },
 			Auditor:           cl.Auditor,
 			Liveness:          reg,
+			Revocations:       &fakeRevocations{},
 			HeartbeatInterval: time.Hour,
 		})
 	}()
@@ -449,6 +454,7 @@ func TestSessionConfig_Validate(t *testing.T) {
 		Clock:       func() time.Time { return time.Unix(0, 0) },
 		Auditor:     auditor,
 		Liveness:    reg,
+		Revocations: &fakeRevocations{},
 	}
 	cases := []struct {
 		name   string
@@ -460,6 +466,7 @@ func TestSessionConfig_Validate(t *testing.T) {
 		{"no clock", func(c *SessionConfig) { c.Clock = nil }},
 		{"no auditor", func(c *SessionConfig) { c.Auditor = nil }},
 		{"no liveness", func(c *SessionConfig) { c.Liveness = nil }},
+		{"no revocations", func(c *SessionConfig) { c.Revocations = nil }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

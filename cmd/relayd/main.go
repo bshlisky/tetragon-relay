@@ -276,6 +276,14 @@ func run(configPath, tpmDevicePath string, auditor *agentAuditor) error {
 		cancelSession()
 		return fmt.Errorf("enter CONNECTING: %w", err)
 	}
+	// ADR 0035 (step-06a-e3-decisions.md D2): a persisted REVOKED marker
+	// puts the agent straight into REVOKED; RunSession then parks without
+	// dialing, and the LKG applied at startup stays enforced. A store
+	// read error is fatal rather than read as "not revoked".
+	if _, err := agent.RestoreRevocation(sm, startupResult.Store, auditor); err != nil {
+		cancelSession()
+		return err
+	}
 
 	snapshotProvider := &agent.RealSnapshotProvider{Store: startupResult.Store, Client: tetraClient, Scopes: cfg.AllowedScopes}
 	controlLoop, err := agent.NewControlLoop(sm, auditor, time.Now, snapshotProvider, &agent.RealIdentityRotator{CertManager: certManager})
@@ -311,6 +319,7 @@ func run(configPath, tpmDevicePath string, auditor *agentAuditor) error {
 		Clock:             time.Now,
 		Auditor:           auditor,
 		Liveness:          liveness,
+		Revocations:       startupResult.Store,
 		HeartbeatInterval: cfg.HeartbeatInterval,
 	}
 

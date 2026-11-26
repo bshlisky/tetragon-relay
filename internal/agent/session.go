@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	controlv1 "github.com/bshlisky/tetragon-relay/api/relay/control/v1"
 	"github.com/bshlisky/tetragon-relay/internal/controlclient"
@@ -54,6 +55,10 @@ type SessionConfig struct {
 	// Liveness is Touch-ed throughout RunSession's life (R6A-1).
 	// Required.
 	Liveness *LivenessRegistry
+	// Revocations persists the REVOKED marker when Terminate{REVOKED}
+	// arrives (ADR 0035; production: *store.Store). Required: a nil
+	// recorder would silently lose the revocation across a restart.
+	Revocations RevocationRecorder
 	// HeartbeatInterval overrides limits.DefaultHeartbeatInterval (15s)
 	// if positive; tests use a short interval so they do not block for
 	// 15 real seconds.
@@ -89,6 +94,8 @@ func (c SessionConfig) validate() error {
 		return fmt.Errorf("agent: RunSession: Auditor must not be nil")
 	case c.Liveness == nil:
 		return fmt.Errorf("agent: RunSession: Liveness must not be nil")
+	case c.Revocations == nil:
+		return fmt.Errorf("agent: RunSession: Revocations must not be nil")
 	}
 	return nil
 }
@@ -177,11 +184,39 @@ func RunSession(ctx context.Context, cfg SessionConfig) error {
 				cfg.Auditor.Record(AuditEvent{Step: "session_state_transition_failed", Detail: "-> CONNECTING (stream lost)", Err: ferr})
 			}
 		}
-		if !reconnect && cfg.ControlLoop.SM.Current() != StateRevoked {
+		if cfg.ControlLoop.SM.Current() == StateRevoked {
+			persistRevocation(cfg)
+			continue // the next iteration's check parks
+		}
+		if !reconnect {
 			return nil
 		}
-		// REVOKED: the next iteration's check parks.
 	}
+}
+
+// persistRevocation records the REVOKED marker (ADR 0035) before
+// RunSession parks. A failure is audited, not fatal: this process parks
+// and never dials either way, and the next start would reconnect only
+// if the marker is missing, which the audit record makes visible.
+func persistRevocation(cfg SessionConfig) {
+	reason := truncateUTF8(cfg.ControlLoop.RevokedReason(), limits.MaxRevokedReasonBytes)
+	if err := cfg.Revocations.MarkRevoked(cfg.Clock(), reason); err != nil {
+		cfg.Auditor.Record(AuditEvent{Step: "revocation_persist_failed", Detail: "REVOKED marker not persisted; a restart would reconnect", Err: err})
+		return
+	}
+	cfg.Auditor.Record(AuditEvent{Step: "revocation_persisted", Detail: reason})
+}
+
+// truncateUTF8 cuts s to at most n bytes without splitting a rune.
+func truncateUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 // park implements docs/reviews/step-06a-e3-decisions.md D1. Once

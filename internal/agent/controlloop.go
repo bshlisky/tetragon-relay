@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	controlv1 "github.com/bshlisky/tetragon-relay/api/relay/control/v1"
@@ -112,6 +113,18 @@ type ControlLoop struct {
 	Clock    func() time.Time
 	Snapshot SnapshotProvider
 	Rotator  IdentityRotator
+
+	mu            sync.Mutex
+	revokedReason string
+}
+
+// RevokedReason returns the reason recorded with the most recent
+// Terminate{REVOKED} ("REVOKED: <detail>"), or "" if none was received.
+// RunSession persists it with the REVOKED marker (ADR 0035).
+func (cl *ControlLoop) RevokedReason() string {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	return cl.revokedReason
 }
 
 // NewControlLoop constructs a ControlLoop, rejecting any nil dependency.
@@ -179,6 +192,9 @@ func (cl *ControlLoop) HandleControllerMessage(ctx context.Context, seqTracker *
 		reason := body.Terminate.GetReason()
 		cl.Auditor.Record(AuditEvent{Step: "terminate_received", Detail: fmt.Sprintf("reason=%s detail=%s", reason, body.Terminate.GetDetail())})
 		if reason == controlv1.Terminate_REVOKED {
+			cl.mu.Lock()
+			cl.revokedReason = "REVOKED: " + body.Terminate.GetDetail()
+			cl.mu.Unlock()
 			_ = cl.SM.Fire(EventTerminateRevoked)
 			return Outcome{Close: true, Reconnect: false}, nil
 		}
