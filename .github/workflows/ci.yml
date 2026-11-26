@@ -300,3 +300,121 @@ jobs:
       - name: Stop Tetragon
         if: always()
         run: sudo systemctl stop tetragon.service || true
+
+  # docs/prompts/step-06a-e3-prompt.md: relayd as a real process under the
+  # production systemd unit's own sandbox settings (reproduced verbatim by
+  # scripts/e3-run.sh, parsed directly from packaging/systemd/
+  # tetragon-relay.service), with swtpm (testtpm build tag) and the test
+  # CA (testca build tag) for identity, against a real Tetragon and
+  # cmd/e3controller. See docs/reports/step-06a.md section 9/14 for the
+  # full design and per-scenario evidence.
+  e3:
+    runs-on: ubuntu-24.04
+    needs: [ci, integration]
+    env:
+      TETRAGON_VERSION: v1.8.0
+      TETRAGON_TARBALL_SHA256: "e88691c5f05a2a61aba58974a080603050b924c7f13ecc06f3d05172feb05f59"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install swtpm
+        run: sudo apt-get update && sudo apt-get install -y swtpm swtpm-tools
+
+      - name: Download and verify Tetragon release tarball
+        run: |
+          set -euo pipefail
+          url="https://github.com/cilium/tetragon/releases/download/${TETRAGON_VERSION}/tetragon-${TETRAGON_VERSION}-amd64.tar.gz"
+          curl -fsSL -o tetragon.tar.gz "$url"
+          echo "${TETRAGON_TARBALL_SHA256}  tetragon.tar.gz" | sha256sum -c -
+          mkdir -p /tmp/tetragon-install
+          tar -xzf tetragon.tar.gz -C /tmp/tetragon-install
+          tetragon_bin="$(find /tmp/tetragon-install -maxdepth 6 -type f -name tetragon | head -1)"
+          if [ -z "${tetragon_bin}" ]; then
+            echo "could not find the tetragon binary inside the extracted tarball" >&2
+            exit 1
+          fi
+          chmod +x "${tetragon_bin}"
+          dirname "${tetragon_bin}" >> "$GITHUB_PATH"
+          echo "TETRAGON_BIN=${tetragon_bin}" >> "$GITHUB_ENV"
+
+      - name: Create relay-managed group and socket directories
+        run: |
+          sudo groupadd -f tetragon-relay
+          sudo mkdir -p /var/run/tetragon /etc/tetragon/tetragon.tp.d/relay
+          sudo chown root:tetragon-relay /var/run/tetragon /etc/tetragon/tetragon.tp.d/relay
+          sudo chmod 2770 /etc/tetragon/tetragon.tp.d/relay
+          sudo usermod -a -G tetragon-relay "$(id -un)"
+
+      - name: Start Tetragon (root, transient unit) on the unix socket
+        run: |
+          bpf_lib_dir="$(dirname "${TETRAGON_BIN}")/../lib/tetragon/bpf"
+          sudo systemd-run --unit=tetragon --collect \
+            --property=Type=simple \
+            "${TETRAGON_BIN}" \
+            --server-address unix:///var/run/tetragon/tetragon.sock \
+            --tracing-policy-dir /etc/tetragon/tetragon.tp.d \
+            --bpf-lib "${bpf_lib_dir}"
+          sleep 3
+          if ! sudo systemctl is-active --quiet tetragon.service; then
+            echo "Tetragon did not start; log:" >&2
+            sudo journalctl -u tetragon.service --no-pager >&2
+            exit 1
+          fi
+          sudo chmod 660 /var/run/tetragon/tetragon.sock
+          sudo chown root:tetragon-relay /var/run/tetragon/tetragon.sock
+
+      - name: Build relayd (production, no tags) and relay-probe
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /usr/libexec/tetragon-relay
+          go build -o /tmp/relayd-prod ./cmd/relayd
+          sudo cp /tmp/relayd-prod /usr/libexec/tetragon-relay/relayd-prod
+          sudo chmod 0755 /usr/libexec/tetragon-relay/relayd-prod
+
+      - name: "Build relayd (E3: -tags testca,testtpm) and the E3 harness tools"
+        run: |
+          set -euo pipefail
+          go build -tags testca,testtpm -o /tmp/relayd-e3 ./cmd/relayd
+          sudo cp /tmp/relayd-e3 /usr/libexec/tetragon-relay/relayd-e3
+          sudo chmod 0755 /usr/libexec/tetragon-relay/relayd-e3
+
+          mkdir -p "${GITHUB_WORKSPACE}/e3bin"
+          go build -tags testca,testtpm -o "${GITHUB_WORKSPACE}/e3bin/testenroll" ./cmd/testenroll
+          go build -tags e3 -o "${GITHUB_WORKSPACE}/e3bin/e3controller" ./cmd/e3controller
+          go build -tags e3 -o "${GITHUB_WORKSPACE}/e3bin/e3tetra" ./cmd/e3tetra
+          go build -tags e3 -o "${GITHUB_WORKSPACE}/e3bin/e3root" ./cmd/e3root
+          echo "BIN_DIR=${GITHUB_WORKSPACE}/e3bin" >> "$GITHUB_ENV"
+
+      - name: Run E3 scenarios (S1-S6)
+        run: |
+          # sg tetragon-relay (not just the usermod -a -G above): a group
+          # added to this user mid-session only takes effect in a freshly
+          # spawned process with that supplementary group active, the
+          # same reason the "integration" job's own test-binary step uses
+          # sg -- e3tetra (ListTracingPolicies/AddTracingPolicy against
+          # Tetragon's root:tetragon-relay 0660 socket) needs it too.
+          export REPO_ROOT="${GITHUB_WORKSPACE}"
+          export BIN_DIR="${BIN_DIR}"
+          export TETRAGON_BIN="${TETRAGON_BIN}"
+          sg tetragon-relay -c 'bash scripts/e3-run.sh'
+
+      - name: Dump relayd unit logs (always, for debugging)
+        if: always()
+        run: |
+          for u in e3-relayd-s1 e3-relayd-s2 e3-relayd-s3 e3-relayd-s4 e3-relayd-s5 e3-relayd-s6; do
+            echo "=== journalctl -u ${u} ==="
+            sudo journalctl -u "${u}" --no-pager 2>&1 || true
+          done
+
+      - name: Stop Tetragon
+        if: always()
+        run: sudo systemctl stop tetragon.service || true
