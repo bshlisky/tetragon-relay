@@ -421,8 +421,10 @@ jobs:
         # executable and dependency checks see a complete host.
         run: |
           set -uo pipefail
-          out="$(sudo systemd-analyze verify "${GITHUB_WORKSPACE}/packaging/systemd/tetragon-relay.service" 2>&1)"
-          rc=$?
+          # The step shell runs with -e; capture rc explicitly so the
+          # output is always printed (run 45873245634 exited silently).
+          rc=0
+          out="$(sudo systemd-analyze verify "${GITHUB_WORKSPACE}/packaging/systemd/tetragon-relay.service" 2>&1)" || rc=$?
           printf '%s\n' "${out}"
           if [ "${rc}" -ne 0 ] || [ -n "${out}" ]; then
             echo "systemd-analyze verify reported problems (rc=${rc})" >&2
