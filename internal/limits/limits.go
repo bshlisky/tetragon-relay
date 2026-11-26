@@ -303,6 +303,19 @@ const (
 	// without completing Hello/HelloAck (step-06a-resume.md D3).
 	ControlConnectDegradedTimeout = 5 * time.Minute
 
+	// ControlConnectAttemptTimeout bounds one RealConnector.Connect
+	// attempt end to end (Dial through TLS through Hello/HelloAck;
+	// step-06a-e3-prompt.md R6A-4). Without it, a Connect attempt stuck
+	// anywhere in that sequence (a network black hole during the TCP/TLS
+	// handshake, or a controller that accepts the stream but never
+	// answers Hello) never returns, yet RunSession's own liveness touches
+	// (connectWithDegradedWatch's touchTicker) keep reporting progress
+	// regardless, so the watchdog never notices. Well under
+	// sessionLivenessMaxInterval (20 s, internal/agent) so a timed-out
+	// attempt, its backoff delay and the next attempt's own timeout all
+	// fit comfortably inside one liveness window with margin to spare.
+	ControlConnectAttemptTimeout = 8 * time.Second
+
 	// DefaultIdentityKeyRotation is identity.key_rotation's default
 	// when relay.yaml omits it. Intentionally the same value as
 	// internal/identity.DefaultRotationInterval (architecture doc

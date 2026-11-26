@@ -11,11 +11,14 @@ import (
 	"math/big"
 	"net"
 	"net/url"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	controlv1 "github.com/bshlisky/tetragon-relay/api/relay/control/v1"
 	"github.com/bshlisky/tetragon-relay/internal/controlclient"
+	"github.com/bshlisky/tetragon-relay/internal/limits"
 	"github.com/bshlisky/tetragon-relay/internal/testcontroller"
 	"google.golang.org/grpc"
 )
@@ -194,5 +197,117 @@ func TestRealConnector_RetriesHelloRejectionWithBackoff(t *testing.T) {
 	}
 	if touches == 0 {
 		t.Fatal("touch was never called; the retry/backoff path (sleepWithTouch) was not exercised")
+	}
+}
+
+// TestRealConnector_StuckAttemptTimesOutAndRetries is R6A-4's own test
+// (step-06a-e3-prompt.md): the first endpoint is a raw TCP listener that
+// accepts every connection and then never speaks (no TLS handshake, no
+// bytes at all) -- a Connector that, before R6A-4, would block forever
+// inside controlclient.Dial's WaitForStateChange. It asserts the first
+// attempt fails and backs off within a bounded window around
+// limits.ControlConnectAttemptTimeout (never instantly, never anywhere
+// close to hanging forever), and that the second attempt (a real
+// endpoint c.Config switches to after the first call) succeeds.
+func TestRealConnector_StuckAttemptTimesOutAndRetries(t *testing.T) {
+	blackHole, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen (black hole): %v", err)
+	}
+	var acceptedMu sync.Mutex
+	var accepted []net.Conn
+	t.Cleanup(func() {
+		_ = blackHole.Close()
+		acceptedMu.Lock()
+		defer acceptedMu.Unlock()
+		for _, c := range accepted {
+			_ = c.Close()
+		}
+	})
+	go func() {
+		for {
+			conn, aerr := blackHole.Accept()
+			if aerr != nil {
+				return
+			}
+			// Accept and hold the connection open; never read, write
+			// or close it. Simulates a network path that completes the
+			// TCP handshake but never progresses TLS.
+			acceptedMu.Lock()
+			accepted = append(accepted, conn)
+			acceptedMu.Unlock()
+		}
+	}()
+
+	ca := newConnectorTestCA(t)
+	controllerSPIFFE := "spiffe://" + connectorTestTrustDomain + "/mgmt/controller"
+	serverCert := ca.issue(t, controllerSPIFFE, x509.ExtKeyUsageServerAuth)
+	hostUUID := "33333333-3333-3333-3333-333333333333"
+	clientCert := ca.issue(t, "spiffe://"+connectorTestTrustDomain+"/host/"+hostUUID, x509.ExtKeyUsageClientAuth)
+
+	realAddr := startConnectorTestServer(t, testcontroller.Config{
+		TrustDomain: connectorTestTrustDomain, ServerCertificate: serverCert,
+		ClientCABundle: []*x509.Certificate{ca.cert}, HeartbeatIntervalSeconds: 15,
+		// A Script that blocks until the stream's context is done (rather
+		// than nil/DoNothingScript, both of which return immediately and
+		// so close the stream right after HelloAck): this test needs the
+		// stream to stay open past limits.ControlConnectAttemptTimeout so
+		// it can confirm the deadline was disarmed on success, not just
+		// that Connect itself returned.
+		Script: func(ctx context.Context, _ testcontroller.ScriptStream, _ string) error {
+			<-ctx.Done()
+			return nil
+		},
+	})
+
+	var configCalls int32
+	connector := &RealConnector{
+		Config: func() controlclient.Config {
+			ep := realAddr
+			if atomic.AddInt32(&configCalls, 1) == 1 {
+				ep = blackHole.Addr().String()
+			}
+			return controlclient.Config{
+				Endpoints: []string{ep}, ControllerSPIFFEID: controllerSPIFFE,
+				ControllerCABundle: []*x509.Certificate{ca.cert}, ClientCertificate: clientCert, Clock: time.Now,
+			}
+		},
+		Rand: func() float64 { return 0 },
+	}
+
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), limits.ControlConnectAttemptTimeout*3)
+	defer cancel()
+	stream, closeFn, err := connector.Connect(ctx, func() controlclient.HelloFields {
+		return controlclient.HelloFields{HostUUID: hostUUID, AgentVersion: "test"}
+	}, func() {})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Connect: %v (elapsed %v)", err, elapsed)
+	}
+	defer func() { _ = closeFn() }()
+	if stream == nil {
+		t.Fatal("Connect returned a nil stream on success")
+	}
+	if atomic.LoadInt32(&configCalls) < 2 {
+		t.Fatalf("Config called %d times, want >= 2 (the black-holed first attempt must have failed and retried)", configCalls)
+	}
+	if elapsed < limits.ControlConnectAttemptTimeout {
+		t.Fatalf("Connect returned after only %v; the first (black-holed) attempt should have taken at least limits.ControlConnectAttemptTimeout (%v)", elapsed, limits.ControlConnectAttemptTimeout)
+	}
+	if elapsed > limits.ControlConnectAttemptTimeout*3 {
+		t.Fatalf("Connect took %v; a stuck attempt should fail and move on well before the test's own overall ctx timeout", elapsed)
+	}
+
+	// Confirm the deadline that bounded the first, failed attempt did
+	// not leak onto this successful attempt's own, now-live stream: wait
+	// past another full limits.ControlConnectAttemptTimeout window and
+	// prove the stream is still usable.
+	time.Sleep(limits.ControlConnectAttemptTimeout + time.Second)
+	if serr := stream.Send(&controlv1.AgentMessage{
+		Seq:  2,
+		Body: &controlv1.AgentMessage_Heartbeat{Heartbeat: &controlv1.Heartbeat{}},
+	}); serr != nil {
+		t.Fatalf("stream.Send after the attempt deadline elapsed: %v (the deadline leaked onto the established stream)", serr)
 	}
 }

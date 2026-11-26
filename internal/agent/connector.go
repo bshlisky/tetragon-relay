@@ -7,6 +7,7 @@ import (
 
 	controlv1 "github.com/bshlisky/tetragon-relay/api/relay/control/v1"
 	"github.com/bshlisky/tetragon-relay/internal/controlclient"
+	"github.com/bshlisky/tetragon-relay/internal/limits"
 )
 
 // ControlStream is the subset of controlv1.AgentControl_ConnectClient
@@ -80,29 +81,60 @@ func (c *RealConnector) Connect(ctx context.Context, hello func() controlclient.
 	}
 	appAttempt := 0
 	for {
-		conn, err := controlclient.Dial(ctx, c.Config())
-		if err != nil {
-			// Dial only returns an error when ctx is done (it retries
-			// connectivity failures forever internally); nothing left
-			// to do but propagate that.
-			return nil, nil, err
+		stream, closer, err := c.connectOnce(ctx, hello)
+		if err == nil {
+			return stream, closer, nil
 		}
-		stream, cerr := controlclient.AgentControlClient(conn).Connect(ctx)
-		if cerr == nil {
-			var ack *controlv1.HelloAck
-			ack, cerr = controlclient.SendHello(stream, 1, hello())
-			if cerr == nil {
-				_ = ack // PCR re-attestation (the quote over this nonce) is a later step; step-06a scope stops at HelloAck.
-				return stream, conn.Close, nil
-			}
+		if ctx.Err() != nil {
+			// Connect is done, not merely this attempt's deadline:
+			// nothing left to retry.
+			return nil, nil, ctx.Err()
 		}
-		_ = conn.Close()
 		delay := controlclient.DialBackoff(appAttempt, randFn())
 		appAttempt++
 		if !sleepWithTouch(ctx, delay, touch) {
 			return nil, nil, ctx.Err()
 		}
 	}
+}
+
+// connectOnce runs exactly one Dial-through-Hello/HelloAck attempt
+// under limits.ControlConnectAttemptTimeout (R6A-4): without a bound
+// here, an attempt stuck anywhere in that sequence (a black-holed dial,
+// a controller that opens the stream but never answers Hello) would
+// never return, yet connectWithDegradedWatch's own touch ticker keeps
+// reporting progress regardless, so neither the liveness watchdog nor
+// RunSession's reconnect/backoff bookkeeping would ever notice. The
+// deadline is attached via context.WithCancel plus a disarmable
+// time.AfterFunc rather than context.WithTimeout, so a successful
+// attempt's returned stream is NOT later torn down when the deadline
+// would otherwise have fired -- attemptCtx stays derived from (and so
+// still responds to cancellation of) the caller's ctx for the stream's
+// entire remaining lifetime.
+func (c *RealConnector) connectOnce(ctx context.Context, hello func() controlclient.HelloFields) (ControlStream, func() error, error) {
+	attemptCtx, cancel := context.WithCancel(ctx)
+	deadline := time.AfterFunc(limits.ControlConnectAttemptTimeout, cancel)
+
+	conn, err := controlclient.Dial(attemptCtx, c.Config())
+	if err != nil {
+		deadline.Stop()
+		cancel()
+		return nil, nil, err
+	}
+	stream, cerr := controlclient.AgentControlClient(conn).Connect(attemptCtx)
+	if cerr == nil {
+		var ack *controlv1.HelloAck
+		ack, cerr = controlclient.SendHello(stream, 1, hello())
+		if cerr == nil {
+			_ = ack         // PCR re-attestation (the quote over this nonce) is a later step; step-06a scope stops at HelloAck.
+			deadline.Stop() // disarm: the attempt succeeded, so the deadline must never cancel the now-live stream.
+			return stream, conn.Close, nil
+		}
+	}
+	deadline.Stop()
+	cancel()
+	_ = conn.Close()
+	return nil, nil, cerr
 }
 
 // sleepWithTouch blocks for delay (or until ctx is done, returning
