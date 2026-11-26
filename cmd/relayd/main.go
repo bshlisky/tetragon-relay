@@ -23,6 +23,7 @@ import (
 
 	"github.com/bshlisky/tetragon-relay/internal/agent"
 	"github.com/bshlisky/tetragon-relay/internal/apply"
+	"github.com/bshlisky/tetragon-relay/internal/audit"
 	"github.com/bshlisky/tetragon-relay/internal/config"
 	"github.com/bshlisky/tetragon-relay/internal/controlclient"
 	"github.com/bshlisky/tetragon-relay/internal/hostprobe"
@@ -65,11 +66,42 @@ func main() {
 		return
 	}
 
-	auditor := &agent.FakeAuditor{} // step 6a: no off-host audit sink yet (architecture doc section 10 is step 7)
+	// step-06a-e3-prompt.md: every build (production included) now has
+	// a real local audit sink (internal/audit, ADR 0033): one JSON line
+	// per record on stderr, which systemd's own default (no
+	// StandardError= override in packaging/systemd/tetragon-relay.service)
+	// already forwards to the journal. C4 forbids this from being a
+	// testca/testtpm-only behavior difference, so it is wired here,
+	// unconditionally, before anything else in main can fail.
+	jsonAuditor, err := audit.NewJSONAuditor(os.Stderr, time.Now)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "relayd: new audit sink: %v\n", err)
+		os.Exit(1)
+	}
+	auditor := &agentAuditor{inner: jsonAuditor}
 	if err := run(*configPath, *tpmDevice, auditor); err != nil {
 		fmt.Fprintf(os.Stderr, "relayd: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// agentAuditor adapts internal/audit.JSONAuditor (Record(audit.Event))
+// to agent.Auditor (Record(agent.AuditEvent)) -- the same small,
+// package-local adapter pattern engineAuditorAdapter below already uses
+// to bridge agent.Auditor to apply.Auditor.
+type agentAuditor struct {
+	inner *audit.JSONAuditor
+}
+
+func (a *agentAuditor) Record(e agent.AuditEvent) {
+	a.inner.Record(audit.Event{Step: e.Step, Detail: e.Detail, Err: errString(e.Err)})
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // run implements Part C1's startup sequence, in order: config, crypto
@@ -87,7 +119,7 @@ func main() {
 // exactly the "never skip checks" property architecture doc 8.3 asks for.
 // Reconcile scheduling (retrying a degraded Tetragon/controller connection
 // without restarting the whole process) is explicitly step 6b's job.
-func run(configPath, tpmDevicePath string, auditor agent.Auditor) error {
+func run(configPath, tpmDevicePath string, auditor *agentAuditor) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
@@ -157,7 +189,7 @@ func run(configPath, tpmDevicePath string, auditor agent.Auditor) error {
 	}
 	defer func() { _ = tetraClient.Close() }()
 
-	engine := apply.NewEngine(tetraClient, apply.RealPolicyParser{}, startupResult.Store, noopReachability{}, &engineAuditorAdapter{auditor}, apply.Config{
+	engine := apply.NewEngine(tetraClient, apply.RealPolicyParser{}, startupResult.Store, noopReachability{}, &engineAuditorAdapter{auditor.inner}, apply.Config{
 		PersistDir: cfg.PersistDir,
 		HealthWindow: apply.HealthWindowConfig{
 			Window:         cfg.HealthWindow,
@@ -395,17 +427,14 @@ type noopReachability struct{}
 
 func (noopReachability) Reachable(context.Context) bool { return false }
 
-// engineAuditorAdapter adapts agent.Auditor (Step/Detail/Err) to
-// apply.Auditor (Step/Detail/Err/Domain/Policy): the two interfaces are
-// structurally close but not identical (apply.AuditEvent carries two
-// extra fields this adapter leaves zero), matching this project's
-// existing convention of small, package-local adapters rather than
-// unifying the two Auditor shapes across packages that are otherwise
-// deliberately decoupled.
+// engineAuditorAdapter adapts apply.Auditor (Step/Detail/Err/Domain/
+// Policy) to internal/audit.Sink's Event shape, which already carries
+// all five fields -- unlike agentAuditor above (agent.AuditEvent has no
+// Domain/Policy), this adapter loses nothing.
 type engineAuditorAdapter struct {
-	inner agent.Auditor
+	inner *audit.JSONAuditor
 }
 
 func (a *engineAuditorAdapter) Record(e apply.AuditEvent) {
-	a.inner.Record(agent.AuditEvent{Step: e.Step, Detail: e.Detail, Err: e.Err})
+	a.inner.Record(audit.Event{Step: e.Step, Detail: e.Detail, Err: errString(e.Err), Domain: e.Domain, Policy: e.Policy})
 }

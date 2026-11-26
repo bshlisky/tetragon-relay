@@ -38,7 +38,7 @@ coverage:
 	done; \
 	exit $$fail
 
-COVER90_PKGS := internal/tetra internal/apply internal/hostprobe internal/agent internal/identity internal/controlclient internal/config
+COVER90_PKGS := internal/tetra internal/apply internal/hostprobe internal/agent internal/identity internal/controlclient internal/config internal/audit
 
 .PHONY: coverage90
 coverage90:

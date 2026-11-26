@@ -316,6 +316,25 @@ const (
 	// fit comfortably inside one liveness window with margin to spare.
 	ControlConnectAttemptTimeout = 8 * time.Second
 
+	// --- internal/audit: architecture doc 8.3's `audit` module ---
+
+	// MaxAuditFieldBytes bounds each individual string field (Step,
+	// Detail, Err, Domain, Policy) of a single audit.Event before it is
+	// marshaled. A legitimate field is a short identifier or a brief
+	// human-readable message (MaxReasonBytes-ish, with headroom for a
+	// wrapped error chain's own text); this is a defensive cap against
+	// a caller accidentally (or a compromised component deliberately)
+	// stuffing a large payload -- e.g. an envelope or policy YAML --
+	// into what is supposed to be a short descriptive field.
+	MaxAuditFieldBytes = 512
+	// MaxAuditLineBytes bounds the total length of one marshaled JSON
+	// audit line (every field above, plus JSON structure/escaping
+	// overhead and the timestamp). Generous headroom over
+	// 5*MaxAuditFieldBytes plus overhead, so legitimate records are
+	// never truncated at the line level in practice; MaxAuditFieldBytes
+	// is the cap that actually bites.
+	MaxAuditLineBytes = 4096
+
 	// DefaultIdentityKeyRotation is identity.key_rotation's default
 	// when relay.yaml omits it. Intentionally the same value as
 	// internal/identity.DefaultRotationInterval (architecture doc
