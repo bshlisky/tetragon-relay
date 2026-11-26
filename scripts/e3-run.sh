@@ -295,7 +295,8 @@ run_testenroll() {
 		--controller-spiffe-id "${CONTROLLER_SPIFFE}"
 	sudo cp /tmp/e3-ca.pem "${CA_CERT}"
 	sudo chmod 0644 "${CA_CERT}"
-	mkdir -p -m 0700 "${CONTROLLER_DIR}"
+	mkdir -p "${CONTROLLER_DIR}"
+	chmod 0700 "${CONTROLLER_DIR}"
 	sudo install -o "$(id -u)" -g "$(id -g)" -m 0644 /tmp/e3-controller-cert.pem "${CONTROLLER_CERT}"
 	sudo install -o "$(id -u)" -g "$(id -g)" -m 0600 /tmp/e3-controller-key.pem "${CONTROLLER_KEY}"
 	sudo rm -f /tmp/e3-controller-key.pem
