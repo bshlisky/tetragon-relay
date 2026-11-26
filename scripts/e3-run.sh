@@ -321,6 +321,20 @@ scenario_journal() {
 	sudo journalctl -u "${UNIT}" --since "${SCENARIO_SINCE}" --no-pager
 }
 
+# no_sandbox_read_failures: ADR 0034 / step-06a-e3-decisions.md D3
+# evidence. Under the real unit (ProcSubset=pid, ProtectProc=invisible,
+# ProtectSystem=strict) relayd must have accepted the host facts
+# (no "host_facts" fail-closed record: the file is root-owned 0640 on the
+# /run tmpfs) and read /proc/self/exe (no "agent_build_digest" record).
+no_sandbox_read_failures() {
+	local j
+	j=$(scenario_journal)
+	if grep -E '"step":"(host_facts|host_facts_boot_id|agent_build_digest)"' <<<"${j}"; then
+		echo "relayd reported a host-facts or /proc read failure under the unit" >&2
+		return 1
+	fi
+}
+
 # host_facts_written: the second ExecStartPre=+ line wrote host facts
 # for this start (RuntimeDirectory= is removed on stop, so a file here
 # is from the current start).
@@ -343,6 +357,7 @@ scenario_s1() {
 		sleep 3
 		sudo systemctl is-active --quiet "${UNIT}" || ok=false
 		host_facts_written || { echo "host facts missing" >&2; ok=false; }
+		no_sandbox_read_failures || ok=false
 	fi
 	check_baseline_unchanged || ok=false
 	scenario_journal
@@ -393,6 +408,7 @@ scenario_s3() {
 	start_unit || ok=false
 	wait "${ctrl_pid}" || ok=false
 	cat /tmp/e3controller-s3.log
+	no_sandbox_read_failures || ok=false
 	check_baseline_unchanged || ok=false
 	scenario_journal
 	stop_unit

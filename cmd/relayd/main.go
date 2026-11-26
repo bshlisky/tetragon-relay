@@ -157,26 +157,24 @@ func run(configPath, tpmDevicePath string, auditor *agentAuditor) error {
 	defer func() { _ = startupResult.Store.Close() }()
 
 	// Part C1: host facts, refusing enforcement bundles if missing or
-	// stale (hostprobe.Load already fails closed on exactly that;
-	// consuming its Capabilities into guard-rail decisions is 6b's
-	// bundle-processing job).
+	// stale (hostprobe.Load fails closed; consuming its Capabilities into
+	// guard-rail decisions is 6b's bundle-processing job).
 	//
-	// R6A-2: CurrentBootID's own error (e.g. /proc/sys/kernel/random/
-	// boot_id unreadable) used to be silently discarded; it is now a
-	// named audit record, since an operator trying to understand why
-	// every enforcement bundle is being rejected needs to know whether
-	// the cause was a stale probe (the branch below) or the agent
-	// itself being unable to even determine the current boot. Either
-	// way Load already fails closed (bootID == "" never matches a
-	// facts file's own BootID), so this is diagnostics only -- it does
-	// not change Load's fail-closed behavior.
-	bootID, bootIDErr := hostprobe.CurrentBootID()
-	if bootIDErr != nil {
-		auditor.Record(agent.AuditEvent{Step: "host_facts_boot_id", Detail: "failed to read the current boot_id; host facts will be treated as stale until this succeeds", Err: bootIDErr})
+	// ADR 0034 (docs/reviews/step-06a-e3-decisions.md D3): relayd never
+	// reads /proc/sys/kernel/random/boot_id (ProcSubset=pid hides it; E3
+	// run 45858158620). Freshness is Load's tmpfs/root-owned/0640 rule,
+	// and the boot_id for Hello and telemetry is the one relay-probe
+	// recorded this boot. If the facts are not fresh there is no
+	// trustworthy boot_id, so Hello carries none (an empty string), and
+	// the audit record below says why.
+	hostCaps, factsErr := hostprobe.Load(hostprobe.HostFactsPath)
+	fresh := factsErr == nil
+	bootID := ""
+	if facts, ok := hostCaps.Facts(); ok {
+		bootID = facts.BootID
 	}
-	hostCaps, fresh := hostprobe.Load(hostprobe.HostFactsPath, bootID)
 	if !fresh {
-		auditor.Record(agent.AuditEvent{Step: "host_facts", Detail: "host facts missing or stale; enforcement bundles will be rejected (REJECTED_CAPABILITY) once step 6b processes bundles"})
+		auditor.Record(agent.AuditEvent{Step: "host_facts", Detail: "host facts missing or stale; enforcement bundles will be rejected (REJECTED_CAPABILITY) once step 6b processes bundles", Err: factsErr})
 	}
 
 	tetraClient, err := tetra.Dial(context.Background(), tetra.Config{
@@ -286,7 +284,13 @@ func run(configPath, tpmDevicePath string, auditor *agentAuditor) error {
 		return fmt.Errorf("new control loop: %w", err)
 	}
 
-	buildDigest, _ := agentBuildDigest() // best-effort; see buildHelloFields
+	// Best-effort (see buildHelloFields), but never silent: a failure is
+	// audited, so E3 can show /proc/self/exe is readable under the unit's
+	// ProcSubset=pid/ProtectProc=invisible (step-06a-e3-decisions.md D3).
+	buildDigest, digestErr := agentBuildDigest()
+	if digestErr != nil {
+		auditor.Record(agent.AuditEvent{Step: "agent_build_digest", Detail: "could not hash /proc/self/exe; Hello will carry no agent_build_digest", Err: digestErr})
+	}
 
 	sessionCfg := agent.SessionConfig{
 		Connector: &agent.RealConnector{

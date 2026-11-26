@@ -2,6 +2,7 @@ package hostprobe
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -41,105 +42,90 @@ func writeFacts(t *testing.T, dir string, f *HostFacts) string {
 	return p
 }
 
-func TestLoad_Valid(t *testing.T) {
-	dir := t.TempDir()
-	p := writeFacts(t, dir, validFacts("boot-a"))
+// goodStat is what platformStatOpenFile reports for the file
+// cmd/relay-probe writes under /run in production.
+var goodStat = fileInfo{regular: true, uid: 0, perm: HostFactsMode, onTmpfs: true}
 
-	c, ok := Load(p, "boot-a")
-	if !ok {
-		t.Fatal("Load reported failure for a valid, fresh facts file")
+// withStat makes Load see info for every file it opens in this test, so
+// each branch of ADR 0034's freshness rule is testable without root or
+// tmpfs. TestPlatformStatOpenFile_Linux covers the real fstat/fstatfs.
+func withStat(t *testing.T, info fileInfo) {
+	t.Helper()
+	restore := statOpenFile
+	statOpenFile = func(*os.File) (fileInfo, error) { return info, nil }
+	t.Cleanup(func() { statOpenFile = restore })
+}
+
+func TestLoad_Valid(t *testing.T) {
+	withStat(t, goodStat)
+	p := writeFacts(t, t.TempDir(), validFacts("boot-a"))
+
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
 	}
 	if !c.KprobeOverride() || !c.LSMBPF() || !c.UsrmergeOK() {
 		t.Fatalf("capabilities not reported as available: %+v", c)
 	}
 	facts, ok := c.Facts()
-	if !ok || facts.KernelRelease != "5.14.0-500.el9.x86_64" {
+	if !ok || facts.KernelRelease != "5.14.0-500.el9.x86_64" || facts.BootID != "boot-a" {
 		t.Fatalf("Facts() = %+v, %v", facts, ok)
 	}
 }
 
 func TestLoad_FailsClosed(t *testing.T) {
 	dir := t.TempDir()
+	writeRaw := func(t *testing.T, name, raw string) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(raw), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	valid := writeFacts(t, dir, validFacts("boot-a"))
+	wrongSchema := validFacts("boot-a")
+	wrongSchema.SchemaVersion = 999
+	noBoot := validFacts("")
+
 	cases := []struct {
 		name string
+		stat fileInfo
 		path string
-		boot string
+		want error
 	}{
-		{"missing_file", filepath.Join(dir, "does-not-exist.json"), "boot-a"},
+		{"missing_file", goodStat, filepath.Join(dir, "does-not-exist.json"), ErrHostFactsUnreadable},
+		{"not_regular", fileInfo{regular: false, uid: 0, perm: HostFactsMode, onTmpfs: true}, valid, ErrHostFactsNotRegular},
+		{"not_tmpfs", fileInfo{regular: true, uid: 0, perm: HostFactsMode, onTmpfs: false}, valid, ErrHostFactsNotTmpfs},
+		{"not_root_owned", fileInfo{regular: true, uid: 1000, perm: HostFactsMode, onTmpfs: true}, valid, ErrHostFactsOwner},
+		{"mode_0644", fileInfo{regular: true, uid: 0, perm: 0o644, onTmpfs: true}, valid, ErrHostFactsMode},
+		{"mode_setgid", fileInfo{regular: true, uid: 0, perm: HostFactsMode | os.ModeSetgid, onTmpfs: true}, valid, ErrHostFactsMode},
+		{"wrong_schema_version", goodStat, writeFacts(t, t.TempDir(), wrongSchema), ErrHostFactsSchema},
+		{"empty_boot_id", goodStat, writeFacts(t, t.TempDir(), noBoot), ErrHostFactsNoBootID},
+		{"corrupt_json", goodStat, writeRaw(t, "corrupt.json", "{not valid json"), ErrHostFactsMalformed},
+		{"duplicate_key_rejected", goodStat, writeRaw(t, "dup.json", `{"schema_version":1,"boot_id":"boot-a","boot_id":"boot-b"}`), ErrHostFactsMalformed},
+		{"unknown_field_rejected", goodStat, writeRaw(t, "unknown.json", `{"schema_version":1,"boot_id":"boot-a","totally_unknown_field":true}`), ErrHostFactsMalformed},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c, ok := Load(tc.path, tc.boot)
-			if ok {
-				t.Fatal("Load reported success for a missing file")
+			withStat(t, tc.stat)
+			c, err := Load(tc.path)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("Load error = %v, want %v", err, tc.want)
 			}
 			assertFailClosed(t, c)
 		})
 	}
 
-	t.Run("stale_boot_id", func(t *testing.T) {
-		p := writeFacts(t, dir, validFacts("boot-old"))
-		c, ok := Load(p, "boot-new")
-		if ok {
-			t.Fatal("Load reported success for a stale boot_id")
-		}
-		assertFailClosed(t, c)
-	})
-
-	t.Run("empty_current_boot_id", func(t *testing.T) {
-		p := writeFacts(t, dir, validFacts("boot-a"))
-		c, ok := Load(p, "")
-		if ok {
-			t.Fatal("Load reported success with an empty current boot_id")
-		}
-		assertFailClosed(t, c)
-	})
-
-	t.Run("wrong_schema_version", func(t *testing.T) {
-		f := validFacts("boot-a")
-		f.SchemaVersion = 999
-		p := writeFacts(t, dir, f)
-		c, ok := Load(p, "boot-a")
-		if ok {
-			t.Fatal("Load reported success for an unsupported schema version")
-		}
-		assertFailClosed(t, c)
-	})
-
-	t.Run("corrupt_json", func(t *testing.T) {
-		p := filepath.Join(dir, "corrupt.json")
-		if err := os.WriteFile(p, []byte("{not valid json"), 0o640); err != nil {
+	t.Run("symlink_not_followed", func(t *testing.T) {
+		withStat(t, goodStat)
+		link := filepath.Join(dir, "link.json")
+		if err := os.Symlink(valid, link); err != nil {
 			t.Fatal(err)
 		}
-		c, ok := Load(p, "boot-a")
-		if ok {
-			t.Fatal("Load reported success for corrupt JSON")
-		}
-		assertFailClosed(t, c)
-	})
-
-	t.Run("duplicate_key_rejected", func(t *testing.T) {
-		p := filepath.Join(dir, "dup.json")
-		raw := `{"schema_version":1,"boot_id":"boot-a","boot_id":"boot-b"}`
-		if err := os.WriteFile(p, []byte(raw), 0o640); err != nil {
-			t.Fatal(err)
-		}
-		c, ok := Load(p, "boot-a")
-		if ok {
-			t.Fatal("Load reported success for a duplicate-key JSON document")
-		}
-		assertFailClosed(t, c)
-	})
-
-	t.Run("unknown_field_rejected", func(t *testing.T) {
-		p := filepath.Join(dir, "unknown.json")
-		raw := `{"schema_version":1,"boot_id":"boot-a","totally_unknown_field":true}`
-		if err := os.WriteFile(p, []byte(raw), 0o640); err != nil {
-			t.Fatal(err)
-		}
-		c, ok := Load(p, "boot-a")
-		if ok {
-			t.Fatal("Load reported success for a document with an unknown field")
+		c, err := Load(link)
+		if !errors.Is(err, ErrHostFactsUnreadable) {
+			t.Fatalf("Load(symlink) error = %v, want ErrHostFactsUnreadable (O_NOFOLLOW)", err)
 		}
 		assertFailClosed(t, c)
 	})
