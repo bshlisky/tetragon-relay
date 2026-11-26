@@ -701,3 +701,25 @@ func mustMarshalIndexFile(t *testing.T, idx indexFile) []byte {
 	}
 	return b
 }
+
+// ADR 0035: a persisted revoked marker is validated on load too.
+func TestVerifyIndexLimits_RevokedMarker(t *testing.T) {
+	base := func() indexPayload {
+		return indexPayload{Schema: indexSchema, Generation: 1, Epochs: map[string]uint64{}, History: map[string][]string{}, LKG: map[string]lkgEntry{}}
+	}
+	p := base()
+	p.Revoked = &revokedMarker{Reason: "x"}
+	if err := verifyIndexLimits(p); !errors.Is(err, ErrTampered) {
+		t.Fatalf("zero-time marker: %v, want ErrTampered", err)
+	}
+	p = base()
+	p.Revoked = &revokedMarker{At: time.Unix(1, 0), Reason: strings.Repeat("a", limits.MaxRevokedReasonBytes+1)}
+	if err := verifyIndexLimits(p); !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("long reason: %v, want ErrLimitExceeded", err)
+	}
+	p = base()
+	p.Revoked = &revokedMarker{At: time.Unix(1, 0), Reason: "ok"}
+	if err := verifyIndexLimits(p); err != nil {
+		t.Fatalf("valid marker: %v", err)
+	}
+}

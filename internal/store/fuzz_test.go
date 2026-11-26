@@ -19,12 +19,12 @@ func FuzzStoreIndex(f *testing.F) {
 	// field populated, including the new ADR 0025 TrustRootHistory map),
 	// plus a handful of small, hand-built or malformed variants.
 	f.Add(mustMarshalRealIndexFileForFuzz(f))
-	f.Add([]byte(`{"payload":{"schema":"relay.store.index.v1","generation":1,"epochs":{},"history":{},"lkg":{}},"hmac":"00"}`))
+	f.Add([]byte(`{"payload":{"schema":"relay.store.index.v2","generation":1,"epochs":{},"history":{},"lkg":{}},"hmac":"00"}`))
 	f.Add([]byte(`{"payload":{"schema":"wrong","generation":1,"epochs":{},"history":{},"lkg":{}},"hmac":"ab"}`))
 	f.Add([]byte(`{}`))
 	f.Add([]byte(`not json at all`))
 	f.Add([]byte(``))
-	f.Add([]byte(`{"payload":{"schema":"relay.store.index.v1","generation":0,"epochs":{"a":1},"history":{"b":["c","d"]},"lkg":{"d":{"blob_digest":"x","mode":"enforce","root_version":1}},"trust_root":{"version":1,"blob_digest":"y"},"trust_root_history":{"1":{"version":1,"blob_digest":"y"}}},"hmac":"deadbeef"}`))
+	f.Add([]byte(`{"payload":{"schema":"relay.store.index.v2","generation":0,"epochs":{"a":1},"history":{"b":["c","d"]},"lkg":{"d":{"blob_digest":"x","mode":"enforce","root_version":1}},"trust_root":{"version":1,"blob_digest":"y"},"trust_root_history":{"1":{"version":1,"blob_digest":"y"}}},"hmac":"deadbeef"}`))
 
 	f.Fuzz(func(t *testing.T, raw []byte) {
 		defer func() {

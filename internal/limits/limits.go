@@ -202,6 +202,12 @@ const (
 	// framing.
 	MaxStoreBlobBytes = 2 << 20 // 2 MiB
 
+	// MaxRevokedReasonBytes bounds the reason text in internal/store's
+	// persisted REVOKED marker (docs/reviews/step-06a-e3-decisions.md
+	// D2). internal/agent truncates the controller's Terminate detail to
+	// fit; the store rejects anything longer, on write and on load.
+	MaxRevokedReasonBytes = 256
+
 	// MaxStoreTotalBlobBytes bounds the sum of every live (referenced)
 	// blob's size: one LKG blob per domain plus one trust-root blob,
 	// each at most MaxStoreBlobBytes, times a generous fixed number of

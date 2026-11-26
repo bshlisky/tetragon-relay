@@ -7,13 +7,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/bshlisky/tetragon-relay/internal/limits"
 	"github.com/bshlisky/tetragon-relay/internal/strictjson"
 )
 
-// indexSchema is the required value of indexFile.Payload.Schema.
-const indexSchema = "relay.store.index.v1"
+// indexSchema is the required value of indexFile.Payload.Schema. v2 adds
+// the Revoked marker (ADR 0035). It was bumped in place with no
+// migration: no v1 store was ever deployed.
+const indexSchema = "relay.store.index.v2"
 
 // lkgEntry references one domain's persisted LKG blob. RootVersion
 // (ADR 0025, step-04b-review.md R4B-2) mirrors the blob's own
@@ -32,6 +35,13 @@ type lkgEntry struct {
 type trustRootEntry struct {
 	Version    uint64 `json:"version"`
 	BlobDigest string `json:"blob_digest"`
+}
+
+// revokedMarker is the persisted REVOKED state (ADR 0035): set once on
+// Terminate{REVOKED}, cleared only by operator re-enrollment.
+type revokedMarker struct {
+	At     time.Time `json:"at"`
+	Reason string    `json:"reason"`
 }
 
 // indexPayload is every field the HMAC in indexFile covers (step-04b.md
@@ -56,6 +66,9 @@ type indexPayload struct {
 	// currently-referenced set on every write (store.go's
 	// prunedRootHistory), so it never grows unbounded.
 	TrustRootHistory map[uint64]trustRootEntry `json:"trust_root_history,omitempty"`
+	// Revoked, if set, means the controller revoked this host (ADR 0035).
+	// It is part of the HMAC-covered payload like every other field.
+	Revoked *revokedMarker `json:"revoked,omitempty"`
 }
 
 // indexFile is the on-disk shape of the index file: the payload plus its
@@ -77,6 +90,7 @@ func canonicalPayloadBytes(p indexPayload) ([]byte, error) {
 		LKG:              p.LKG,
 		TrustRoot:        p.TrustRoot,
 		TrustRootHistory: p.TrustRootHistory,
+		Revoked:          p.Revoked,
 	}
 	if p.History != nil {
 		sorted.History = make(map[string][]string, len(p.History))
@@ -113,6 +127,14 @@ func verifyIndexLimits(p indexPayload) error {
 	for scope, names := range p.History {
 		if len(names) > limits.MaxStoreHistoryNamesPerScope {
 			return fmt.Errorf("%w: scope %q has %d history names, max %d", ErrLimitExceeded, scope, len(names), limits.MaxStoreHistoryNamesPerScope)
+		}
+	}
+	if p.Revoked != nil {
+		if p.Revoked.At.IsZero() {
+			return fmt.Errorf("%w: revoked marker has no time", ErrTampered)
+		}
+		if len(p.Revoked.Reason) > limits.MaxRevokedReasonBytes {
+			return fmt.Errorf("%w: revoked reason is %d bytes, max %d", ErrLimitExceeded, len(p.Revoked.Reason), limits.MaxRevokedReasonBytes)
 		}
 	}
 	if len(p.LKG) > limits.MaxStoreDomains {

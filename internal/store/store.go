@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/bshlisky/tetragon-relay/internal/apply"
 	"github.com/bshlisky/tetragon-relay/internal/limits"
@@ -387,6 +388,7 @@ func (s *Store) cloneCommitted() indexPayload {
 		LKG:              make(map[string]lkgEntry, len(s.committed.LKG)),
 		TrustRoot:        s.committed.TrustRoot,
 		TrustRootHistory: make(map[uint64]trustRootEntry, len(s.committed.TrustRootHistory)),
+		Revoked:          s.committed.Revoked,
 	}
 	for k, v := range s.committed.Epochs {
 		next.Epochs[k] = v
@@ -737,4 +739,66 @@ func (s *Store) Domains() ([]string, error) {
 		out = append(out, domain)
 	}
 	return out, nil
+}
+
+// --- persisted REVOKED (ADR 0035, step-06a-e3-decisions.md D2) ---
+
+// Revocation is the persisted REVOKED marker.
+type Revocation struct {
+	At     time.Time
+	Reason string
+}
+
+// Revocation returns the persisted REVOKED marker, if any.
+func (s *Store) Revocation() (Revocation, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.preflightLocked(); err != nil {
+		return Revocation{}, false, err
+	}
+	if s.committed.Revoked == nil {
+		return Revocation{}, false, nil
+	}
+	return Revocation{At: s.committed.Revoked.At, Reason: s.committed.Revoked.Reason}, true, nil
+}
+
+// MarkRevoked persists the REVOKED marker. at must be non-zero and reason
+// at most limits.MaxRevokedReasonBytes. If a marker is already persisted
+// it is kept unchanged (the first revocation's time and reason win) and
+// MarkRevoked returns nil.
+func (s *Store) MarkRevoked(at time.Time, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.preflightLocked(); err != nil {
+		return err
+	}
+	if at.IsZero() {
+		return fmt.Errorf("store: MarkRevoked: zero time")
+	}
+	if len(reason) > limits.MaxRevokedReasonBytes {
+		return fmt.Errorf("%w: revoked reason is %d bytes, max %d", ErrLimitExceeded, len(reason), limits.MaxRevokedReasonBytes)
+	}
+	if s.committed.Revoked != nil {
+		return nil
+	}
+	next := s.cloneCommitted()
+	next.Revoked = &revokedMarker{At: at.UTC(), Reason: reason}
+	return s.commitLocked(next)
+}
+
+// ClearRevocation removes the REVOKED marker. Only the operator
+// re-enrollment path (agent.Reenroller, ADR 0023) may call it; startup
+// and the session runner never do.
+func (s *Store) ClearRevocation() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.preflightLocked(); err != nil {
+		return err
+	}
+	if s.committed.Revoked == nil {
+		return nil
+	}
+	next := s.cloneCommitted()
+	next.Revoked = nil
+	return s.commitLocked(next)
 }
