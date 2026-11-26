@@ -417,17 +417,43 @@ scenario_s3() {
 
 # ---------------------------------------------------------------------
 # S4: Terminate{REVOKED} stops reconnecting; Tetragon keeps enforcing.
+# Runs LAST: the REVOKED marker is persisted in the store (ADR 0035) and
+# only operator re-enrollment clears it, so any scenario after S4 would
+# start parked. Mid-scenario relayd is restarted to prove the marker
+# survives a restart (D2), and the parked runner must keep the watchdog
+# fed (D1): no "Watchdog timeout" in S4's journal.
 # ---------------------------------------------------------------------
+wait_journal_step() {
+	local step="$1" timeout="$2"
+	for _ in $(seq 1 "${timeout}"); do
+		if scenario_journal | grep -q "\"step\":\"${step}\""; then
+			return 0
+		fi
+		sleep 1
+	done
+	echo "no ${step} record within ${timeout}s" >&2
+	return 1
+}
+
 scenario_s4() {
-	log "S4: Terminate{REVOKED} stops reconnecting"
+	log "S4: Terminate{REVOKED} stops reconnecting, across a restart"
 	write_dropins "e3.conf=$(e3_dropin)"
 	start_controller s4 --mode revoke --reconnect-assert-for 65s
 	ok=true
 	start_unit || ok=false
+	wait_journal_step revocation_persisted 20 || ok=false
+	sudo systemctl restart "${UNIT}" || ok=false
+	wait_journal_step revocation_restored 20 || ok=false
 	wait "${ctrl_pid}" || ok=false
 	cat /tmp/e3controller-s4.log
+	journal=$(scenario_journal)
+	echo "${journal}"
+	sudo systemctl is-active --quiet "${UNIT}" || { echo "relayd not running (parked) at the end of S4" >&2; ok=false; }
+	if grep -q 'Watchdog timeout' <<<"${journal}"; then
+		echo "systemd watchdog fired while REVOKED (D1)" >&2
+		ok=false
+	fi
 	check_baseline_unchanged || ok=false
-	scenario_journal
 	stop_unit
 	record_result S4 "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
 }
@@ -505,9 +531,9 @@ main() {
 		scenario_s2
 		if run_testenroll; then
 			scenario_s3
-			scenario_s4
 			scenario_s5
 			scenario_s6
+			scenario_s4 # last: revocation is terminal for this store (ADR 0035)
 		else
 			for s in S3 S4 S5 S6; do record_result "${s}" FAIL; done
 		fi
