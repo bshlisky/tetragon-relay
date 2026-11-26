@@ -46,8 +46,17 @@ TETRAGON_TP_DIR=/etc/tetragon/tetragon.tp.d/relay
 TETRAGON_SOCKET=/var/run/tetragon/tetragon.sock
 
 CONTROLLER_ADDR=127.0.0.1:18443
-CONTROLLER_CERT=${TRUST_DIR}/controller-cert.pem
-CONTROLLER_KEY=${TRUST_DIR}/controller-key.pem
+# The E3 test controller's own certificate and private key. They belong
+# to cmd/e3controller, which runs as this script's (runner) user, not to
+# relayd, so they live in a runner-owned directory outside
+# /etc/tetragon-relay: E3 run 45817131291 (S3, S4, S6) failed with
+# "open .../trust/controller-key.pem: permission denied" when the key was
+# root-owned 0600 under relayd's trust directory. relayd never needs the
+# controller's private key; under the unit's PrivateTmp=yes it cannot
+# even see this directory.
+CONTROLLER_DIR=/tmp/e3-controller
+CONTROLLER_CERT=${CONTROLLER_DIR}/controller-cert.pem
+CONTROLLER_KEY=${CONTROLLER_DIR}/controller-key.pem
 CONTROLLER_SPIFFE=spiffe://e3.tetragon-relay.internal/mgmt/controller
 TRUST_DOMAIN=e3.tetragon-relay.internal
 HOST_UUID=11111111-1111-1111-1111-111111111111
@@ -270,10 +279,11 @@ run_testenroll() {
 		--controller-key-out /tmp/e3-controller-key.pem \
 		--controller-spiffe-id "${CONTROLLER_SPIFFE}"
 	sudo cp /tmp/e3-ca.pem "${CA_CERT}"
-	sudo cp /tmp/e3-controller-cert.pem "${CONTROLLER_CERT}"
-	sudo cp /tmp/e3-controller-key.pem "${CONTROLLER_KEY}"
-	sudo chmod 0644 "${CA_CERT}" "${CONTROLLER_CERT}"
-	sudo chmod 0600 "${CONTROLLER_KEY}"
+	sudo chmod 0644 "${CA_CERT}"
+	mkdir -p -m 0700 "${CONTROLLER_DIR}"
+	sudo install -o "$(id -u)" -g "$(id -g)" -m 0644 /tmp/e3-controller-cert.pem "${CONTROLLER_CERT}"
+	sudo install -o "$(id -u)" -g "$(id -g)" -m 0600 /tmp/e3-controller-key.pem "${CONTROLLER_KEY}"
+	sudo rm -f /tmp/e3-controller-key.pem
 }
 
 # ---------------------------------------------------------------------
