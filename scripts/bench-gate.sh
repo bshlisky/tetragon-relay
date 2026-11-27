@@ -58,8 +58,8 @@ echo "== profiled pipeline runs ($events events; CPU and allocation profiles in 
 "$t" -test.run=NONE -test.bench='^BenchmarkPipeline5k$' -test.benchtime="${events}x" -test.cpuprofile "$out/cpu.out" | tee "$out/profiled.txt"
 "$t" -test.run=NONE -test.bench='^BenchmarkPipeline5k$' -test.benchtime="${events}x" -test.memprofile "$out/mem.out" -test.memprofilerate=4096 >/dev/null
 
-echo "== CPU profile, pipeline goroutines only (label pipeline=1), by cumulative time"
-go tool pprof -top -cum -nodecount=45 -tagfocus=pipeline=1 "$t" "$out/cpu.out" 2>/dev/null | tee "$out/cpu-pipeline-cum.txt" | head -60
+echo "== CPU profile, pipeline goroutines only (label component=telemetry), by cumulative time"
+go tool pprof -top -cum -nodecount=45 -tagfocus=component=telemetry "$t" "$out/cpu.out" 2>/dev/null | tee "$out/cpu-pipeline-cum.txt" | head -60
 echo "== CPU profile, whole process (GC workers included), flat"
 go tool pprof -top -nodecount=30 "$t" "$out/cpu.out" 2>/dev/null | tee "$out/cpu-all-flat.txt" | head -40
 echo "== allocations (alloc_space), pipeline"

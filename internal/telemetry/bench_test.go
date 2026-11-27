@@ -22,11 +22,11 @@ import (
 // input is pre-built: benchCorpus marshals a varied corpus before the
 // timer starts, and bytesSource only hands out those bytes. Decoding them
 // (what gRPC does on the GetEvents stream) is the pipeline's first stage.
-// Every pipeline goroutine runs under the pprof label pipeline=1 (labels
+// Every pipeline goroutine runs under the pprof label component=telemetry (labels
 // are inherited by the goroutines Run starts), so a CPU profile separates
 // them from the harness:
 //
-//	go tool pprof -tagfocus=pipeline=1 cpu.out
+//	go tool pprof -tagfocus=component=telemetry cpu.out
 //
 // cpu-ns/event is the process's CPU time (getrusage: user + system, every
 // thread, GC included) over the measured window divided by the events.
@@ -89,7 +89,7 @@ func BenchmarkPipeline5k(b *testing.B) {
 	runtime.GC()
 	b.ResetTimer()
 	cpu0 := cpuNow()
-	go pprof.Do(ctx, pprof.Labels("pipeline", "1"), func(ctx context.Context) { p.Run(ctx); close(done) })
+	go pprof.Do(ctx, pprof.Labels("component", "telemetry"), func(ctx context.Context) { p.Run(ctx); close(done) })
 	deadline := time.Now().Add(10 * time.Minute)
 	for col.events.Load() < uint64(b.N) || s.Stats().Backlog != 0 {
 		if time.Now().After(deadline) {
