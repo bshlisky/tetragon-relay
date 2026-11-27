@@ -55,7 +55,10 @@ telemetry pipeline (architecture section 10), not this stream.
 
 ### 1.5 `ApplyResult`, `control.proto:77-87`
 
-Sent once per bundle the agent processes (successfully or not). `status` is one of:
+Sent exactly once per `PolicyBundle` the agent receives, whatever the outcome, including
+a bundle superseded before it was applied (section 10). It may arrive long after the
+bundle: an apply includes the health window (up to 600 s), and an ApplyResult produced
+while the stream is down is sent after the next HelloAck. `status` is one of:
 
 ```
 APPLIED REJECTED_SIGNATURE REJECTED_TARGET REJECTED_EPOCH REJECTED_EXPIRED
@@ -241,9 +244,80 @@ forwarding, the full message loop) — do not use it as a reference for those.
 
 ## 9. What this repository does not implement yet (so you don't wait on it)
 
-- The full control message loop past Hello/HelloAck (heartbeats, `PolicyBundle` handling,
-  `TrustUpdate`, `RotateIdentity`, `Terminate` handling) — step 6.
+- `TrustUpdate` processing, reconcile scheduling and drift alerts (step 6b Parts C-E, in
+  progress; until then `TrustUpdate` is answered as in step 6a).
 - Remote attestation (`Hello.pcr_quote` is always empty from this repository today).
 - The production controller, gateway, signer and collector themselves — this repository only
   ever builds the agent, plus `cmd/testcontroller` (handshake-only test tooling) and this
   contract document.
+
+## 10. Bundle delivery (step 6b)
+
+Implemented in `internal/agent` (`applyworker.go`, `bundle.go`); design in
+`docs/decisions/0036-apply-worker-and-pending-bundle-slot.md`.
+
+### 10.1 What the agent does with a `PolicyBundle`
+
+1. The stream loop hands `PolicyBundle.envelope` (the exact bytes, never re-encoded) to
+   the agent's single apply worker and goes straight back to reading the stream. It does
+   **not** reply at this point. Heartbeats continue every 15 s throughout the apply,
+   including the health window, so the gateway must never treat a host as SILENT because a
+   bundle is being applied.
+2. The worker verifies the envelope (architecture 7.4) against the agent's current trust
+   root, persisted epoch and monitor history, the host's capability facts and the
+   compiled guardrails.
+3. If verification passes and the agent is in `STEADY` (or `SYNCING`), it enters
+   `APPLYING`, applies (architecture 7.7, add-before-remove, health window) and, **only
+   after the health window passes**, commits the new epoch, LKG and (for a monitor
+   bundle) monitor history to its store in one atomic write.
+4. It sends one `ApplyResult`.
+
+### 10.2 The pending-bundle rule
+
+The agent applies one bundle at a time and holds **at most one** bundle waiting:
+
+- A bundle that arrives while another is being applied is held in a single pending slot.
+- If a further bundle arrives before the pending one was started, the pending one is
+  replaced. The replaced bundle is answered at once with
+  `ApplyResult{status: REJECTED_EPOCH, detail: "superseded", bundle_digest: <its digest>, epoch: 0}`.
+  `epoch` is 0 because a superseded bundle is never verified, so nothing from its
+  payload is reported.
+- A pending bundle is verified when it is started, not when it arrived. A bundle whose
+  epoch was current on arrival but is no longer ahead once the apply in front of it
+  commits is rejected `REJECTED_EPOCH` (with a verification reason, not
+  `"superseded"`).
+
+A controller that wants a specific bundle applied should send only the newest one and
+wait for its `ApplyResult`; sending a series back to back is safe but wasteful.
+
+### 10.3 `ApplyResult` fields
+
+| Field | Value |
+| --- | --- |
+| `bundle_digest` | SHA-256 of the exact `PolicyBundle.envelope` bytes received. |
+| `epoch` | The bundle's epoch once its signature and payload verified; 0 when the bundle was rejected before its payload could be trusted (signature, schema, superseded, tampered store). |
+| `status` | Section 6, refined below. |
+| `detail` | At most 4 KiB, no secrets. For a verification rejection, `"<CODE>: <reason>"`; for a guardrail rejection the reason names the rule (`guardrail rejection: G5`). |
+| `loaded_digest_after` | Architecture 6.4's loaded digest, recomputed from Tetragon after the apply (empty for rejections that never reached Tetragon, and if Tetragon could not be listed). The same value the next Heartbeat carries. |
+
+Status refinements:
+
+| Situation | `status` | `detail` |
+| --- | --- | --- |
+| Store is TAMPERED (step 4b C6) | `REJECTED_EPOCH` | `store TAMPERED: every bundle is rejected until operator re-enrollment` |
+| Enforce bundle, host facts missing/stale or usrmerge check failed | `REJECTED_CAPABILITY` | names the reason |
+| Agent not in `STEADY`/`SYNCING` (e.g. `DEGRADED`, `DRIFT`) | `APPLY_FAILED` | `not applied: agent state <STATE> does not allow APPLYING` — resend after the host returns to steady state |
+| Tetragon loaded the bundle but the store commit failed | `APPLY_FAILED` | `loaded in Tetragon but the store commit failed; ...` — the host's epoch did not move; reconcile re-asserts the previous LKG |
+| Health window failed and the previous LKG was re-asserted | `ROLLED_BACK` | `rolled back: <reason>` — halt the rollout wave (architecture 7.7 step 8) |
+| Health window failed and re-asserting LKG also failed | `APPLY_FAILED` | `ROLLBACK_FAILED: ...`; the agent enters `DEGRADED` and raises `Alert{DRIFT}` |
+
+### 10.4 Alerts the agent sends today
+
+| Kind | When |
+| --- | --- |
+| `GUARDRAIL_REJECT` | A bundle was rejected `REJECTED_GUARDRAIL` or `REJECTED_CAPABILITY`; `detail` carries the bundle digest and rule ID. |
+| `DRIFT` | ROLLBACK_FAILED (above). Reconcile-driven drift alerts follow in step 6b Part D. |
+
+Every kind is rate-limited agent-side to one per 5 minutes (the first is always sent).
+Alerts and ApplyResults produced while disconnected are queued (at most 64; the oldest
+is dropped when full) and sent after the next HelloAck, before anything else.
