@@ -42,8 +42,8 @@ if [ -n "${BENCH_HISTORY:-}" ]; then
 		h="$out/history-$ref.test"
 		{
 			echo "### $label ($ref)"
-			"$h" -test.run=NONE -test.bench='^BenchmarkStage(Decode|Redact|Marshal|Compress)$' -test.benchtime=50000x | grep '^Benchmark' || true
-			"$h" -test.run=NONE -test.bench='^BenchmarkStageSpool$' -test.benchtime=300x | grep '^Benchmark' || true
+			"$h" -test.run=NONE -test.bench='^BenchmarkStage(Decode|Redact|Marshal)$' -test.benchtime=50000x | grep '^Benchmark' || true
+			"$h" -test.run=NONE -test.bench='^BenchmarkStage(Spool|Compress)$' -test.benchtime=300x | grep '^Benchmark' || true
 			"$h" -test.run=NONE -test.bench='^BenchmarkPipeline5k$' -test.benchtime="${events}x" -test.count=2 | grep '^Benchmark' || true
 		} | tee -a "$out/history.txt"
 		rm -f "$h"
@@ -51,8 +51,8 @@ if [ -n "${BENCH_HISTORY:-}" ]; then
 fi
 
 echo "== stage breakdown"
-"$t" -test.run=NONE -test.bench='^BenchmarkStage(Decode|Classify|Redact|Marshal|Compress)$' -test.benchtime=50000x | tee "$out/stages.txt"
-"$t" -test.run=NONE -test.bench='^BenchmarkStageSpool$' -test.benchtime=300x | tee -a "$out/stages.txt"
+"$t" -test.run=NONE -test.bench='^BenchmarkStage(Decode|Classify|Redact|Marshal)$' -test.benchtime=50000x | tee "$out/stages.txt"
+"$t" -test.run=NONE -test.bench='^BenchmarkStage(Spool|Compress)$' -test.benchtime=300x | tee -a "$out/stages.txt"
 
 echo "== profiled pipeline runs ($events events; CPU and allocation profiles in separate runs so one does not distort the other)"
 "$t" -test.run=NONE -test.bench='^BenchmarkPipeline5k$' -test.benchtime="${events}x" -test.cpuprofile "$out/cpu.out" | tee "$out/profiled.txt"
