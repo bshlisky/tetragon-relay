@@ -82,6 +82,13 @@ type LKGPolicy struct {
 	CanonicalJSON []byte
 }
 
+// TamperReporter is optionally implemented by an LKGStore that can detect
+// tampering (internal/agent.CommitOnPut over internal/store). When it
+// reports an error, Reconcile and rollback refuse to touch Tetragon.
+type TamperReporter interface {
+	Tampered() error
+}
+
 // ReachabilityChecker is Part D5's control-plane-reachability callback:
 // "interface; fake now, real in step 6".
 type ReachabilityChecker interface {

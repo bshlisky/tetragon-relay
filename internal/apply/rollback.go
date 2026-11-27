@@ -20,6 +20,10 @@ func (e *Engine) rollback(ctx context.Context, reason string) (*Result, error) {
 	e.audit("rollback_start", reason, nil, "")
 
 	lkgSet, _ := e.lkg.Get(e.cfg.domain()) // ok=false treated as "empty LKG"
+	if err := e.lkgTampered(); err != nil {
+		e.audit("rollback_failed", err.Error(), err, "")
+		return &Result{Status: StatusRollbackFailed, Detail: err.Error()}, ErrRollbackFailed
+	}
 
 	resolved := make([]resolvedPolicy, 0, len(lkgSet.Policies))
 	for _, p := range lkgSet.Policies {

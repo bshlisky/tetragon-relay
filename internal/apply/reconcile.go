@@ -1,6 +1,9 @@
 package apply
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 // DriftReport is Reconcile's typed result (step 3 prompt Part D9).
 type DriftReport struct {
@@ -23,6 +26,25 @@ type DriftReport struct {
 	ReassertError error
 }
 
+// lkgTampered reports the LKG store's tamper state, if it can report one.
+func (e *Engine) lkgTampered() error {
+	tr, ok := e.lkg.(TamperReporter)
+	if !ok {
+		return nil
+	}
+	if err := tr.Tampered(); err != nil {
+		return fmt.Errorf("%w: %w", ErrLKGTampered, err)
+	}
+	return nil
+}
+
+// TetragonServing reports whether Tetragon's GetHealth says every
+// component is running (the same check the health window starts with).
+func (e *Engine) TetragonServing(ctx context.Context) bool {
+	_, ok := checkHealthServing(ctx, e.client)
+	return ok
+}
+
 // Reconcile implements step 3 prompt Part D9: compares Tetragon's current
 // relay-managed policy set against LKG for this engine's domain and
 // returns a typed drift report. If reassertOnDrift is true and drift is
@@ -41,6 +63,10 @@ func (e *Engine) Reconcile(ctx context.Context, reassertOnDrift bool) (*DriftRep
 	defer e.mu.Unlock()
 
 	lkgSet, _ := e.lkg.Get(e.cfg.domain())
+	if err := e.lkgTampered(); err != nil {
+		e.audit("reconcile_refused", err.Error(), err, "")
+		return nil, err
+	}
 	desired := make(map[string]bool, len(lkgSet.Policies))
 	for _, p := range lkgSet.Policies {
 		loadedName, err := LoadedName(p.Name, p.Version, p.CanonicalJSON)

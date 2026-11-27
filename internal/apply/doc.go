@@ -45,4 +45,10 @@ var (
 	// RequireVersion rejected the connected Tetragon (Part B4); Apply
 	// refuses to load anything.
 	ErrUnsupportedTetragonVersion = errors.New("apply: unsupported Tetragon version")
+	// ErrLKGTampered is returned by Reconcile (and reported by rollback
+	// as ROLLBACK_FAILED) when the LKG store reports tampering: an
+	// unreadable LKG would otherwise read as "empty", and re-asserting an
+	// empty set would unload every relay-managed policy (step 4b C6:
+	// never unload or change what Tetragon has loaded).
+	ErrLKGTampered = errors.New("apply: LKG store is TAMPERED; not re-asserting")
 )
