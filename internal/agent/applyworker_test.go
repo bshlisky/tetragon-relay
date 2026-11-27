@@ -102,6 +102,8 @@ type pipeline struct {
 	auditor  *lockedAuditor
 	worker   *agent.ApplyWorker
 	targets  *genKey
+	rootKeys []*genKey
+	rootEnv  []byte
 	liveness *agent.LivenessRegistry
 }
 
@@ -125,7 +127,7 @@ func newPipeline(t *testing.T, o pipelineOpts) *pipeline {
 		t.Fatalf("store.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	rootEnv, _, targetsKey := standardRootWithTargetsKey(t, 1, now.Add(300*24*time.Hour))
+	rootEnv, rootKeys, targetsKey := standardRootWithTargetsKey(t, 1, now.Add(300*24*time.Hour))
 	root, err := trust.LoadInitialRoot(rootEnv)
 	if err != nil {
 		t.Fatalf("LoadInitialRoot: %v", err)
@@ -162,7 +164,7 @@ func newPipeline(t *testing.T, o pipelineOpts) *pipeline {
 	}
 	w, err := agent.NewApplyWorker(agent.ApplyWorkerConfig{
 		Deps: agent.BundleDeps{
-			Store: st, Commit: commit, Trust: ts, Engine: engine, Version: fixedVersion{"v1.8.0"},
+			Store: st, Roots: st, Commit: commit, Trust: ts, Engine: engine, Version: fixedVersion{"v1.8.0"},
 			HostCaps: allCaps{}, EnforceAllowed: o.enforceAllowed, Crypto: agent.Capabilities{MLDSAAvailable: true},
 			HostUUID: testHostUUID, AllowedScopes: []string{"prod"},
 			Digest: func(context.Context) ([]byte, error) { return []byte{0xd1}, nil },
@@ -187,7 +189,10 @@ func newPipeline(t *testing.T, o pipelineOpts) *pipeline {
 		cancel()
 		<-done
 	})
-	return &pipeline{t: t, now: now, st: st, dir: dir, sm: sm, link: link, outbox: outbox, engine: engine, auditor: auditor, worker: w, targets: targetsKey, liveness: liveness}
+	if err := st.PersistTrustRoot(rootEnv, 1); err != nil {
+		t.Fatalf("PersistTrustRoot: %v", err)
+	}
+	return &pipeline{t: t, now: now, st: st, dir: dir, sm: sm, link: link, outbox: outbox, engine: engine, auditor: auditor, worker: w, targets: targetsKey, rootKeys: rootKeys, rootEnv: rootEnv, liveness: liveness}
 }
 
 type allCaps struct{}
@@ -447,4 +452,127 @@ func (failingCommitStore) CommitApplied(store.AppliedCommit) error {
 func digestOf(env []byte) []byte {
 	sum := sha256.Sum256(env)
 	return sum[:]
+}
+
+// rotatedRootWithTargets is rotatedRootWithKeys, also returning the new
+// root's targets key, so a test can sign bundles under the rotated root.
+func rotatedRootWithTargets(t *testing.T, version int, expires time.Time, oldRootKeys []*genKey) (envelope []byte, newRootKeys []*genKey, targets *genKey) {
+	t.Helper()
+	r1, r2, r3 := mustKey(t), mustKey(t), mustKey(t)
+	tk, lk := mustKey(t), mustKey(t)
+	payload := buildRootPayload(version, expires, []*genKey{r1, r2, r3, tk, lk}, roleOf([]*genKey{r1, r2, r3}, 2), roleOf([]*genKey{tk}, 1), roleOf([]*genKey{lk}, 1))
+	return signEnvelope(trust.RootPayloadType, payload, oldRootKeys[0], oldRootKeys[1], r1, r2), []*genKey{r1, r2, r3}, tk
+}
+
+func (p *pipeline) rootVersion() uint64 {
+	_, v, _, err := p.st.TrustRoot()
+	if err != nil {
+		p.t.Fatalf("TrustRoot: %v", err)
+	}
+	return v
+}
+
+func (p *pipeline) waitRootVersion(want uint64) {
+	p.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for p.rootVersion() != want {
+		if time.Now().After(deadline) {
+			p.t.Fatalf("persisted root version = %d, want %d", p.rootVersion(), want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func (p *pipeline) nextAlert() *controlv1.Alert {
+	p.t.Helper()
+	for {
+		if a := p.next().GetAlert(); a != nil {
+			return a
+		}
+	}
+}
+
+func TestTrustUpdate_ChainAdoptedPersistedAndUsedForBundles(t *testing.T) {
+	p := newPipeline(t, pipelineOpts{enforceAllowed: true, status: apply.StatusApplied})
+	exp := p.now.Add(200 * 24 * time.Hour)
+	v2, v2Keys, _ := rotatedRootWithTargets(t, 2, exp, p.rootKeys)
+	v3, _, v3Targets := rotatedRootWithTargets(t, 3, exp, v2Keys)
+	// The current version (1) is included first: it is skipped, not an error.
+	p.worker.SubmitTrustUpdate([][]byte{p.rootEnv, v2, v3})
+	p.worker.SubmitBundle(buildBundleEnvelope(t, v3Targets, "prod", "monitor", 1, p.now, []bundlePolicySpec{{name: "a", version: 1, yaml: minimalPolicyYAML("a")}}))
+	if r := p.nextResult(); r.GetStatus() != controlv1.ApplyResult_APPLIED {
+		t.Fatalf("bundle under root v3: %v", r)
+	}
+	if p.rootVersion() != 3 {
+		t.Fatalf("persisted root version = %d, want 3", p.rootVersion())
+	}
+	// The old targets key no longer verifies.
+	p.worker.SubmitBundle(p.bundle("monitor", 2, "a"))
+	if r := p.nextResult(); r.GetStatus() != controlv1.ApplyResult_REJECTED_SIGNATURE {
+		t.Fatalf("bundle under the old targets key: %v", r)
+	}
+	if !p.auditor.has("trust_update_skipped") || !p.auditor.has("trust_update_applied") {
+		t.Fatal("missing trust update audit records")
+	}
+}
+
+func TestTrustUpdate_PartialChainKeepsLastGoodRoot(t *testing.T) {
+	p := newPipeline(t, pipelineOpts{status: apply.StatusApplied})
+	exp := p.now.Add(200 * 24 * time.Hour)
+	v2, _, _ := rotatedRootWithTargets(t, 2, exp, p.rootKeys)
+	bad, _, _ := rotatedRootWithTargets(t, 3, exp, []*genKey{mustKey(t), mustKey(t)}) // not signed by v2's root keys
+	p.worker.SubmitTrustUpdate([][]byte{v2, bad})
+	a := p.nextAlert()
+	if a.GetKind() != controlv1.Alert_KIND_UNSPECIFIED || !strings.HasPrefix(a.GetDetail(), "TRUST_UPDATE_REJECTED: ") || !strings.Contains(a.GetDetail(), "keeping version 2") {
+		t.Fatalf("alert = %v", a)
+	}
+	if p.rootVersion() != 2 {
+		t.Fatalf("persisted root version = %d, want 2 (the last good step)", p.rootVersion())
+	}
+	if !p.auditor.has("trust_update_rejected") {
+		t.Fatal("rejection not audited")
+	}
+}
+
+func TestTrustUpdate_EmptyIsRejected(t *testing.T) {
+	p := newPipeline(t, pipelineOpts{status: apply.StatusApplied})
+	p.worker.SubmitTrustUpdate(nil)
+	if a := p.nextAlert(); !strings.Contains(a.GetDetail(), "0 entries") {
+		t.Fatalf("alert = %v", a)
+	}
+}
+
+// TestTrustUpdate_WaitsForTheApplyInProgress: a trust update that arrives
+// during a bundle apply is not processed until the apply ends (C2).
+func TestTrustUpdate_WaitsForTheApplyInProgress(t *testing.T) {
+	p := newPipeline(t, pipelineOpts{enforceAllowed: true, status: apply.StatusApplied, block: true})
+	v2, _, _ := rotatedRootWithTargets(t, 2, p.now.Add(200*24*time.Hour), p.rootKeys)
+	p.worker.SubmitBundle(p.bundle("monitor", 1, "a"))
+	<-p.engine.started
+	p.worker.SubmitTrustUpdate([][]byte{v2})
+	time.Sleep(50 * time.Millisecond)
+	if p.rootVersion() != 1 {
+		t.Fatalf("root changed to %d during an apply", p.rootVersion())
+	}
+	close(p.engine.block)
+	if r := p.nextResult(); r.GetStatus() != controlv1.ApplyResult_APPLIED {
+		t.Fatalf("result = %v", r)
+	}
+	p.waitRootVersion(2)
+}
+
+func TestTrustUpdate_TamperedStoreRejects(t *testing.T) {
+	p := newPipeline(t, pipelineOpts{enforceAllowed: true, status: apply.StatusApplied})
+	p.worker.SubmitBundle(p.bundle("monitor", 1, "a"))
+	_ = p.nextResult()
+	blobs, _ := os.ReadDir(p.dir + "/blobs")
+	for _, b := range blobs {
+		_ = os.WriteFile(p.dir+"/blobs/"+b.Name(), []byte("x"), 0o600)
+	}
+	_, _ = p.st.Get(apply.RelayDomain) // marks the store TAMPERED
+	v2, _, _ := rotatedRootWithTargets(t, 2, p.now.Add(200*24*time.Hour), p.rootKeys)
+	p.worker.SubmitTrustUpdate([][]byte{v2})
+	if a := p.nextAlert(); !strings.Contains(a.GetDetail(), "TAMPERED") {
+		t.Fatalf("alert = %v", a)
+	}
 }

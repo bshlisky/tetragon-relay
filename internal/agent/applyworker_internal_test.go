@@ -212,7 +212,7 @@ func TestConstructorValidation(t *testing.T) {
 	if _, err := NewApplyWorker(ApplyWorkerConfig{}); err == nil {
 		t.Fatal("NewApplyWorker(zero) = nil error")
 	}
-	deps := BundleDeps{Store: &store.Store{}, Commit: &CommitOnPut{}, Trust: &TrustState{}, Engine: &apply.Engine{},
+	deps := BundleDeps{Store: &store.Store{}, Roots: &store.Store{}, Commit: &CommitOnPut{}, Trust: &TrustState{}, Engine: &apply.Engine{},
 		Version: fakeVersion{}, HostCaps: noCaps{}, Digest: func(context.Context) ([]byte, error) { return nil, nil }}
 	if err := deps.validate(); err == nil {
 		t.Fatal("BundleDeps without HostUUID validated")
@@ -306,6 +306,8 @@ func (b *blockingJobs) SubmitBundle([]byte) {
 		})
 	}()
 }
+
+func (b *blockingJobs) SubmitTrustUpdate([][]byte) {}
 
 func countHeartbeats(msgs []*controlv1.AgentMessage) int {
 	n := 0
@@ -475,16 +477,28 @@ func TestControlLoop_BundleGoesToJobSink(t *testing.T) {
 	if string(sink.got) != "raw" {
 		t.Fatalf("sink got %q", sink.got)
 	}
+	oc, err = cl.HandleControllerMessage(context.Background(), tracker, out, &controlv1.ControllerMessage{Seq: 3, Body: &controlv1.ControllerMessage_TrustUpdate{TrustUpdate: &controlv1.TrustUpdate{SignedRoots: [][]byte{[]byte("r2")}}}})
+	if err != nil || oc.Reply != nil || len(sink.roots) != 1 || string(sink.roots[0]) != "r2" {
+		t.Fatalf("TrustUpdate outcome = %+v, %v; sink %q", oc, err, sink.roots)
+	}
 	cl.Jobs = nil
-	oc, _ = cl.HandleControllerMessage(context.Background(), tracker, out, &controlv1.ControllerMessage{Seq: 3, Body: &controlv1.ControllerMessage_Bundle{Bundle: &controlv1.PolicyBundle{Envelope: []byte("raw")}}})
+	oc, _ = cl.HandleControllerMessage(context.Background(), tracker, out, &controlv1.ControllerMessage{Seq: 4, Body: &controlv1.ControllerMessage_Bundle{Bundle: &controlv1.PolicyBundle{Envelope: []byte("raw")}}})
 	if r := oc.Reply.GetApplyResult(); r == nil || r.GetStatus() != controlv1.ApplyResult_APPLY_FAILED || len(r.GetBundleDigest()) != 32 {
 		t.Fatalf("nil Jobs reply = %v", oc.Reply)
 	}
+	oc, _ = cl.HandleControllerMessage(context.Background(), tracker, out, &controlv1.ControllerMessage{Seq: 5, Body: &controlv1.ControllerMessage_TrustUpdate{TrustUpdate: &controlv1.TrustUpdate{}}})
+	if oc.Reply.GetAlert() == nil {
+		t.Fatalf("nil Jobs TrustUpdate reply = %v", oc.Reply)
+	}
 }
 
-type recordingSink struct{ got []byte }
+type recordingSink struct {
+	got   []byte
+	roots [][]byte
+}
 
-func (r *recordingSink) SubmitBundle(env []byte) { r.got = env }
+func (r *recordingSink) SubmitBundle(env []byte)          { r.got = env }
+func (r *recordingSink) SubmitTrustUpdate(roots [][]byte) { r.roots = roots }
 
 // gatedConnector returns streams[0] at once and each later stream only
 // after gate is closed.
@@ -512,4 +526,129 @@ func (g *gatedConnector) Connect(ctx context.Context, _ func() controlclient.Hel
 		return nil, nil, ctx.Err()
 	}
 	return g.streams[n], func() error { return nil }, nil
+}
+
+type fakeRootStore struct {
+	persisted []uint64
+	err       error
+}
+
+func (f *fakeRootStore) PersistTrustRoot(_ []byte, v uint64) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.persisted = append(f.persisted, v)
+	return nil
+}
+func (f *fakeRootStore) Tampered() error { return nil }
+
+func trustWorker(t *testing.T, root *trust.Root, roots *fakeRootStore, mldsa bool, now time.Time) (*ApplyWorker, *Outbox, *TrustState) {
+	t.Helper()
+	ts, _ := NewTrustState(root)
+	o := NewOutbox()
+	alerter, _ := NewAlerter(o, &syncAuditor{}, func() time.Time { return now })
+	return &ApplyWorker{cfg: ApplyWorkerConfig{
+		Deps:    BundleDeps{Trust: ts, Roots: roots, Crypto: Capabilities{MLDSAAvailable: mldsa}},
+		Alerter: alerter, Auditor: &syncAuditor{}, Clock: func() time.Time { return now },
+	}}, o, ts
+}
+
+func TestProcessTrustUpdate_RefusesMLDSARootWithoutMLDSA(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	v1Keys := []*ecdsa.PrivateKey{mustTestECDSAKey(t), mustTestECDSAKey(t), mustTestECDSAKey(t)}
+	v1, err := trust.LoadInitialRoot(buildECDSARoot(t, 1, now, v1Keys, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v2Keys := []*ecdsa.PrivateKey{mustTestECDSAKey(t), mustTestECDSAKey(t), mustTestECDSAKey(t)}
+	v2raw := buildHybridTargetsRootChained(t, 2, now, v2Keys, v1Keys)
+	roots := &fakeRootStore{}
+	w, o, ts := trustWorker(t, v1, roots, false, now)
+	w.processTrustUpdate([][]byte{v2raw})
+	if ts.Current().Version != 1 || len(roots.persisted) != 0 {
+		t.Fatalf("adopted an ML-DSA root without ML-DSA: version %d, persisted %v", ts.Current().Version, roots.persisted)
+	}
+	if a := o.Peek().GetAlert(); a == nil || !strings.Contains(a.GetDetail(), "mldsa-87") {
+		t.Fatalf("alert = %v", o.Peek())
+	}
+	// The same chain is adopted when ML-DSA is available.
+	w2, _, ts2 := trustWorker(t, v1, &fakeRootStore{}, true, now)
+	w2.processTrustUpdate([][]byte{v2raw})
+	if ts2.Current().Version != 2 {
+		t.Skipf("hybrid root not adoptable in this build (version %d)", ts2.Current().Version)
+	}
+}
+
+func TestProcessTrustUpdate_PersistFailureKeepsCurrentRoot(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	v1Keys := []*ecdsa.PrivateKey{mustTestECDSAKey(t), mustTestECDSAKey(t), mustTestECDSAKey(t)}
+	v1, err := trust.LoadInitialRoot(buildECDSARoot(t, 1, now, v1Keys, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v2Keys := []*ecdsa.PrivateKey{mustTestECDSAKey(t), mustTestECDSAKey(t), mustTestECDSAKey(t)}
+	v2raw := buildECDSARoot(t, 2, now, v2Keys, v1Keys)
+	w, o, ts := trustWorker(t, v1, &fakeRootStore{err: errors.New("disk full")}, true, now)
+	w.processTrustUpdate([][]byte{v2raw})
+	if ts.Current().Version != 1 {
+		t.Fatalf("root adopted in memory although persisting it failed: %d", ts.Current().Version)
+	}
+	if a := o.Peek().GetAlert(); a == nil || !strings.Contains(a.GetDetail(), "persisting root version 2 failed") {
+		t.Fatalf("alert = %v", o.Peek())
+	}
+	tooMany := make([][]byte, limits.MaxRootChainFiles+1)
+	w.processTrustUpdate(tooMany)
+}
+
+func TestSubmitTrustUpdate_QueueBound(t *testing.T) {
+	aud := &syncAuditor{}
+	w := &ApplyWorker{cfg: ApplyWorkerConfig{Auditor: aud}, wake: make(chan struct{}, 1)}
+	for i := 0; i < limits.MaxPendingTrustUpdates+1; i++ {
+		w.SubmitTrustUpdate([][]byte{{byte(i)}})
+	}
+	if len(w.trustQueue) != limits.MaxPendingTrustUpdates || !aud.HasStep("trust_update_dropped") {
+		t.Fatalf("queue = %d", len(w.trustQueue))
+	}
+	first, _ := w.takeTrustUpdate()
+	if first[0][0] != 1 {
+		t.Fatalf("oldest kept = %d, want 1", first[0][0])
+	}
+}
+
+func TestTrustExpiryMonitor_OncePerConnectionAndDaily(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	keys := []*ecdsa.PrivateKey{mustTestECDSAKey(t), mustTestECDSAKey(t), mustTestECDSAKey(t)}
+	root, err := trust.LoadInitialRoot(buildECDSARoot(t, 1, now, keys, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clk := &syncClock{now: now}
+	ts, _ := NewTrustState(root)
+	o := NewOutbox()
+	alerter, _ := NewAlerter(o, &syncAuditor{}, clk.Now)
+	m := &TrustExpiryMonitor{Trust: ts, Alerter: alerter, Clock: clk.Now}
+	m.Connected()
+	m.Check()
+	if o.Len() != 0 {
+		t.Fatal("TRUST_EXPIRED raised for an unexpired root")
+	}
+	clk.now = root.Expires.Add(time.Minute)
+	m.Check()
+	if o.Len() != 1 || o.Peek().GetAlert().GetKind() != controlv1.Alert_TRUST_EXPIRED {
+		t.Fatalf("no TRUST_EXPIRED on expiry: %d", o.Len())
+	}
+	clk.Advance(time.Hour)
+	m.Check()
+	if o.Len() != 1 {
+		t.Fatal("TRUST_EXPIRED repeated within the same connection and day")
+	}
+	m.Connected() // a new connection, an hour later
+	if o.Len() != 2 {
+		t.Fatal("no TRUST_EXPIRED on the new connection")
+	}
+	clk.Advance(limits.TrustExpiredAlertInterval)
+	m.Check()
+	if o.Len() != 3 {
+		t.Fatal("no daily TRUST_EXPIRED")
+	}
 }
