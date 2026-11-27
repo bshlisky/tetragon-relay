@@ -322,6 +322,35 @@ const (
 	// fit comfortably inside one liveness window with margin to spare.
 	ControlConnectAttemptTimeout = 8 * time.Second
 
+	// --- internal/agent: step 6b's apply worker and outbox ---
+
+	// MaxOutboxMessages bounds the queue of ApplyResult and Alert
+	// messages the agent holds for the control stream, including while
+	// it is disconnected (docs/prompts/step-06b.md E1: "a bounded queue
+	// (oldest dropped, with a counter)"). One apply runs at a time and
+	// each alert kind is rate-limited to one per 5 minutes, so even a
+	// day-long outage produces far fewer distinct messages than this;
+	// the bound exists so a misbehaving component cannot grow memory
+	// without limit.
+	MaxOutboxMessages = 64
+
+	// AlertRateLimitInterval is the per-kind Alert rate limit: at most
+	// one Alert of each kind per this interval, except the first (docs/prompts/step-06b.md E1).
+	AlertRateLimitInterval = 5 * time.Minute
+
+	// MaxApplyResultDetailBytes bounds ApplyResult.detail and
+	// Alert.detail (control.proto: "bounded 4 KiB, no secrets").
+	MaxApplyResultDetailBytes = 4096
+
+	// ApplyWorkerLivenessSlack is how long past the configured health
+	// window the apply worker keeps reporting liveness while one apply
+	// is running. Apply's own Tetragon calls (add, confirm, delete,
+	// persist, rollback) take seconds; an apply still running this long
+	// after its health window should have ended is stalled, so the
+	// worker stops touching liveness and systemd's watchdog restarts
+	// relayd (step-06b report, section 11).
+	ApplyWorkerLivenessSlack = 120 * time.Second
+
 	// --- internal/audit: architecture doc 8.3's `audit` module ---
 
 	// MaxAuditFieldBytes bounds each individual string field (Step,
