@@ -324,6 +324,7 @@ func run(configPath string, auditor *agentAuditor) error {
 			Commit:         commit,
 			Trust:          trustState,
 			Engine:         engine,
+			Reconciler:     engine,
 			Version:        tetraClient,
 			HostCaps:       hostCaps,
 			EnforceAllowed: fresh && hostCaps.UsrmergeOK(),
@@ -384,6 +385,13 @@ func run(configPath string, auditor *agentAuditor) error {
 	// The apply worker outlives individual streams (an apply keeps
 	// running across a reconnect) and stops with the session.
 	go worker.Run(sessionCtx)
+	// docs/prompts/step-06b.md D1: reconcile at start, every 60 s, and
+	// at once when Tetragon restarts (a new socket-peer pid).
+	scheduler := &agent.ReconcileScheduler{
+		Worker: worker, Peer: tetraClient.Peer, Probe: engine.TetragonServing,
+		Alerter: alerter, Auditor: auditor, Liveness: liveness, Clock: time.Now,
+	}
+	go scheduler.Run(sessionCtx)
 
 	sessionDone := make(chan error, 1)
 	go func() { sessionDone <- agent.RunSession(sessionCtx, sessionCfg) }()
