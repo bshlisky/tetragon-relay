@@ -6,10 +6,9 @@ Base: `24dfd7e` (step 6b accepted). Date: 2026-11-27.
 ## 1. Summary
 
 **Definition of done met for every functional commit:** ci, integration and e3 are green
-on GitHub for `cead125` (run 46003257875), with S1–S13, T-S1–T-S5 and the job-wide
-NO_SIGSYS check passing. The last two commits (`b26100d`, fuzz targets and benchmark,
-which only add tests and CI fuzz lines, and this report) are pushed together; their run
-is recorded in the progress log below.
+on GitHub for `ba4ae68` (run 46008210639), the last commit with code or CI changes, with
+S1–S13, T-S1–T-S5 and the job-wide NO_SIGSYS check passing (first green on `cead125`,
+run 46003257875). The commit adding the final progress line is docs only.
 
 Part A closes every 6b review item. Part T builds the agent half of the telemetry
 pipeline end to end: Tetragon `GetEvents` → redaction → per-class batches → a
@@ -390,3 +389,4 @@ One dated line per push: commit, what changed, the CI result observed.
 - 2026-11-27 `54b5809` (with `e4db31d` prompt/review, `6bc2b62`/`8d23954` A1, `df66c66` A2, `7b21373` A3, `c1e7ff1` A4): run 45995632161: ci ✓, integration ✓, e3 ✓. **S1–S13 PASS, NO_SIGSYS PASS.** S13: TAMPER first, empty-epochs heartbeats, REJECTED_TAMPERED, TRUST_UPDATE_REJECTED, loaded set unchanged, NRestarts=0.
 - 2026-11-27 `e10484b` (with `ed78f03` T1, `22bdd1b` wire format): run 46000266649: ci ✓, integration ✓, e3 ✓ (S1–S13; no telemetry wired yet).
 - 2026-11-27 `cead125` (with `abcc2c9` spiffetls/StreamEvents, `aa9f137` telemetry core, `362dba7` relayd wiring): run 46003257875: ci ✓, integration ✓, e3 ✓. **S1–S13 and T-S1–T-S5 PASS, NO_SIGSYS PASS**, first attempt.
+- 2026-11-27 `ba4ae68` (with `b26100d` fuzz targets and benchmark; report): run 46008210639: ci ✓ (fuzz-short with the three telemetry targets, coverage gate with internal/telemetry and internal/spiffetls), integration ✓, e3 ✓. **S1–S13, T-S1–T-S5 and NO_SIGSYS PASS** again on the final code commit.
