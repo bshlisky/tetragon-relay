@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"fmt"
 	"runtime"
 	"runtime/pprof"
 	"sync"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/bshlisky/tetragon-relay/internal/telemetry/batch"
@@ -254,4 +256,78 @@ func BenchmarkStageSpool(b *testing.B) {
 	cpu := cpuNow() - c0
 	b.ReportMetric(float64(len(recs)), "events/batch")
 	b.ReportMetric(float64(cpu.Nanoseconds())/float64(b.N*len(recs)), "cpu-ns/event")
+}
+
+// BenchmarkStageCompress compresses one realistic batch per op and reports
+// the compression ratio and what it means for the spool (step 7b Z4):
+// on-disk bytes per event (compressed payload plus header, file framing and
+// HMAC, amortized) and hours of 5k events/s that 2 GiB holds.
+func BenchmarkStageCompress(b *testing.B) {
+	recs := stageRecords(b)
+	var payload []byte
+	for _, r := range recs {
+		payload = batch.AppendRecord(payload, r)
+	}
+	enc, err := batch.NewPayloadEncoder()
+	if err != nil {
+		b.Fatal(err)
+	}
+	var z []byte
+	b.ReportAllocs()
+	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
+	c0 := cpuNow()
+	for i := 0; i < b.N; i++ {
+		z = enc.Encode(payload)
+	}
+	cpu := cpuNow() - c0
+	b.StopTimer()
+	const perBatchOverhead = 600 + len(fileMagic) + 4 + macSize // header (~550 B measured) + framing + HMAC
+	onDisk := float64(len(z)+perBatchOverhead) / float64(len(recs))
+	b.ReportMetric(float64(cpu.Nanoseconds())/float64(b.N*len(recs)), "cpu-ns/event")
+	b.ReportMetric(float64(len(payload))/float64(len(z)), "ratio")
+	b.ReportMetric(float64(len(payload))/float64(len(recs)), "raw-B/event")
+	b.ReportMetric(onDisk, "disk-B/event")
+	b.ReportMetric(float64(2<<30)/(onDisk*5000)/3600, "h/2GiB@5k")
+}
+
+// BenchmarkCompressOptions measures, for the step 7b Z4 decision, the ratio
+// and CPU of zstd levels and uncompressed batch sizes the agent does NOT use
+// (it uses SpeedFastest on <= 1 MiB). Report only; not gated.
+func BenchmarkCompressOptions(b *testing.B) {
+	corpus := benchInput()
+	red, _ := NewRedactor(nil)
+	opts := proto.MarshalOptions{Deterministic: true}
+	build := func(maxBytes int) []byte {
+		var payload []byte
+		for i := 0; ; i++ {
+			ev := new(tetragonpb.GetEventsResponse)
+			_ = proto.Unmarshal(corpus[i%len(corpus)], ev)
+			red.Redact(ev)
+			raw, _ := opts.Marshal(ev)
+			if len(payload)+len(raw)+batch.RecordOverhead > maxBytes {
+				return payload
+			}
+			payload = batch.AppendRecord(payload, raw)
+		}
+	}
+	for _, size := range []int{1 << 20, 4 << 20} {
+		payload := build(size)
+		events, _ := countRecords(payload)
+		for _, lvl := range []zstd.EncoderLevel{zstd.SpeedFastest, zstd.SpeedDefault, zstd.SpeedBetterCompression} {
+			b.Run(fmt.Sprintf("batch=%dMiB/%s", size>>20, lvl), func(b *testing.B) {
+				e, _ := zstd.NewWriter(nil, zstd.WithEncoderLevel(lvl), zstd.WithEncoderConcurrency(1))
+				var z []byte
+				c0 := cpuNow()
+				for i := 0; i < b.N; i++ {
+					z = e.EncodeAll(payload, z[:0])
+				}
+				cpu := cpuNow() - c0
+				onDisk := float64(len(z)+600+len(fileMagic)+4+macSize) / float64(events)
+				b.ReportMetric(float64(cpu.Nanoseconds())/float64(b.N)/float64(events), "cpu-ns/event")
+				b.ReportMetric(float64(len(payload))/float64(len(z)), "ratio")
+				b.ReportMetric(float64(2<<30)/(onDisk*5000)/3600, "h/2GiB@5k")
+			})
+		}
+	}
 }

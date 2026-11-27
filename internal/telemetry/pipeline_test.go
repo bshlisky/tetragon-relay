@@ -232,7 +232,12 @@ func TestPipeline_EndToEndRedactedChainedAcked(t *testing.T) {
 		if b.Header.Kind != batch.KindEvents {
 			continue
 		}
-		recs, err := batch.SplitRecords(b.Payload, b.Header.Count)
+		dec, _ := batch.NewPayloadDecoder()
+		raw, err := dec.Decode(&b.Header, b.Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		recs, err := batch.SplitRecords(raw, b.Header.Count)
 		if err != nil {
 			t.Fatal(err)
 		}

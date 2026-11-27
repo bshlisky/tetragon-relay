@@ -17,6 +17,8 @@ const Host = "11111111-1111-1111-1111-111111111111"
 type Chain struct {
 	ID   batch.ChainID
 	Boot string
+	// V is the header version of the batches built next (0: current).
+	V    int
 	seq  uint64
 	prev batch.Hash
 	ts   int64
@@ -39,12 +41,21 @@ type Built struct {
 func (c *Chain) Ref(b Built) batch.Ref { return batch.Ref{ChainID: c.ID, Seq: b.Seq, Hash: b.Hash} }
 
 func (c *Chain) next(kind, class string, count uint64, payload []byte) Built {
+	enc := batch.EncNone
+	if c.V == batch.VersionV1 {
+		enc = ""
+	}
+	return c.nextEnc(kind, class, count, payload, enc)
+}
+
+func (c *Chain) nextEnc(kind, class string, count uint64, payload []byte, enc string) Built {
 	c.seq++
 	c.ts += 1000
 	h := batch.Header{
+		V:        c.V,
 		HostUUID: Host, BootID: c.Boot, ChainID: c.ID, Seq: c.seq, PrevHash: c.prev,
 		Kind: kind, Class: class, Count: count, FirstTS: c.ts, LastTS: c.ts + 10,
-		AgentVersion: "test", Epochs: map[string]uint64{"prod": 1}, PayloadSHA256: sha256.Sum256(payload),
+		AgentVersion: "test", Epochs: map[string]uint64{"prod": 1}, Enc: enc, PayloadSHA256: sha256.Sum256(payload),
 	}
 	raw, err := h.Marshal()
 	if err != nil {
@@ -71,6 +82,12 @@ func (c *Chain) Events(class string, n int) Built {
 		p = batch.AppendRecord(p, []byte{byte(i)})
 	}
 	return c.next(batch.KindEvents, class, uint64(n), p) //nolint:gosec // G115: test sizes
+}
+
+// EventsZstd builds an events batch of count records whose payload as
+// sent is z, declared enc "zstd" (z is not checked: tests pass bombs).
+func (c *Chain) EventsZstd(class string, count uint64, z []byte) Built {
+	return c.nextEnc(batch.KindEvents, class, count, z, batch.EncZstd)
 }
 
 // Dropped builds a dropped record listing refs.

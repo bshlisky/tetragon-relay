@@ -168,7 +168,7 @@ func TestVerify_BadPayloads(t *testing.T) {
 	}
 	// A control batch whose payload is not its kind's JSON.
 	mk := func(kind string, seq uint64, payload []byte) bt.Built {
-		hh := batch.Header{HostUUID: bt.Host, BootID: "b", ChainID: batch.ChainID{6}, Seq: seq, Kind: kind, Class: batch.ClassControl, AgentVersion: "t", Epochs: map[string]uint64{}, PayloadSHA256: sha256Of(payload)}
+		hh := batch.Header{HostUUID: bt.Host, BootID: "b", ChainID: batch.ChainID{6}, Seq: seq, Kind: kind, Class: batch.ClassControl, AgentVersion: "t", Epochs: map[string]uint64{}, Enc: batch.EncNone, PayloadSHA256: sha256Of(payload)}
 		if seq > 1 {
 			hh.PrevHash = batch.Hash{1}
 		}
@@ -211,3 +211,55 @@ func TestVerifier_EntryBound(t *testing.T) {
 }
 
 func sha256Of(b []byte) batch.Hash { return batch.Hash(sha256.Sum256(b)) }
+
+func zstdOf(raw []byte) []byte {
+	e, err := batch.NewPayloadEncoder()
+	if err != nil {
+		panic(err)
+	}
+	return append([]byte(nil), e.Encode(raw)...)
+}
+
+// Step 7b Z2/Z3: a chain may mix 7a (v1, uncompressed) and 7b (v2,
+// compressed) batches; a compressed payload is checked against the hash as
+// sent, then decoded with the size limit; a bomb or a payload whose record
+// count is wrong is bad_payload but keeps its place in the chain.
+func TestVerify_CompressedAndV1Batches(t *testing.T) {
+	c := bt.NewChain(9, "b")
+	c.V = batch.VersionV1
+	reset := c.Reset(batch.ReasonHeadMissing, nil)
+	old := c.Events(batch.ClassSecurity, 3)
+	c.V = 0
+	var p []byte
+	for i := 0; i < 50; i++ {
+		p = batch.AppendRecord(p, []byte("event record"))
+	}
+	good := c.EventsZstd(batch.ClassNonSecurity, 50, zstdOf(p))
+	r := Verify(bt.Host, in(reset, old, good))
+	if !r.Clean() || r.Chains[0].Contiguous != 3 {
+		t.Fatalf("mixed v1/v2 chain: %s %+v", kinds(r.Findings), r)
+	}
+	if !strings.Contains(string(old.Header), `"v":1`) || !strings.Contains(string(good.Header), `"enc":"zstd"`) {
+		t.Fatal("test chain does not mix the versions")
+	}
+
+	bomb := c.EventsZstd(batch.ClassNonSecurity, 1, zstdOf(make([]byte, 64<<20)))
+	wrongCount := c.EventsZstd(batch.ClassNonSecurity, 49, zstdOf(p))
+	garbage := c.EventsZstd(batch.ClassNonSecurity, 1, []byte("not zstd"))
+	r = Verify(bt.Host, in(reset, old, good, bomb, wrongCount, garbage))
+	if got := kinds(r.Findings); got != "chain_reset,bad_payload,bad_payload,bad_payload" {
+		t.Fatalf("findings %s", got)
+	}
+	if !strings.Contains(r.Findings[1].Detail, "decoded size limit") {
+		t.Fatalf("bomb finding: %+v", r.Findings[1])
+	}
+	if r.Chains[0].Contiguous != 6 {
+		t.Fatalf("bad payloads must keep their place in the chain: %+v", r.Chains[0])
+	}
+	// A compressed control batch is not a valid header at all.
+	h, _ := batch.ParseHeader(reset.Header)
+	h.Enc = batch.EncZstd
+	if _, err := h.Marshal(); err == nil {
+		t.Fatal("a compressed chain_reset marshaled")
+	}
+}

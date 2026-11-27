@@ -114,3 +114,68 @@ func TestSpool_PayloadNotRetainedAndCountChecked(t *testing.T) {
 		}
 	}
 }
+
+// Step 7b Z2: events payloads are spooled and sent zstd-compressed, and
+// payload_sha256 and the batch hash cover the compressed bytes as sent;
+// a payload compression does not shrink is sent as enc "none"; control
+// batches are never compressed.
+func TestSpool_CompressesEventsPayloads(t *testing.T) {
+	s := mustOpen(t, spoolCfg(t, t.TempDir(), OSFS{}, "boot-a"))
+	var payload []byte
+	for i := 0; i < 200; i++ {
+		payload = batch.AppendRecord(payload, []byte(`{"process":{"binary":"/usr/bin/curl","arguments":"-s https://internal.example"}}`))
+	}
+	e, err := s.AppendEventsPayload(batch.ClassSecurity, payload, 200, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Incompressible: random-looking records.
+	var noise []byte
+	x := uint64(0x9e3779b97f4a7c15)
+	for i := 0; i < 64; i++ {
+		rec := make([]byte, 64)
+		for j := range rec {
+			x ^= x << 13
+			x ^= x >> 7
+			x ^= x << 17
+			rec[j] = byte(x)
+		}
+		noise = batch.AppendRecord(noise, rec)
+	}
+	e2, err := s.AppendEventsPayload(batch.ClassSecurity, noise, 64, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := spooled(t, s)
+	dec, _ := batch.NewPayloadDecoder()
+	for i, c := range []struct {
+		e    Entry
+		raw  []byte
+		want string
+	}{{e, payload, batch.EncZstd}, {e2, noise, batch.EncNone}} {
+		hdr, sent, err := s.Read(c.e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h, err := batch.ParseHeader(hdr)
+		if err != nil || h.Enc != c.want || h.Version() != batch.Version || h.TelemetryPolicyEpoch != 0 {
+			t.Fatalf("batch %d header %s (%v)", i, hdr, err)
+		}
+		if sha256Sum(sent) != h.PayloadSHA256 || batch.HashOf(hdr, sent) != c.e.Hash {
+			t.Fatalf("batch %d: hashes do not cover the payload as sent", i)
+		}
+		got, err := dec.Decode(&h, sent)
+		if err != nil || !bytes.Equal(got, c.raw) {
+			t.Fatalf("batch %d does not decode to the records: %v", i, err)
+		}
+		if c.want == batch.EncZstd && len(sent) >= len(c.raw)/3 {
+			t.Fatalf("compressed %d -> %d", len(c.raw), len(sent))
+		}
+	}
+	if h, _ := batch.ParseHeader(in[0].Header); h.Kind != batch.KindChainReset || h.Enc != batch.EncNone {
+		t.Fatalf("control batch: %s", in[0].Header)
+	}
+	if r := chainverify.Verify(testHost, in); !r.Clean() {
+		t.Fatalf("report %+v", r)
+	}
+}

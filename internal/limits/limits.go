@@ -337,6 +337,13 @@ const (
 	// before it would exceed this (ADR 0039 section 7), so 2000 large
 	// events can never produce an oversized gRPC message.
 	MaxTelemetryPayloadBytes = 1 << 20
+	// MaxTelemetryDecodedPayloadBytes bounds what one compressed
+	// (enc "zstd") payload may decode to (step 7b Z3; telemetry contract
+	// section 2.3). The agent compresses at most MaxTelemetryPayloadBytes
+	// (1 MiB), so 8 MiB is headroom for a later, larger batch size, not a
+	// size any batch reaches today. A decoder that would exceed it stops
+	// and the batch is bad_payload (decompression bombs).
+	MaxTelemetryDecodedPayloadBytes = 8 << 20
 	// MaxTelemetryEventBytes bounds one marshaled, redacted event. A
 	// larger event is dropped and counted (it could not fit a batch).
 	MaxTelemetryEventBytes = 256 << 10

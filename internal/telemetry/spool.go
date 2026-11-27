@@ -131,6 +131,8 @@ type Spool struct {
 	total  int64
 	stats  Stats
 	notify chan struct{}
+	// enc compresses events payloads (under mu).
+	enc *batch.PayloadEncoder
 }
 
 func (c *SpoolConfig) validate() error {
@@ -316,7 +318,11 @@ func OpenSpool(cfg SpoolConfig) (*Spool, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
-	s := &Spool{cfg: cfg, notify: make(chan struct{}, 1)}
+	enc, err := batch.NewPayloadEncoder()
+	if err != nil {
+		return nil, err
+	}
+	s := &Spool{cfg: cfg, notify: make(chan struct{}, 1), enc: enc}
 	des, err := cfg.FS.ReadDir(cfg.Dir)
 	if err != nil {
 		return nil, fmt.Errorf("telemetry: read spool dir: %w", err)
@@ -419,7 +425,7 @@ func OpenSpool(cfg SpoolConfig) (*Spool, error) {
 	}
 	now := cfg.Clock().UnixNano()
 	s.mu.Lock()
-	_, err = s.appendLocked(batch.KindChainReset, batch.ClassControl, 0, now, now, payload)
+	_, err = s.appendLocked(batch.KindChainReset, batch.ClassControl, 0, now, now, payload, batch.EncNone)
 	s.mu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("telemetry: start chain: %w", err)
@@ -433,9 +439,11 @@ func (s *Spool) removeQuiet(name string) {
 }
 
 // appendLocked writes one batch: the batch file first, then the head. It
-// counts as spooled only after the head is written.
-func (s *Spool) appendLocked(kind, class string, count uint64, first, last int64, payload []byte) (Entry, error) {
+// counts as spooled only after the head is written. payload is sent as
+// given, encoded as enc.
+func (s *Spool) appendLocked(kind, class string, count uint64, first, last int64, payload []byte, enc string) (Entry, error) {
 	h := batch.Header{
+		Enc:      enc,
 		HostUUID: s.cfg.HostUUID, BootID: s.cfg.BootID, ChainID: s.chain, Seq: s.seq + 1, PrevHash: s.prev,
 		Kind: kind, Class: class, Count: count, FirstTS: first, LastTS: last,
 		AgentVersion: s.cfg.AgentVersion, Epochs: s.cfg.Epochs(), PayloadSHA256: sha256Sum(payload),
@@ -501,11 +509,17 @@ func (s *Spool) AppendEventsPayload(class string, payload []byte, count uint64, 
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Compressed when that makes it smaller (it almost always does); the
+	// hashes cover the bytes as sent either way.
+	enc := batch.EncNone
+	if z := s.enc.Encode(payload); len(z) < len(payload) {
+		payload, enc = z, batch.EncZstd
+	}
 	need := int64(len(payload)) + int64(len(fileMagic)+4+macSize+limits.MaxTelemetryHeaderBytes/4)
 	if err := s.makeRoomLocked(need); err != nil {
 		return Entry{}, err
 	}
-	return s.appendLocked(batch.KindEvents, class, count, first, last, payload)
+	return s.appendLocked(batch.KindEvents, class, count, first, last, payload, enc)
 }
 
 // countRecords counts payload's length-prefixed records without copying.
@@ -562,7 +576,7 @@ func (s *Spool) makeRoomLocked(need int64) error {
 				return err
 			}
 			// The dropped record is durable before anything is deleted.
-			if _, err := s.appendLocked(batch.KindDropped, batch.ClassControl, 0, now, now, p); err != nil {
+			if _, err := s.appendLocked(batch.KindDropped, batch.ClassControl, 0, now, now, p, batch.EncNone); err != nil {
 				return err
 			}
 			for _, e := range vs[:n] {

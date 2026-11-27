@@ -19,8 +19,26 @@ import (
 	"github.com/bshlisky/tetragon-relay/internal/strictjson"
 )
 
-// Version is the header's "v".
-const Version = 1
+// Header versions (the header's "v").
+const (
+	// VersionV1 is step 7a's header: no telemetry_policy_epoch and no
+	// enc; the payload is never compressed. Still accepted, so batches a
+	// 7a agent spooled stay valid after an upgrade.
+	VersionV1 = 1
+	// Version is what Marshal writes when Header.V is 0 (step 7b):
+	// telemetry_policy_epoch and enc are always present.
+	Version = 2
+)
+
+// Payload encodings (the v2 header's "enc"). payload_sha256 and the batch
+// hash always cover the payload as sent, compressed or not.
+const (
+	EncNone = "none"
+	// EncZstd: one or more zstd frames that decode to at most
+	// limits.MaxTelemetryDecodedPayloadBytes (PayloadDecoder). Only events
+	// batches are compressed; control batches are always EncNone.
+	EncZstd = "zstd"
+)
 
 // Kinds.
 const (
@@ -58,19 +76,42 @@ func (h Hash) String() string { return hex.EncodeToString(h[:]) }
 // Header is a batch header. Marshal produces its canonical JSON;
 // ParseHeader accepts only that exact form.
 type Header struct {
-	HostUUID      string
-	BootID        string
-	ChainID       ChainID
-	Seq           uint64
-	PrevHash      Hash
-	Kind          string
-	Class         string
-	Count         uint64
-	FirstTS       int64
-	LastTS        int64
-	AgentVersion  string
-	Epochs        map[string]uint64
+	// V is the header version: 0 means Version. ParseHeader sets it.
+	V            int
+	HostUUID     string
+	BootID       string
+	ChainID      ChainID
+	Seq          uint64
+	PrevHash     Hash
+	Kind         string
+	Class        string
+	Count        uint64
+	FirstTS      int64
+	LastTS       int64
+	AgentVersion string
+	Epochs       map[string]uint64
+	// TelemetryPolicyEpoch is the epoch of the telemetry policy the
+	// batch was built under; 0 is the built-in default (v2 only).
+	TelemetryPolicyEpoch uint64
+	// Enc is EncNone or EncZstd (v2 only; "" in a v1 header).
+	Enc           string
 	PayloadSHA256 Hash
+}
+
+// Version returns h's header version (Version when V is 0).
+func (h *Header) Version() int {
+	if h.V == 0 {
+		return Version
+	}
+	return h.V
+}
+
+// Encoding returns the payload's encoding: EncNone for a v1 header.
+func (h *Header) Encoding() string {
+	if h.Version() == VersionV1 {
+		return EncNone
+	}
+	return h.Enc
 }
 
 // safeString reports whether s may appear in a header unescaped: 1..max
@@ -95,6 +136,21 @@ func safeString(s string, allowEmpty bool) bool {
 // Validate checks every field rule of ADR 0039 section 2 that does not
 // depend on the payload.
 func (h *Header) Validate() error {
+	switch h.Version() {
+	case VersionV1:
+		if h.Enc != "" || h.TelemetryPolicyEpoch != 0 {
+			return fmt.Errorf("%w: v1 header with enc or telemetry_policy_epoch", ErrBadHeader)
+		}
+	case Version:
+		switch {
+		case h.Enc == EncZstd && h.Kind != KindEvents:
+			return fmt.Errorf("%w: a %s batch is never compressed", ErrBadHeader, h.Kind)
+		case h.Enc != EncNone && h.Enc != EncZstd:
+			return fmt.Errorf("%w: enc %q", ErrBadHeader, h.Enc)
+		}
+	default:
+		return fmt.Errorf("%w: v=%d", ErrBadHeader, h.V)
+	}
 	switch {
 	case !safeString(h.HostUUID, false):
 		return fmt.Errorf("%w: host_uuid", ErrBadHeader)
@@ -144,7 +200,7 @@ func (h *Header) Marshal() ([]byte, error) {
 	}
 	b := make([]byte, 0, 512)
 	b = append(b, `{"v":`...)
-	b = strconv.AppendInt(b, Version, 10)
+	b = strconv.AppendInt(b, int64(h.Version()), 10)
 	b = appendStr(b, "host_uuid", h.HostUUID)
 	b = appendStr(b, "boot_id", h.BootID)
 	b = appendStr(b, "chain_id", h.ChainID.String())
@@ -174,6 +230,10 @@ func (h *Header) Marshal() ([]byte, error) {
 		b = strconv.AppendUint(b, h.Epochs[s], 10)
 	}
 	b = append(b, '}')
+	if h.Version() == Version {
+		b = appendUint(b, "telemetry_policy_epoch", h.TelemetryPolicyEpoch)
+		b = appendStr(b, "enc", h.Enc)
+	}
 	b = appendStr(b, "payload_sha256", h.PayloadSHA256.String())
 	b = append(b, '}')
 	if len(b) > limits.MaxTelemetryHeaderBytes {
@@ -199,20 +259,24 @@ func appendUint(b []byte, key string, v uint64) []byte {
 
 // wireHeader is the strict-decoding shape of a header.
 type wireHeader struct {
-	V             int               `json:"v"`
-	HostUUID      string            `json:"host_uuid"`
-	BootID        string            `json:"boot_id"`
-	ChainID       string            `json:"chain_id"`
-	Seq           uint64            `json:"seq"`
-	PrevHash      string            `json:"prev_hash"`
-	Kind          string            `json:"kind"`
-	Class         string            `json:"class"`
-	Count         uint64            `json:"count"`
-	FirstTS       int64             `json:"first_ts"`
-	LastTS        int64             `json:"last_ts"`
-	AgentVersion  string            `json:"agent_version"`
-	Epochs        map[string]uint64 `json:"epochs"`
-	PayloadSHA256 string            `json:"payload_sha256"`
+	V            int               `json:"v"`
+	HostUUID     string            `json:"host_uuid"`
+	BootID       string            `json:"boot_id"`
+	ChainID      string            `json:"chain_id"`
+	Seq          uint64            `json:"seq"`
+	PrevHash     string            `json:"prev_hash"`
+	Kind         string            `json:"kind"`
+	Class        string            `json:"class"`
+	Count        uint64            `json:"count"`
+	FirstTS      int64             `json:"first_ts"`
+	LastTS       int64             `json:"last_ts"`
+	AgentVersion string            `json:"agent_version"`
+	Epochs       map[string]uint64 `json:"epochs"`
+	// Present only in v2; their presence in a v1 header (or absence in a
+	// v2 one) fails the canonical re-serialization check.
+	TelemetryPolicyEpoch uint64 `json:"telemetry_policy_epoch"`
+	Enc                  string `json:"enc"`
+	PayloadSHA256        string `json:"payload_sha256"`
 }
 
 func decodeHex(dst []byte, s string) bool {
@@ -234,10 +298,11 @@ func ParseHeader(raw []byte) (Header, error) {
 	if err := strictjson.DecodeStrict(raw, 3, &w); err != nil {
 		return Header{}, fmt.Errorf("%w: %w", ErrBadHeader, err)
 	}
-	if w.V != Version {
+	if w.V != Version && w.V != VersionV1 {
 		return Header{}, fmt.Errorf("%w: v=%d", ErrBadHeader, w.V)
 	}
 	h := Header{
+		V: w.V, TelemetryPolicyEpoch: w.TelemetryPolicyEpoch, Enc: w.Enc,
 		HostUUID: w.HostUUID, BootID: w.BootID, Seq: w.Seq, Kind: w.Kind, Class: w.Class,
 		Count: w.Count, FirstTS: w.FirstTS, LastTS: w.LastTS, AgentVersion: w.AgentVersion, Epochs: w.Epochs,
 	}

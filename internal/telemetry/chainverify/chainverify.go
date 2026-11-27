@@ -138,6 +138,24 @@ type Verifier struct {
 	order   []batch.ChainID
 	n       int
 	entries int
+	// dec decodes compressed payloads (created on first use), never past
+	// limits.MaxTelemetryDecodedPayloadBytes.
+	dec *batch.PayloadDecoder
+}
+
+// decode returns an events payload decoded per its header's enc.
+func (v *Verifier) decode(h *batch.Header, payload []byte) ([]byte, error) {
+	if h.Encoding() == batch.EncNone {
+		return payload, nil
+	}
+	if v.dec == nil {
+		d, err := batch.NewPayloadDecoder()
+		if err != nil {
+			return nil, err
+		}
+		v.dec = d
+	}
+	return v.dec.Decode(h, payload)
 }
 
 // New returns a Verifier. expectedHost is the host UUID from the
@@ -207,7 +225,13 @@ func (v *Verifier) Add(header, payload []byte) []Finding {
 
 	switch h.Kind {
 	case batch.KindEvents:
-		if _, err := batch.SplitRecords(b.Payload, h.Count); err != nil {
+		// The hash was checked over the payload as sent; only then is it
+		// decoded, with the decoded-size limit (contract section 2.3).
+		raw, err := v.decode(&h, b.Payload)
+		if err == nil {
+			_, err = batch.SplitRecords(raw, h.Count)
+		}
+		if err != nil {
 			out = append(out, f(BadPayload, cid, h.Seq, "%v", err))
 		}
 	case batch.KindChainReset:

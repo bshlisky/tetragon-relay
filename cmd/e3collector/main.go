@@ -294,7 +294,18 @@ func printEvents(in chainverify.Input) {
 		}
 		return
 	}
-	recs, err := batch.SplitRecords(b.Payload, b.Header.Count)
+	dec, err := batch.NewPayloadDecoder()
+	if err != nil {
+		return
+	}
+	defer dec.Close()
+	raw, err := dec.Decode(&b.Header, b.Payload)
+	if err != nil {
+		fmt.Printf("REPORT   events payload does not decode: %v\n", err)
+		return
+	}
+	fmt.Printf("REPORT   events enc=%s count=%d sent=%d decoded=%d\n", b.Header.Encoding(), b.Header.Count, len(b.Payload), len(raw))
+	recs, err := batch.SplitRecords(raw, b.Header.Count)
 	if err != nil {
 		return
 	}

@@ -15,7 +15,7 @@ import (
 func FuzzSpoolFile(f *testing.F) {
 	s := &Spool{cfg: SpoolConfig{Key: testKey}}
 	h := batch.Header{HostUUID: testHost, BootID: "b", ChainID: batch.ChainID{1}, Seq: 2, PrevHash: batch.Hash{1},
-		Kind: batch.KindEvents, Class: batch.ClassSecurity, Count: 1, AgentVersion: "t", Epochs: map[string]uint64{}}
+		Kind: batch.KindEvents, Class: batch.ClassSecurity, Count: 1, AgentVersion: "t", Epochs: map[string]uint64{}, Enc: batch.EncNone}
 	p := batch.AppendRecord(nil, []byte("e"))
 	h.PayloadSHA256 = sha256.Sum256(p)
 	raw, _ := h.Marshal()

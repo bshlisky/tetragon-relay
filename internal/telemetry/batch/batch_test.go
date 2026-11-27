@@ -15,7 +15,51 @@ func sampleHeader() Header {
 		HostUUID: "11111111-1111-1111-1111-111111111111", BootID: "b0", ChainID: ChainID{1, 2, 3},
 		Seq: 2, PrevHash: Hash{9}, Kind: KindEvents, Class: ClassSecurity, Count: 3,
 		FirstTS: 10, LastTS: 20, AgentVersion: "v0.7.0", Epochs: map[string]uint64{"z": 1, "a": 5},
-		PayloadSHA256: Hash{7},
+		TelemetryPolicyEpoch: 4, Enc: EncZstd, PayloadSHA256: Hash{7},
+	}
+}
+
+// v1Sample is sampleHeader as a step 7a agent wrote it.
+func v1Sample() Header {
+	h := sampleHeader()
+	h.V, h.TelemetryPolicyEpoch, h.Enc = VersionV1, 0, ""
+	return h
+}
+
+const v1Canonical = `{"v":1,"host_uuid":"11111111-1111-1111-1111-111111111111","boot_id":"b0","chain_id":"01020300000000000000000000000000","seq":2,"prev_hash":"0900000000000000000000000000000000000000000000000000000000000000","kind":"events","class":"security","count":3,"first_ts":10,"last_ts":20,"agent_version":"v0.7.0","epochs":{"a":5,"z":1},"payload_sha256":"0700000000000000000000000000000000000000000000000000000000000000"}`
+
+// A 7a header still parses, keeps v1 and re-serializes to the same bytes;
+// its encoding is none.
+func TestHeader_V1StillAccepted(t *testing.T) {
+	h := v1Sample()
+	raw, err := h.Marshal()
+	if err != nil || string(raw) != v1Canonical {
+		t.Fatalf("v1 marshal: %v\n got %s", err, raw)
+	}
+	got, err := ParseHeader([]byte(v1Canonical))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Version() != VersionV1 || got.Encoding() != EncNone || got.TelemetryPolicyEpoch != 0 {
+		t.Fatalf("v1 parsed as %+v", got)
+	}
+	again, _ := got.Marshal()
+	if string(again) != v1Canonical {
+		t.Fatal("v1 round trip changed the bytes")
+	}
+	for name, in := range map[string]string{
+		"v1 with enc":        strings.Replace(v1Canonical, `,"payload_sha256"`, `,"enc":"none","payload_sha256"`, 1),
+		"v1 with tpe":        strings.Replace(v1Canonical, `,"payload_sha256"`, `,"telemetry_policy_epoch":0,"payload_sha256"`, 1),
+		"v1 relabelled as 2": strings.Replace(v1Canonical, `"v":1`, `"v":2`, 1),
+	} {
+		if _, err := ParseHeader([]byte(in)); !errors.Is(err, ErrBadHeader) {
+			t.Errorf("%s: err = %v, want ErrBadHeader", name, err)
+		}
+	}
+	bad := v1Sample()
+	bad.Enc = EncZstd
+	if _, err := bad.Marshal(); !errors.Is(err, ErrBadHeader) {
+		t.Error("v1 header with enc marshaled")
 	}
 }
 
@@ -25,7 +69,7 @@ func TestHeader_CanonicalRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"v":1,"host_uuid":"11111111-1111-1111-1111-111111111111","boot_id":"b0","chain_id":"01020300000000000000000000000000","seq":2,"prev_hash":"0900000000000000000000000000000000000000000000000000000000000000","kind":"events","class":"security","count":3,"first_ts":10,"last_ts":20,"agent_version":"v0.7.0","epochs":{"a":5,"z":1},"payload_sha256":"0700000000000000000000000000000000000000000000000000000000000000"}`
+	want := `{"v":2,"host_uuid":"11111111-1111-1111-1111-111111111111","boot_id":"b0","chain_id":"01020300000000000000000000000000","seq":2,"prev_hash":"0900000000000000000000000000000000000000000000000000000000000000","kind":"events","class":"security","count":3,"first_ts":10,"last_ts":20,"agent_version":"v0.7.0","epochs":{"a":5,"z":1},"telemetry_policy_epoch":4,"enc":"zstd","payload_sha256":"0700000000000000000000000000000000000000000000000000000000000000"}`
 	if string(raw) != want {
 		t.Fatalf("canonical form:\n got %s\nwant %s", raw, want)
 	}
@@ -54,14 +98,21 @@ func TestParseHeader_RejectsNonCanonical(t *testing.T) {
 	s := string(raw)
 	cases := map[string]string{
 		"whitespace":      strings.Replace(s, `"seq":2`, `"seq": 2`, 1),
-		"key order":       strings.Replace(s, `{"v":1,"host_uuid":"11111111-1111-1111-1111-111111111111"`, `{"host_uuid":"11111111-1111-1111-1111-111111111111","v":1`, 1),
+		"key order":       strings.Replace(s, `{"v":2,"host_uuid":"11111111-1111-1111-1111-111111111111"`, `{"host_uuid":"11111111-1111-1111-1111-111111111111","v":2`, 1),
+		"enc order":       strings.Replace(s, `"telemetry_policy_epoch":4,"enc":"zstd"`, `"enc":"zstd","telemetry_policy_epoch":4`, 1),
+		"enc missing":     strings.Replace(s, `,"enc":"zstd"`, ``, 1),
+		"tpe missing":     strings.Replace(s, `,"telemetry_policy_epoch":4`, ``, 1),
+		"enc unknown":     strings.Replace(s, `"enc":"zstd"`, `"enc":"gzip"`, 1),
+		"enc empty":       strings.Replace(s, `"enc":"zstd"`, `"enc":""`, 1),
+		"v2 as v1":        strings.Replace(s, `"v":2`, `"v":1`, 1),
 		"upper hex":       strings.Replace(s, `"chain_id":"0102`, `"chain_id":"0A02`, 1),
 		"duplicate key":   strings.Replace(s, `"seq":2`, `"seq":2,"seq":2`, 1),
 		"unknown key":     strings.Replace(s, `"seq":2`, `"seq":2,"x":1`, 1),
 		"escape":          strings.Replace(s, `"boot_id":"b0"`, `"boot_id":"\u00620"`, 1),
 		"float":           strings.Replace(s, `"seq":2`, `"seq":2.0`, 1),
 		"leading zero":    strings.Replace(s, `"count":3`, `"count":03`, 1),
-		"version":         strings.Replace(s, `"v":1`, `"v":2`, 1),
+		"version":         strings.Replace(s, `"v":2`, `"v":3`, 1),
+		"version 0":       strings.Replace(s, `"v":2`, `"v":0`, 1),
 		"short hex":       strings.Replace(s, `"chain_id":"01020300000000000000000000000000"`, `"chain_id":"0102"`, 1),
 		"epochs unsorted": strings.Replace(s, `{"a":5,"z":1}`, `{"z":1,"a":5}`, 1),
 		"epochs missing":  strings.Replace(s, `,"epochs":{"a":5,"z":1}`, ``, 1),
@@ -100,6 +151,17 @@ func TestHeader_Validate(t *testing.T) {
 		"too many scopes":    func(h *Header) { h.Epochs = manyScopes(limits.MaxTelemetryEpochScopes + 1) },
 		"oversized marshal":  func(h *Header) { h.Epochs = manyScopes(limits.MaxTelemetryEpochScopes); h.AgentVersion = "x" },
 		"non-printable vers": func(h *Header) { h.AgentVersion = "\x7f" },
+		"v2 no enc":          func(h *Header) { h.Enc = "" },
+		"enc unknown":        func(h *Header) { h.Enc = "lz4" },
+		"zstd control": func(h *Header) {
+			h.Seq = 1
+			h.PrevHash = Hash{}
+			h.Kind = KindChainReset
+			h.Class = ClassControl
+			h.Count = 0
+		},
+		"version 3":  func(h *Header) { h.V = 3 },
+		"version -1": func(h *Header) { h.V = -1 },
 	}
 	for name, m := range mut {
 		h := sampleHeader()
@@ -109,7 +171,7 @@ func TestHeader_Validate(t *testing.T) {
 		}
 	}
 	ok := sampleHeader()
-	ok.Seq, ok.PrevHash, ok.Kind, ok.Class, ok.Count = 1, Hash{}, KindChainReset, ClassControl, 0
+	ok.Seq, ok.PrevHash, ok.Kind, ok.Class, ok.Count, ok.Enc = 1, Hash{}, KindChainReset, ClassControl, 0, EncNone
 	if _, err := ok.Marshal(); err != nil {
 		t.Fatalf("valid chain_reset header: %v", err)
 	}
