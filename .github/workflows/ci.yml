@@ -359,14 +359,24 @@ jobs:
           sudo chmod 2770 /etc/tetragon/tetragon.tp.d/relay
           sudo usermod -a -G tetragon-relay "$(id -un)"
 
-      - name: Start Tetragon (root, transient unit) on the unix socket
+      - name: Start Tetragon (root, from a unit file) on the unix socket
         run: |
-          sudo systemd-run --unit=tetragon --collect \
-            --property=Type=simple \
-            "${TETRAGON_BIN}" \
-            --server-address unix:///var/run/tetragon/tetragon.sock \
-            --tracing-policy-dir /etc/tetragon/tetragon.tp.d \
-            --bpf-lib "${TETRAGON_BPF_LIB}"
+          # A real unit file, not a transient systemd-run unit: the relay
+          # unit's BindsTo=/After=tetragon.service name a packaged unit in
+          # production, and systemd-analyze verify cannot resolve a
+          # transient one (run 45923100259: "Unit tetragon.service not
+          # found"). This file is CI scaffolding for Tetragon itself; the
+          # relay unit is untouched.
+          sudo tee /etc/systemd/system/tetragon.service >/dev/null <<EOF
+          [Unit]
+          Description=Tetragon (E3 CI)
+
+          [Service]
+          Type=simple
+          ExecStart=${TETRAGON_BIN} --server-address unix:///var/run/tetragon/tetragon.sock --tracing-policy-dir /etc/tetragon/tetragon.tp.d --bpf-lib ${TETRAGON_BPF_LIB}
+          EOF
+          sudo systemctl daemon-reload
+          sudo systemctl start tetragon.service
           sleep 3
           if ! sudo systemctl is-active --quiet tetragon.service; then
             echo "Tetragon did not start; log:" >&2
