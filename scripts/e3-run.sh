@@ -1021,18 +1021,32 @@ scenario_ts3() {
 # < 64 MiB with the unit's MemoryMax untouched), relayd's own CPU per event
 # (utime+stime from /proc, so this includes gRPC decode and TLS, which the
 # benchmark does not), the events the collector received, and the
-# compression ratio on these real events. Runs on T-S3's relayd and
-# collector; everything is drained before and after.
+# compression ratio on these real events. T-S3 leaves the unit stopped
+# with the e3 drop-in in place: P4 starts it, and stops it again at the
+# end. The load loops run with xtrace off (the job runs under set -x, which
+# would otherwise throttle them and flood the log).
 P4_LOOPS=${P4_LOOPS:-2}
 scenario_p4_rss() {
 	log "P4-RSS: relayd RSS and CPU at a sustained event rate (${P4_LOOPS} exec loops, 60 s)"
 	ok=true
-	wait_spool_empty 60 || true
 	local store=${COLLECTOR_DIR}/p4.jsonl pid clk t0 t1 c0 c1 maxrss=0 rss n1 sent decoded zb
 	stop_collector
 	rm -f "${store}"
+	# A fresh chain (harness setup, as in T-S1/T-S4), so the collector
+	# sees it from seq 1 and the verifier can check it whole.
+	sudo find "${SPOOL_DIR}" -mindepth 1 -delete
 	start_collector p4 "${store}"
+	start_unit || ok=false
+	sleep 5
+	wait_spool_empty 60 || true
 	pid=$(systemctl show "${UNIT}" -p MainPID --value)
+	if [ "${pid}" = 0 ] || [ ! -r "/proc/${pid}/stat" ]; then
+		echo "relayd is not running (MainPID=${pid})" >&2
+		stop_collector
+		start_collector ts "${TS_STORE}"
+		record_result P4-RSS FAIL
+		return
+	fi
 	clk=$(getconf CLK_TCK)
 	echo "P4-RSS unit MemoryMax=$(systemctl show "${UNIT}" -p MemoryMax --value) MainPID=${pid}"
 	grep -E 'VmRSS|VmHWM' "/proc/${pid}/status"
@@ -1040,12 +1054,12 @@ scenario_p4_rss() {
 	t0=$(date +%s.%N)
 	local loops=()
 	for _ in $(seq 1 "${P4_LOOPS}"); do
-		(end=$((SECONDS + 60)); while [ "${SECONDS}" -lt "${end}" ]; do /usr/bin/true; done) &
+		(set +x; end=$((SECONDS + 60)); while [ "${SECONDS}" -lt "${end}" ]; do /usr/bin/true; done) &
 		loops+=($!)
 	done
 	for _ in $(seq 1 60); do
-		rss=$(awk '/^VmRSS:/ {print $2}' "/proc/${pid}/status")
-		[ "${rss}" -gt "${maxrss}" ] && maxrss=${rss}
+		rss=$(awk '/^VmRSS:/ {print $2}' "/proc/${pid}/status" 2>/dev/null || echo 0)
+		[ "${rss:-0}" -gt "${maxrss}" ] && maxrss=${rss}
 		sleep 1
 	done
 	# Only the load loops: a bare wait would also wait for the collector
@@ -1066,7 +1080,8 @@ scenario_p4_rss() {
 	}'
 	[ "${n1}" -gt 10000 ] || { echo "too few events (${n1}) for a sustained-rate measurement" >&2; ok=false; }
 	[ "${maxrss}" -lt $((64 * 1024)) ] || { echo "relayd VmRSS reached ${maxrss} KiB (>= 64 MiB)" >&2; ok=false; }
-	[ "$(systemctl show "${UNIT}" -p NRestarts --value)" = 0 ] || { echo "relayd restarted under load" >&2; ok=false; }
+	[ "$(systemctl show "${UNIT}" -p MainPID --value)" = "${pid}" ] || { echo "relayd restarted under load" >&2; ok=false; }
+	stop_unit
 	stop_collector
 	start_collector ts "${TS_STORE}"
 	record_result P4-RSS "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
