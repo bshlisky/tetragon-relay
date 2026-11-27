@@ -21,7 +21,7 @@ drop telemetry, and it can acknowledge batches. It can do nothing else.
   3).
 - **`header.host_uuid` must match the client certificate's host UUID.** Reject (close
   the stream) otherwise.
-- Maximum message size: 2 MiB. A batch payload is at most 1 MiB.
+- Maximum message size: 2 MiB. A batch payload is at most 1 MiB as sent (compressed or not); decoded, at most 8 MiB (section 2.3).
 
 ## 2. The batch
 
@@ -30,15 +30,21 @@ the exact bytes.
 
 ### 2.1 Header
 
-Canonical JSON with exactly these keys in exactly this order, no whitespace:
+Canonical JSON with exactly these keys in exactly this order, no whitespace.
+Version 2 (agents from step 7b on, ADR 0040):
 
 ```json
-{"v":1,"host_uuid":"…","boot_id":"…","chain_id":"<32 hex>","seq":1,"prev_hash":"<64 hex>","kind":"events","class":"security","count":3,"first_ts":1795694400000000000,"last_ts":1795694401000000000,"agent_version":"…","epochs":{"prod-db":5},"payload_sha256":"<64 hex>"}
+{"v":2,"host_uuid":"…","boot_id":"…","chain_id":"<32 hex>","seq":1,"prev_hash":"<64 hex>","kind":"events","class":"security","count":3,"first_ts":1795694400000000000,"last_ts":1795694401000000000,"agent_version":"…","epochs":{"prod-db":5},"telemetry_policy_epoch":0,"enc":"zstd","payload_sha256":"<64 hex>"}
 ```
+
+Version 1 (step 7a agents) is the same without `telemetry_policy_epoch` and
+`enc`, and its payload is never compressed. **Accept both.** A 7a agent's
+spooled batches are sent unchanged after an upgrade, so one chain can hold v1
+batches followed by v2 batches.
 
 | Key | Rules |
 | --- | --- |
-| `v` | 1. Any other value: reject the batch (`bad_header`). |
+| `v` | 1 or 2. Any other value: reject the batch (`bad_header`). A v1 header that has `telemetry_policy_epoch` or `enc`, or a v2 header that lacks either, is `bad_header`. |
 | `host_uuid` | Must equal the client certificate's host UUID. |
 | `boot_id` | The host's boot ID, or `""` when the agent had none it could trust. |
 | `chain_id` | 32 lower-case hex characters (128 bits). |
@@ -50,7 +56,9 @@ Canonical JSON with exactly these keys in exactly this order, no whitespace:
 | `first_ts`, `last_ts` | Unix nanoseconds; `first_ts ≤ last_ts`. |
 | `agent_version` | Printable ASCII. |
 | `epochs` | Scope → epoch, keys sorted. `{}` means the agent has no trustworthy epochs (tampered mode, server-contract 10.6). |
-| `payload_sha256` | SHA-256 of `payload`, lower-case hex. |
+| `telemetry_policy_epoch` | v2 only. The epoch of the signed telemetry policy the batch was built under; 0 is the agent's built-in default (until step 7b Part S, always 0). |
+| `enc` | v2 only. `none` or `zstd`. Only `events` batches may be `zstd`: a `dropped` or `chain_reset` batch with `zstd` is `bad_header`. |
+| `payload_sha256` | SHA-256 of `payload` **as sent** (the compressed bytes when `enc` is `zstd`), lower-case hex. |
 
 **Parse strictly, then re-serialize and compare.** Reject unknown keys, duplicate keys,
 other key orders, whitespace, upper-case hex, floats, and anything that does not
@@ -65,12 +73,25 @@ and `process_uprobe`. Non-security events are `process_exec` and `process_exit`.
 hash = SHA-256( uint32_be(len(header)) || header || payload )
 ```
 
-over the bytes as received. If `SHA-256(payload) != payload_sha256`, the batch is
-`hash_mismatch` and is not part of the chain.
+over the bytes as received: for `enc: zstd`, the compressed bytes. If
+`SHA-256(payload) != payload_sha256`, the batch is `hash_mismatch` and is not
+part of the chain. **Check both hashes before you decompress anything.**
 
 ### 2.3 Payload
 
-- `events`: `count` records, each `uint32_be(len) || bytes`, where the bytes are one
+- **Decoding.** With `enc: zstd` the payload is one or more zstd frames. **The
+  decoded payload is at most 8 MiB** (`limits.MaxTelemetryDecodedPayloadBytes`).
+  - Enforce the limit in the decoder itself, so it stops producing output at
+    8 MiB, rather than checking the size after decoding. With
+    `github.com/klauspost/compress/zstd`, use `WithDecoderMaxMemory(8<<20)`,
+    `WithDecoderMaxWindow(8<<20)`, and `WithDecodeAllCapLimit(true)` with a
+    destination buffer of capacity 8 MiB, as `batch.PayloadDecoder` does.
+  - A payload that would decode past the limit, or that isn't valid zstd, is
+    `bad_payload`. Its hash still chains, so it keeps its place in the chain.
+  - Agents compress at most 1 MiB per batch today, so anything larger is not
+    from a correct agent.
+  - `enc: none`, or a v1 header: the payload is the records themselves.
+- `events`: the decoded payload is `count` records, each `uint32_be(len) || bytes`, where the bytes are one
   `tetragon.GetEventsResponse` (Tetragon v1.8.0 API), already redacted on the host:
   - no `environment_variables`;
   - `arguments` tokens matching the host's patterns replaced with `[REDACTED]`;
