@@ -1087,16 +1087,18 @@ scenario_p4_rss() {
 	record_result P4-RSS "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
 }
 
-# T-S4: a tiny spool cap. The only difference is collector.spool_max_bytes
-# = 524288 (512 KiB), in a copy of relay.yaml that a second drop-in line
-# points ExecStart at. With the collector down, non_security batches are
+# T-S4: a tiny spool cap. 64 KiB since step 7b: events are now
+# zstd-compressed (about 4.5x), and 43 s of E3 events fit in 90,776 bytes
+# (run 46039848254), so 7a's 512 KiB never overflowed. The only difference
+# is collector.spool_max_bytes = 65536, in a copy of relay.yaml that a
+# second drop-in line points ExecStart at. With the collector down, non_security batches are
 # dropped first, a dropped record appears in the chain, and security
 # events survive.
 scenario_ts4() {
 	log "T-S4: tiny spool cap; non_security dropped first, declared, security survives"
 	ok=true
 	local small=/etc/tetragon-relay/relay-ts4.yaml store="${COLLECTOR_DIR}/ts4.jsonl"
-	sudo sed 's/^collector:$/collector:\n  spool_max_bytes: 524288/' "${RELAY_YAML}" | sudo tee "${small}" >/dev/null
+	sudo sed 's/^collector:$/collector:\n  spool_max_bytes: 65536/' "${RELAY_YAML}" | sudo tee "${small}" >/dev/null
 	sudo chown root:tetragon-relay "${small}"
 	sudo chmod 0640 "${small}"
 	diff "${RELAY_YAML}" "${small}" || true
