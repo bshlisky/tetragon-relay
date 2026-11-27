@@ -390,3 +390,4 @@ One dated line per push: commit, what changed, the CI result observed.
 - 2026-11-27 `e10484b` (with `ed78f03` T1, `22bdd1b` wire format): run 46000266649: ci ✓, integration ✓, e3 ✓ (S1–S13; no telemetry wired yet).
 - 2026-11-27 `cead125` (with `abcc2c9` spiffetls/StreamEvents, `aa9f137` telemetry core, `362dba7` relayd wiring): run 46003257875: ci ✓, integration ✓, e3 ✓. **S1–S13 and T-S1–T-S5 PASS, NO_SIGSYS PASS**, first attempt.
 - 2026-11-27 `ba4ae68` (with `b26100d` fuzz targets and benchmark; report): run 46008210639: ci ✓ (fuzz-short with the three telemetry targets, coverage gate with internal/telemetry and internal/spiffetls), integration ✓, e3 ✓. **S1–S13, T-S1–T-S5 and NO_SIGSYS PASS** again on the final code commit.
+- 2026-11-27 `eaa6c0b` (progress log for ba4ae68, docs only): run 46013547920: ci ✓, integration ✓, e3 ✓. S1–S13 and T-S1–T-S5 PASS again on the final commit.
