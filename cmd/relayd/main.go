@@ -320,6 +320,7 @@ func run(configPath string, auditor *agentAuditor) error {
 	worker, err := agent.NewApplyWorker(agent.ApplyWorkerConfig{
 		Deps: agent.BundleDeps{
 			Store:          startupResult.Store,
+			Roots:          startupResult.Store,
 			Commit:         commit,
 			Trust:          trustState,
 			Engine:         engine,
@@ -351,6 +352,7 @@ func run(configPath string, auditor *agentAuditor) error {
 		return fmt.Errorf("new apply worker: %w", err)
 	}
 	controlLoop.Jobs = worker
+	trustExpiry := &agent.TrustExpiryMonitor{Trust: trustState, Alerter: alerter, Clock: time.Now}
 
 	sessionCfg := agent.SessionConfig{
 		Connector: &agent.RealConnector{
@@ -375,6 +377,8 @@ func run(configPath string, auditor *agentAuditor) error {
 		HeartbeatInterval: cfg.HeartbeatInterval,
 		Outbox:            outbox,
 		Link:              link,
+		OnConnected:       trustExpiry.Connected,
+		OnHeartbeat:       trustExpiry.Check,
 	}
 
 	// The apply worker outlives individual streams (an apply keeps
