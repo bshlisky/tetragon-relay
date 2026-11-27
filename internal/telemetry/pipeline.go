@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/bshlisky/tetragon-relay/internal/limits"
@@ -77,6 +78,17 @@ func ClassOf(ev *tetragonpb.GetEventsResponse) (class string, ok bool) {
 	return "", false
 }
 
+// classOfField is ClassOf for the event field the rewriter saw.
+func classOfField(n protowire.Number) (class string, ok bool) {
+	switch n { //nolint:exhaustive // a set of field numbers, not an enum
+	case fieldProcessKprobe, fieldProcessLsm, fieldProcessTracepoint, fieldProcessUprobe:
+		return batch.ClassSecurity, true
+	case fieldProcessExec, fieldProcessExit:
+		return batch.ClassNonSecurity, true
+	}
+	return "", false
+}
+
 // Config is New's input. Every field is required.
 type Config struct {
 	Source         EventSource
@@ -109,6 +121,7 @@ type Pipeline struct {
 	drops  rateDrops
 	// admitRate is cfg.MaxEventRate; the benchmark sets it to +Inf.
 	admitRate float64
+	rw        *wireRewriter
 	// counters
 	rateLimited     atomic.Uint64
 	malformed       atomic.Uint64
@@ -146,7 +159,11 @@ func New(cfg Config) (*Pipeline, error) {
 	if cfg.DialTimeout <= 0 {
 		cfg.DialTimeout = defaultDialTimeout
 	}
-	return &Pipeline{cfg: cfg, events: make(chan []byte, eventQueueDepth), admitRate: float64(cfg.MaxEventRate)}, nil
+	rw, err := newWireRewriter(cfg.Redactor)
+	if err != nil {
+		return nil, err
+	}
+	return &Pipeline{cfg: cfg, events: make(chan []byte, eventQueueDepth), admitRate: float64(cfg.MaxEventRate), rw: rw}, nil
 }
 
 // HeartbeatStats is the heartbeat's view (Heartbeat.telemetry_last_seq and
@@ -293,7 +310,6 @@ func (p *Pipeline) build(ctx context.Context) {
 	}
 	tick := time.NewTicker(min(p.cfg.BatchMaxAge/4+time.Millisecond, touchEvery))
 	defer tick.Stop()
-	marshal := proto.MarshalOptions{Deterministic: true}
 	var scratch []byte
 	var lastDecl, lastAudit time.Time
 	declare := func(now time.Time) {
@@ -312,7 +328,6 @@ func (p *Pipeline) build(ctx context.Context) {
 			p.cfg.Auditor.Record("telemetry_rate_limited", fmt.Sprintf("%d non_security events over collector.max_event_rate (%d/s) dropped before decode; declared in the chain", n, p.cfg.MaxEventRate), nil)
 		}
 	}
-	ev := new(tetragonpb.GetEventsResponse)
 	for {
 		select {
 		case <-ctx.Done():
@@ -321,33 +336,38 @@ func (p *Pipeline) build(ctx context.Context) {
 			declare(p.cfg.Clock())
 			return
 		case raw := <-p.events:
-			proto.Reset(ev)
-			if err := proto.Unmarshal(raw, ev); err != nil {
+			// One pass over Tetragon's bytes: validated, redacted and
+			// re-encoded (step 7b D1, wire.go).
+			var meta wireMeta
+			var err error
+			scratch, meta, err = p.rw.rewrite(scratch[:0], raw)
+			if err != nil {
 				p.malformed.Add(1)
 				continue
 			}
-			if rl := ev.GetRateLimitInfo(); rl != nil {
-				p.tetragonDropped.Add(rl.GetNumberOfDroppedProcessEvents())
-				p.cfg.Auditor.Record("telemetry_tetragon_rate_limited", fmt.Sprintf("Tetragon reports %d process events dropped by its rate limit", rl.GetNumberOfDroppedProcessEvents()), nil)
+			if meta.event == fieldRateLimitInfo {
+				var rl tetragonpb.RateLimitInfo
+				if proto.Unmarshal(meta.rateLimitRaw, &rl) == nil {
+					p.tetragonDropped.Add(rl.GetNumberOfDroppedProcessEvents())
+					p.cfg.Auditor.Record("telemetry_tetragon_rate_limited", fmt.Sprintf("Tetragon reports %d process events dropped by its rate limit", rl.GetNumberOfDroppedProcessEvents()), nil)
+				}
 				continue
 			}
-			class, ok := ClassOf(ev)
+			class, ok := classOfField(meta.event)
 			if !ok {
 				p.unclassified.Add(1)
 				continue
 			}
-			if p.cfg.Redactor.Redact(ev) > 0 {
+			if meta.unknown > 0 {
 				p.unknownFields.Add(1)
 			}
-			var err error
-			scratch, err = marshal.MarshalAppend(scratch[:0], ev)
-			if err != nil || len(scratch) == 0 || len(scratch) > limits.MaxTelemetryEventBytes {
+			if len(scratch) == 0 || len(scratch) > limits.MaxTelemetryEventBytes {
 				p.oversized.Add(1)
 				continue
 			}
 			ts := p.cfg.Clock().UnixNano()
-			if t := ev.GetTime(); t != nil {
-				ts = t.AsTime().UnixNano()
+			if meta.hasTime {
+				ts = time.Unix(meta.timeSec, int64(meta.timeNanos)).UnixNano()
 			}
 			b := &cur[1]
 			if class == batch.ClassSecurity {

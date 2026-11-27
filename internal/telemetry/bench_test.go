@@ -160,6 +160,25 @@ func BenchmarkStageDecode(b *testing.B) {
 	}
 }
 
+// BenchmarkStageRewrite is step 7b D1's replacement for decode, redact and
+// marshal together: one pass over the wire bytes.
+func BenchmarkStageRewrite(b *testing.B) {
+	corpus := benchInput()
+	red, _ := NewRedactor(nil)
+	rw, err := newWireRewriter(red)
+	if err != nil {
+		b.Fatal(err)
+	}
+	var out []byte
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if out, _, err = rw.rewrite(out[:0], corpus[i%len(corpus)]); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkStageClassify(b *testing.B) {
 	corpus := benchInput()
 	evs := decodeChunk(b, corpus, 0)

@@ -42,7 +42,7 @@ if [ -n "${BENCH_HISTORY:-}" ]; then
 		h="$out/history-$ref.test"
 		{
 			echo "### $label ($ref)"
-			"$h" -test.run=NONE -test.bench='^BenchmarkStage(Decode|Redact|Marshal)$' -test.benchtime=50000x | grep '^Benchmark' || true
+			"$h" -test.run=NONE -test.bench='^BenchmarkStage(Decode|Redact|Marshal|Rewrite)$' -test.benchtime=50000x | grep '^Benchmark' || true
 			"$h" -test.run=NONE -test.bench='^BenchmarkStage(Spool|Compress)$' -test.benchtime=300x | grep '^Benchmark' || true
 			"$h" -test.run=NONE -test.bench='^BenchmarkPipeline5k$' -test.benchtime="${events}x" -test.count=2 | grep '^Benchmark' || true
 		} | tee -a "$out/history.txt"
@@ -51,7 +51,7 @@ if [ -n "${BENCH_HISTORY:-}" ]; then
 fi
 
 echo "== stage breakdown"
-"$t" -test.run=NONE -test.bench='^BenchmarkStage(Decode|Classify|Redact|Marshal)$' -test.benchtime=50000x | tee "$out/stages.txt"
+"$t" -test.run=NONE -test.bench='^BenchmarkStage(Decode|Classify|Redact|Marshal|Rewrite)$' -test.benchtime=50000x | tee "$out/stages.txt"
 "$t" -test.run=NONE -test.bench='^BenchmarkStage(Spool|Compress)$' -test.benchtime=300x | tee -a "$out/stages.txt"
 
 echo "== profiled pipeline runs ($events events; CPU and allocation profiles in separate runs so one does not distort the other)"
@@ -68,9 +68,8 @@ go tool pprof -top -sample_index=alloc_space -focus='Pipeline..Run' -nodecount=2
 echo "== stage shares of the whole-process CPU profile"
 go tool pprof -top -nodecount=1 "$t" "$out/cpu.out" 2>/dev/null | grep -m1 'Total samples' || true
 for stage in \
-	"decode=bytesSource" \
+	"rewrite=wireState" \
 	"redact=Redactor" \
-	"marshal=MarshalOptions" \
 	"compress=zstd" \
 	"spool=AppendEvents" \
 	"export=exporter..session" \
