@@ -132,6 +132,35 @@ jobs:
           output-file: dist/sbom.spdx.json
           upload-artifact: false
 
+  # Step 7b P1/P3 (docs/reviews/step-07a-review.md R7A-1): the telemetry
+  # pipeline benchmark on the Linux runner, its per-stage breakdown, CPU and
+  # allocation profiles (uploaded), and the CPU gate (<= 6000 ns of process
+  # CPU per event, worst of 3 runs). A job of its own so no other step
+  # shares the runner while it measures.
+  bench:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Telemetry pipeline benchmark, profiles and CPU gate
+        env:
+          BENCH_GATE_ENFORCE: "0"
+        run: scripts/bench-gate.sh bench-out
+
+      - name: Upload pipeline profiles
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pipeline-profiles-${{ github.run_id }}
+          path: bench-out/
+
   # Step 3 prompt Part E3: integration tests against a REAL Tetragon v1.8.0,
   # downloaded from the official release tarball and run as root. The test
   # binary itself (go test) runs as the unprivileged "runner" user; only

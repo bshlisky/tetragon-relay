@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -76,6 +77,9 @@ type memCollector struct {
 	down bool
 	// discard keeps nothing (the benchmark).
 	discard bool
+	// events counts the events in every batch received (the benchmark's
+	// drain condition).
+	events atomic.Uint64
 }
 
 type memStream struct {
@@ -110,6 +114,7 @@ func (s *memStream) Send(b *telemetryv1.Batch) error {
 	if err != nil {
 		return err
 	}
+	s.c.events.Add(h.Count)
 	switch {
 	case hostile:
 		s.acks <- &telemetryv1.Ack{ChainId: h.ChainID[:], Seq: h.Seq + 100}

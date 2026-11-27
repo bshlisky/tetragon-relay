@@ -75,6 +75,11 @@ coverage-tpm:
 	pct=$$(echo "$$line" | awk '{print $$NF}' | tr -d '%'); \
 	awk -v p="$$pct" 'BEGIN { exit !(p+0 >= 90) }' || { echo "$(COVER_TPM_PKG) coverage $$pct% is below the required 90%"; exit 1; }
 
+.PHONY: bench-gate
+# Step 7b P1/P3: pipeline benchmark, per-stage breakdown, profiles, CPU gate.
+bench-gate:
+	scripts/bench-gate.sh bench-out
+
 .PHONY: fuzz-short
 fuzz-short:
 	$(GO) test -run=NONE -fuzz=FuzzStrictJSON -fuzztime=60s ./internal/strictjson/...
