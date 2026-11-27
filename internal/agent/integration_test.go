@@ -23,8 +23,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"os/user"
-	"strconv"
 	"testing"
 	"time"
 
@@ -87,19 +85,6 @@ func mustLookPath(t *testing.T, name string) string {
 	return p
 }
 
-func tetragonRelayGID(t *testing.T) int {
-	t.Helper()
-	g, err := user.LookupGroup("tetragon-relay")
-	if err != nil {
-		t.Fatalf("lookup tetragon-relay group: %v", err)
-	}
-	gid, err := strconv.Atoi(g.Gid)
-	if err != nil {
-		t.Fatalf("parse tetragon-relay gid %q: %v", g.Gid, err)
-	}
-	return gid
-}
-
 // itestPolicyYAML is a real, schema-valid, guard-safe TracingPolicy: an
 // observe-only ("Post") kprobe matchBinaries-scoped to a placeholder path
 // that nothing on the test host ever actually executes (step-03a-review.md
@@ -160,11 +145,8 @@ func TestIntegration_AgentRestartPersistsEpochAndLKG(t *testing.T) {
 		t.Fatalf("FirstBoot = false on the very first Startup, want true")
 	}
 
-	gid := tetragonRelayGID(t)
 	e1 := apply.NewEngine(client, apply.RealPolicyParser{}, res1.Store, &apply.FakeReachabilityChecker{ReachableValue: true}, &apply.FakeAuditor{}, apply.Config{
 		PersistDir:   t.TempDir(),
-		PersistUID:   os.Getuid(),
-		PersistGID:   gid,
 		HealthWindow: apply.HealthWindowConfig{Window: 15 * time.Second, PollInterval: time.Second},
 	})
 

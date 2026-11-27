@@ -10,10 +10,9 @@ import (
 func TestPersistDir_WriteAndOverwrite(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "relay")
-	uid, gid := os.Getuid(), os.Getgid()
 
 	name1, _ := LoadedName("p1", 1, []byte("a"))
-	err := PersistDir(dir, []PersistedPolicy{{LoadedName: name1, CanonicalJSON: []byte(`{"a":1}`)}}, uid, gid)
+	err := PersistDir(dir, []PersistedPolicy{{LoadedName: name1, CanonicalJSON: []byte(`{"a":1}`)}})
 	if err != nil {
 		t.Fatalf("PersistDir: %v", err)
 	}
@@ -33,7 +32,7 @@ func TestPersistDir_WriteAndOverwrite(t *testing.T) {
 	// the directory contents (old file gone, new file present, no
 	// leftover staging directory).
 	name2, _ := LoadedName("p2", 1, []byte("b"))
-	if err := PersistDir(dir, []PersistedPolicy{{LoadedName: name2, CanonicalJSON: []byte(`{"b":2}`)}}, uid, gid); err != nil {
+	if err := PersistDir(dir, []PersistedPolicy{{LoadedName: name2, CanonicalJSON: []byte(`{"b":2}`)}}); err != nil {
 		t.Fatalf("second PersistDir: %v", err)
 	}
 	entries, err = os.ReadDir(dir)
@@ -57,7 +56,7 @@ func TestPersistDir_WriteAndOverwrite(t *testing.T) {
 
 func TestPersistDir_EmptySet(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "relay")
-	if err := PersistDir(dir, nil, os.Getuid(), os.Getgid()); err != nil {
+	if err := PersistDir(dir, nil); err != nil {
 		t.Fatalf("PersistDir(nil): %v", err)
 	}
 	entries, err := os.ReadDir(dir)
@@ -71,7 +70,7 @@ func TestPersistDir_EmptySet(t *testing.T) {
 
 func TestPersistDir_InvalidLoadedNameRejected(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "relay")
-	err := PersistDir(dir, []PersistedPolicy{{LoadedName: "../../etc/passwd", CanonicalJSON: []byte("x")}}, os.Getuid(), os.Getgid())
+	err := PersistDir(dir, []PersistedPolicy{{LoadedName: "../../etc/passwd", CanonicalJSON: []byte("x")}})
 	if err == nil {
 		t.Fatal("PersistDir accepted a path-traversal loaded name")
 	}
@@ -89,7 +88,7 @@ func TestPersistDir_BadParentDirectory(t *testing.T) {
 	if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	err := PersistDir(filepath.Join(notADir, "relay"), nil, os.Getuid(), os.Getgid())
+	err := PersistDir(filepath.Join(notADir, "relay"), nil)
 	if err == nil {
 		t.Fatal("PersistDir succeeded with a non-directory parent")
 	}
@@ -107,7 +106,7 @@ func TestPersistDir_InjectedFailures(t *testing.T) {
 		chmodFileFunc, syncFileFunc = restoreChmod, restoreSync
 		chmodFileFunc = func(*os.File, os.FileMode) error { return injectErr }
 		dir := filepath.Join(t.TempDir(), "relay")
-		if err := PersistDir(dir, policies, os.Getuid(), os.Getgid()); !errors.Is(err, injectErr) {
+		if err := PersistDir(dir, policies); !errors.Is(err, injectErr) {
 			t.Fatalf("PersistDir error = %v, want wrapping the injected chmod failure", err)
 		}
 	})
@@ -115,7 +114,7 @@ func TestPersistDir_InjectedFailures(t *testing.T) {
 		chmodFileFunc, syncFileFunc = restoreChmod, restoreSync
 		syncFileFunc = func(*os.File) error { return injectErr }
 		dir := filepath.Join(t.TempDir(), "relay")
-		if err := PersistDir(dir, policies, os.Getuid(), os.Getgid()); !errors.Is(err, injectErr) {
+		if err := PersistDir(dir, policies); !errors.Is(err, injectErr) {
 			t.Fatalf("PersistDir error = %v, want wrapping the injected sync failure", err)
 		}
 	})
@@ -129,7 +128,7 @@ func TestPersistDir_SyncDirFailure(t *testing.T) {
 
 	dir := filepath.Join(t.TempDir(), "relay")
 	name, _ := LoadedName("p", 1, []byte("x"))
-	err := PersistDir(dir, []PersistedPolicy{{LoadedName: name, CanonicalJSON: []byte("{}")}}, os.Getuid(), os.Getgid())
+	err := PersistDir(dir, []PersistedPolicy{{LoadedName: name, CanonicalJSON: []byte("{}")}})
 	if !errors.Is(err, injectErr) {
 		t.Fatalf("PersistDir error = %v, want wrapping the injected syncDir failure", err)
 	}
@@ -145,7 +144,7 @@ func TestPersistDir_DuplicateLoadedNameFails(t *testing.T) {
 	// O_EXCL on the second write of the same filename must fail; this is
 	// not expected to happen in practice (loaded names come from a map
 	// keyed by base policy name upstream) but is a defensive invariant.
-	if err := PersistDir(dir, policies, os.Getuid(), os.Getgid()); err == nil {
+	if err := PersistDir(dir, policies); err == nil {
 		t.Fatal("PersistDir silently accepted two policies with the same loaded name")
 	}
 }
@@ -166,7 +165,7 @@ func TestPersistDir_NoSiblingTempDirectories(t *testing.T) {
 	defer func() { _ = os.Chmod(root, 0o750) }() // restore so t.TempDir() cleanup can remove it
 
 	name, _ := LoadedName("p", 1, []byte("x"))
-	if err := PersistDir(dir, []PersistedPolicy{{LoadedName: name, CanonicalJSON: []byte("{}")}}, os.Getuid(), os.Getgid()); err != nil {
+	if err := PersistDir(dir, []PersistedPolicy{{LoadedName: name, CanonicalJSON: []byte("{}")}}); err != nil {
 		t.Fatalf("PersistDir with a read-only parent directory: %v", err)
 	}
 }
@@ -188,7 +187,7 @@ func TestPersistDir_RestartReadIsAlwaysSupersetOfOldOrNew(t *testing.T) {
 	newSet := map[string]bool{name2 + ".json": true}
 
 	dir := filepath.Join(t.TempDir(), "relay")
-	if err := PersistDir(dir, old, os.Getuid(), os.Getgid()); err != nil {
+	if err := PersistDir(dir, old); err != nil {
 		t.Fatal(err)
 	}
 
@@ -252,7 +251,7 @@ func TestPersistDir_RestartReadIsAlwaysSupersetOfOldOrNew(t *testing.T) {
 		return nil
 	}
 
-	if err := PersistDir(dir, target, os.Getuid(), os.Getgid()); err != nil {
+	if err := PersistDir(dir, target); err != nil {
 		t.Fatalf("PersistDir: %v", err)
 	}
 
@@ -288,7 +287,7 @@ func TestPersistDir_CrashRecovery(t *testing.T) {
 
 	assertConverged := func(t *testing.T, dir string) {
 		t.Helper()
-		if err := PersistDir(dir, target, os.Getuid(), os.Getgid()); err != nil {
+		if err := PersistDir(dir, target); err != nil {
 			t.Fatalf("recovery PersistDir failed: %v", err)
 		}
 		entries, err := os.ReadDir(dir)
@@ -302,12 +301,12 @@ func TestPersistDir_CrashRecovery(t *testing.T) {
 
 	t.Run("crash_during_staging_write", func(t *testing.T) {
 		dir := filepath.Join(t.TempDir(), "relay")
-		if err := PersistDir(dir, initial, os.Getuid(), os.Getgid()); err != nil {
+		if err := PersistDir(dir, initial); err != nil {
 			t.Fatal(err)
 		}
 		restore := chmodFileFunc
 		chmodFileFunc = func(*os.File, os.FileMode) error { return injectErr }
-		if err := PersistDir(dir, target, os.Getuid(), os.Getgid()); !errors.Is(err, injectErr) {
+		if err := PersistDir(dir, target); !errors.Is(err, injectErr) {
 			t.Fatalf("PersistDir error = %v, want the injected failure", err)
 		}
 		chmodFileFunc = restore
@@ -316,12 +315,12 @@ func TestPersistDir_CrashRecovery(t *testing.T) {
 
 	t.Run("crash_during_staging_sync", func(t *testing.T) {
 		dir := filepath.Join(t.TempDir(), "relay")
-		if err := PersistDir(dir, initial, os.Getuid(), os.Getgid()); err != nil {
+		if err := PersistDir(dir, initial); err != nil {
 			t.Fatal(err)
 		}
 		restore := syncDirFunc
 		syncDirFunc = func(string) error { return injectErr }
-		if err := PersistDir(dir, target, os.Getuid(), os.Getgid()); !errors.Is(err, injectErr) {
+		if err := PersistDir(dir, target); !errors.Is(err, injectErr) {
 			t.Fatalf("PersistDir error = %v, want the injected failure", err)
 		}
 		syncDirFunc = restore
@@ -330,12 +329,12 @@ func TestPersistDir_CrashRecovery(t *testing.T) {
 
 	t.Run("crash_during_rename", func(t *testing.T) {
 		dir := filepath.Join(t.TempDir(), "relay")
-		if err := PersistDir(dir, initial, os.Getuid(), os.Getgid()); err != nil {
+		if err := PersistDir(dir, initial); err != nil {
 			t.Fatal(err)
 		}
 		restore := renameFunc
 		renameFunc = func(string, string) error { return injectErr }
-		if err := PersistDir(dir, target, os.Getuid(), os.Getgid()); !errors.Is(err, injectErr) {
+		if err := PersistDir(dir, target); !errors.Is(err, injectErr) {
 			t.Fatalf("PersistDir error = %v, want the injected failure", err)
 		}
 		renameFunc = restore
@@ -347,7 +346,7 @@ func TestPersistDir_CrashRecovery(t *testing.T) {
 
 	t.Run("crash_during_stale_removal", func(t *testing.T) {
 		dir := filepath.Join(t.TempDir(), "relay")
-		if err := PersistDir(dir, initial, os.Getuid(), os.Getgid()); err != nil {
+		if err := PersistDir(dir, initial); err != nil {
 			t.Fatal(err)
 		}
 		restore := removeAllFunc
@@ -358,7 +357,7 @@ func TestPersistDir_CrashRecovery(t *testing.T) {
 			}
 			return restore(path)
 		}
-		if err := PersistDir(dir, target, os.Getuid(), os.Getgid()); !errors.Is(err, injectErr) {
+		if err := PersistDir(dir, target); !errors.Is(err, injectErr) {
 			t.Fatalf("PersistDir error = %v, want the injected failure", err)
 		}
 		removeAllFunc = restore
@@ -381,7 +380,7 @@ func TestPersistDir_CrashRecovery(t *testing.T) {
 
 	t.Run("crash_during_final_sync", func(t *testing.T) {
 		dir := filepath.Join(t.TempDir(), "relay")
-		if err := PersistDir(dir, initial, os.Getuid(), os.Getgid()); err != nil {
+		if err := PersistDir(dir, initial); err != nil {
 			t.Fatal(err)
 		}
 		restore := syncDirFunc
@@ -393,7 +392,7 @@ func TestPersistDir_CrashRecovery(t *testing.T) {
 			}
 			return restore(path)
 		}
-		if err := PersistDir(dir, target, os.Getuid(), os.Getgid()); !errors.Is(err, injectErr) {
+		if err := PersistDir(dir, target); !errors.Is(err, injectErr) {
 			t.Fatalf("PersistDir error = %v, want the injected failure", err)
 		}
 		syncDirFunc = restore
@@ -402,7 +401,7 @@ func TestPersistDir_CrashRecovery(t *testing.T) {
 
 	t.Run("crash_during_final_staging_cleanup", func(t *testing.T) {
 		dir := filepath.Join(t.TempDir(), "relay")
-		if err := PersistDir(dir, initial, os.Getuid(), os.Getgid()); err != nil {
+		if err := PersistDir(dir, initial); err != nil {
 			t.Fatal(err)
 		}
 		restore := removeAllFunc
@@ -417,7 +416,7 @@ func TestPersistDir_CrashRecovery(t *testing.T) {
 			}
 			return restore(path)
 		}
-		if err := PersistDir(dir, target, os.Getuid(), os.Getgid()); !errors.Is(err, injectErr) {
+		if err := PersistDir(dir, target); !errors.Is(err, injectErr) {
 			t.Fatalf("PersistDir error = %v, want the injected failure", err)
 		}
 		removeAllFunc = restore

@@ -88,7 +88,7 @@ var (
 // strict subset of both sets while non-atomic. Any stale stagingDirName
 // left behind by a previous crashed call is removed before a new one is
 // created.
-func PersistDir(dir string, policies []PersistedPolicy, uid, gid int) error {
+func PersistDir(dir string, policies []PersistedPolicy) error {
 	wantNames := make(map[string]bool, len(policies))
 	for _, p := range policies {
 		if !loadedNamePattern.MatchString(p.LoadedName) {
@@ -116,7 +116,7 @@ func PersistDir(dir string, policies []PersistedPolicy, uid, gid int) error {
 	cleanupStaging := func() { _ = removeAllFunc(stagingDir) }
 
 	for _, p := range policies {
-		if err := writePersistedFile(stagingDir, p, uid, gid); err != nil {
+		if err := writePersistedFile(stagingDir, p); err != nil {
 			cleanupStaging()
 			return err
 		}
@@ -155,7 +155,15 @@ func PersistDir(dir string, policies []PersistedPolicy, uid, gid int) error {
 	return nil
 }
 
-func writePersistedFile(dir string, p PersistedPolicy, uid, gid int) error {
+// writePersistedFile creates one policy file, mode 0640. It never calls
+// chown: relayd is not root, so it could only ever "chown" to itself, and
+// the production unit's SystemCallFilter=~@privileged (which includes
+// @chown) kills the process with SIGSYS on any fchown -- E3 run
+// 45938361280 (S7) showed exactly that on the first bundle apply. The
+// directory is root:tetragon-relay 2770 (architecture doc 8.5), so a new
+// file gets group tetragon-relay from the setgid bit and is readable by
+// Tetragon (root) at 0640.
+func writePersistedFile(dir string, p PersistedPolicy) error {
 	if !loadedNamePattern.MatchString(p.LoadedName) {
 		// Defense in depth: PersistDir already validates every name
 		// before calling this, but this function turns the name
@@ -174,9 +182,6 @@ func writePersistedFile(dir string, p PersistedPolicy, uid, gid int) error {
 	}
 	if err := chmodFileFunc(f, 0o640); err != nil {
 		return fmt.Errorf("apply: chmod %s: %w", path, err)
-	}
-	if err := f.Chown(uid, gid); err != nil {
-		return fmt.Errorf("apply: chown %s: %w", path, err)
 	}
 	if err := syncFileFunc(f); err != nil {
 		return fmt.Errorf("apply: fsync %s: %w", path, err)

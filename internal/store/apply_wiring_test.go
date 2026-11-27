@@ -154,8 +154,6 @@ func TestApplyEngine_LKGStorePutErrorDoesNotRollBackTetragon(t *testing.T) {
 	reach := &apply.FakeReachabilityChecker{ReachableValue: true}
 	engine := apply.NewEngine(client, wiringFakeParser{}, s, reach, auditor, apply.Config{
 		PersistDir: t.TempDir(),
-		PersistUID: os.Getuid(),
-		PersistGID: os.Getgid(),
 		HealthWindow: apply.HealthWindowConfig{
 			Window:         200 * time.Millisecond,
 			PollInterval:   2 * time.Second, // longer than Window: no mid-window poll fires

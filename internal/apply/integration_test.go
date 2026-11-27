@@ -17,8 +17,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"os/user"
-	"strconv"
 	"sync"
 	"syscall"
 	"testing"
@@ -32,13 +30,8 @@ import (
 const integrationSocket = "/var/run/tetragon/tetragon.sock"
 
 // newIntegrationEngine builds an Engine configured the way a real relayd
-// would be: PersistUID/PersistGID are THIS (unprivileged) process's own
-// uid and the tetragon-relay group's gid, never 0 — relayd itself runs as
-// an unprivileged user (packaging/systemd/tetragon-relay.service's
-// User=tetragon-relay, not root), so PersistDir's chown target must be
-// something this process can actually set; chowning to uid 0 would fail
-// with EPERM for the same reason the integration test suite itself is
-// deliberately run unprivileged (step 3 prompt Part E3).
+// would be, run unprivileged (step 3 prompt Part E3). PersistDir never
+// chowns (step 6b: the production unit's seccomp filter forbids it).
 func newIntegrationEngine(t *testing.T, client *tetra.Client) *Engine {
 	t.Helper()
 	return newIntegrationEngineWithPersistDir(t, client, t.TempDir())
@@ -46,18 +39,8 @@ func newIntegrationEngine(t *testing.T, client *tetra.Client) *Engine {
 
 func newIntegrationEngineWithPersistDir(t *testing.T, client *tetra.Client, persistDir string) *Engine {
 	t.Helper()
-	g, err := user.LookupGroup("tetragon-relay")
-	if err != nil {
-		t.Fatalf("lookup tetragon-relay group: %v", err)
-	}
-	gid, err := strconv.Atoi(g.Gid)
-	if err != nil {
-		t.Fatalf("parse tetragon-relay gid %q: %v", g.Gid, err)
-	}
 	return NewEngine(client, RealPolicyParser{}, NewFakeLKGStore(), &FakeReachabilityChecker{ReachableValue: true}, &FakeAuditor{}, Config{
 		PersistDir:   persistDir,
-		PersistUID:   os.Getuid(),
-		PersistGID:   gid,
 		HealthWindow: HealthWindowConfig{Window: 15 * time.Second, PollInterval: time.Second},
 	})
 }
@@ -138,19 +121,9 @@ func mustLookPath(t *testing.T, name string) string {
 // failure reason (if any) drove a rollback, not just Apply's final Status.
 func newIntegrationEngineWithAuditor(t *testing.T, client *tetra.Client) (*Engine, *FakeAuditor) {
 	t.Helper()
-	g, err := user.LookupGroup("tetragon-relay")
-	if err != nil {
-		t.Fatalf("lookup tetragon-relay group: %v", err)
-	}
-	gid, err := strconv.Atoi(g.Gid)
-	if err != nil {
-		t.Fatalf("parse tetragon-relay gid %q: %v", g.Gid, err)
-	}
 	auditor := &FakeAuditor{}
 	e := NewEngine(client, RealPolicyParser{}, NewFakeLKGStore(), &FakeReachabilityChecker{ReachableValue: true}, auditor, Config{
 		PersistDir:   t.TempDir(),
-		PersistUID:   os.Getuid(),
-		PersistGID:   gid,
 		HealthWindow: HealthWindowConfig{Window: 15 * time.Second, PollInterval: time.Second},
 	})
 	return e, auditor

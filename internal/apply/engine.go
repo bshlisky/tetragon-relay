@@ -67,11 +67,8 @@ type Config struct {
 	Domain string
 	// PersistDir is where PersistDir writes the loaded set (Part D4);
 	// defaults to "/etc/tetragon/tetragon.tp.d/relay" if empty.
-	PersistDir string
-	// PersistUID/PersistGID are the owner PersistDir's files are
-	// written with (architecture doc 8.5: root:tetragon-relay).
-	PersistUID, PersistGID int
-	HealthWindow           HealthWindowConfig
+	PersistDir   string
+	HealthWindow HealthWindowConfig
 }
 
 func (c Config) domain() string {
@@ -398,7 +395,7 @@ func (e *Engine) persist(resolved []resolvedPolicy) error {
 	for _, r := range resolved {
 		policies = append(policies, PersistedPolicy{LoadedName: r.loadedName, CanonicalJSON: r.finalJSON})
 	}
-	return PersistDir(e.cfg.persistDir(), policies, e.cfg.PersistUID, e.cfg.PersistGID)
+	return PersistDir(e.cfg.persistDir(), policies)
 }
 
 func (e *Engine) currentDigest(ctx context.Context) (string, error) {
