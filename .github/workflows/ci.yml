@@ -448,7 +448,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run E3 scenarios (S1-S6)
+      - name: Run E3 scenarios (S1-S12)
         run: |
           # sg tetragon-relay (not just the usermod -a -G above): a group
           # added to this user mid-session only takes effect in a freshly

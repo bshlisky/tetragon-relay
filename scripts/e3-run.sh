@@ -106,6 +106,19 @@ setup_users_and_dirs() {
 	# completely unaffected.
 	sudo apparmor_parser -R /etc/apparmor.d/usr.bin.swtpm 2>/dev/null || true
 
+	# Step 6b (S7, S12): enforce bundles need host facts with
+	# usrmerge_ok (internal/agent BundleDeps.EnforceAllowed). relay-probe
+	# requires RHEL 9's /var/run -> ../run; Ubuntu 24.04 ships
+	# /var/run -> /run (integration job run 45929721297: "usrmerge_detail":
+	# "/var/run: symlink target is \"/run\", want \"../run\""). Both name
+	# the same directory. The runner is made to match the production
+	# platform rather than the check being relaxed; this is CI-environment
+	# scaffolding like the AppArmor change above, and relayd's sandbox is
+	# untouched.
+	log "making /var/run the RHEL-style relative symlink to ../run"
+	sudo ln -sfn ../run /var/run
+	readlink /var/run
+
 	log "users and groups"
 	sudo groupadd -f tetragon-relay
 	getent group tss >/dev/null || sudo groupadd tss
