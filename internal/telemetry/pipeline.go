@@ -101,6 +101,7 @@ type Pipeline struct {
 	tetragonDropped atomic.Uint64
 	oversized       atomic.Uint64
 	unclassified    atomic.Uint64
+	unknownFields   atomic.Uint64
 	lostOnWrite     atomic.Uint64
 	protocolErrors  atomic.Uint64
 }
@@ -149,8 +150,11 @@ func (p *Pipeline) Counters() map[string]uint64 {
 		"tetragon_rate_limited": p.tetragonDropped.Load(),
 		"oversized_events":      p.oversized.Load(),
 		"unclassified_events":   p.unclassified.Load(),
-		"events_lost_on_write":  p.lostOnWrite.Load(),
-		"protocol_errors":       p.protocolErrors.Load(),
+		// Events in which the redactor removed fields the vendored API
+		// does not know (a newer Tetragon): they cannot be redacted.
+		"events_with_unknown_fields": p.unknownFields.Load(),
+		"events_lost_on_write":       p.lostOnWrite.Load(),
+		"protocol_errors":            p.protocolErrors.Load(),
 	}
 }
 
@@ -274,7 +278,9 @@ func (p *Pipeline) build(ctx context.Context) {
 				p.unclassified.Add(1)
 				continue
 			}
-			p.cfg.Redactor.Redact(ev)
+			if p.cfg.Redactor.Redact(ev) > 0 {
+				p.unknownFields.Add(1)
+			}
 			raw, err := marshal.Marshal(ev)
 			if err != nil || len(raw) == 0 || len(raw) > limits.MaxTelemetryEventBytes {
 				p.oversized.Add(1)
