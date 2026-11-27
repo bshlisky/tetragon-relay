@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"runtime"
 	"time"
 
 	"github.com/bshlisky/tetragon-relay/internal/agent"
@@ -106,7 +107,7 @@ func startTelemetry(ctx context.Context, d telemetryDeps) (*telemetry.Pipeline, 
 		return nil, err
 	}
 	go p.Run(ctx)
-	d.auditor.Record(agent.AuditEvent{Step: "telemetry_started", Detail: fmt.Sprintf("event types %v, %d collector endpoint(s), spool cap %d bytes, non_security budget %d events/s", d.cfg.EventTypes, len(d.cfg.CollectorEndpoints), d.cfg.SpoolMaxBytes, d.cfg.MaxEventRate)})
+	d.auditor.Record(agent.AuditEvent{Step: "telemetry_started", Detail: fmt.Sprintf("event types %v, %d collector endpoint(s), spool cap %d bytes, non_security budget %d events/s, GOMAXPROCS %d", d.cfg.EventTypes, len(d.cfg.CollectorEndpoints), d.cfg.SpoolMaxBytes, d.cfg.MaxEventRate, runtime.GOMAXPROCS(0))})
 	return p, nil
 }
 

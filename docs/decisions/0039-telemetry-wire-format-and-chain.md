@@ -159,6 +159,82 @@ d. **Overflow** drops the oldest `non_security` batches first, then the oldest
 The telemetry goroutines are liveness components that prove their own loops run, not
 that the collector is reachable. A collector outage never withholds the watchdog.
 
+### 10. Amendments in step 7b (docs/reviews/step-07b-decisions.md)
+
+#### 10a. Admission control at ingest (D0)
+
+Telemetry and the control plane share relayd's `CPUQuota=25%`, and Go does not schedule
+by priority. An event flood must not be able to delay heartbeats, the apply worker's
+health window or the watchdog ping.
+
+- `tetra.StreamEvents` hands each `GetEventsResponse` to telemetry as its wire bytes
+  (a raw codec on that one RPC; the content-subtype is still `proto`).
+- Ingest reads only the top-level tag of the event oneof, without decoding:
+  - security events (`process_kprobe`, `process_lsm`, `process_tracepoint`,
+    `process_uprobe`) and `RateLimitInfo` are always admitted;
+  - anything else, including a response that is malformed, names no event or names two
+    distinct event fields, is admitted only while a token bucket of
+    `collector.max_event_rate` per second (default 2000, burst one second, hard maximum
+    `limits.MaxCollectorEventRate` = 5000) has a token.
+- Events over the budget are dropped before decode, counted (`rate_limited_events`),
+  and declared in the chain by `dropped` records of the form
+  `{"class":"non_security","reason":"rate_limited","events":N}`, at most one per
+  `batch_max_age`, with `first_ts`/`last_ts` bounding the drops. They are audited at most
+  once a minute.
+- The heartbeat's telemetry fields are read from atomics the spool publishes on every
+  unlock, so the control loop never waits for the spool's lock, which is held across
+  compression, fsyncs and overflow handling.
+- The builder's work per event is one rewrite (10b) and an append; per batch, at most
+  1 MiB of payload is compressed and four syncs are issued. The exporter runs on its
+  own goroutine and connection; nothing the control stream waits on is shared with it
+  besides the heartbeat's atomics.
+- E3 `P5-CONTROL-UNDER-LOAD` proves it: a monitor bundle during the heaviest exec flood
+  the runner can generate, with no heartbeat gap above 20 s, `APPLIED`, no watchdog
+  timeout, `rate_limited` records in the chain and the canary's kprobe event delivered.
+
+#### 10b. Wire-level redaction (D1, option a)
+
+Section 7's redaction is unchanged in what it removes or rewrites. How it is done
+changes: records are **Tetragon's bytes with the redacted fields rewritten**, not a
+deterministic re-marshal of a decoded message.
+
+- `internal/telemetry/wire.go` rewrites a `GetEventsResponse` in one pass, with a
+  per-message plan built once at startup from the vendored v1.8.0 descriptors:
+  - `environment_variables` (any message) is validated, then removed;
+  - a singular string field named `arguments` gets the argv rules;
+  - every other string field (repeated, map values, oneof cases) gets the `~/.ssh` path
+    rule; map keys are kept;
+  - unknown fields are dropped and counted;
+  - everything else is copied as sent.
+- It is a parser and is held to parser rules. It rejects (and the builder counts in
+  `malformed_events`, never spooling) everything `proto.Unmarshal` rejects: a bad
+  varint or tag, a length past the end, a field number out of range, invalid UTF-8 in a
+  string field, a malformed packed field. It also rejects three things
+  `proto.Unmarshal` accepts:
+  - a known field with the wrong wire type (`proto.Unmarshal` would keep it as an
+    unknown field);
+  - nesting deeper than 32 messages (`proto.Unmarshal` allows 10,000);
+  - two different fields of one oneof in a message (`proto.Unmarshal` keeps the last).
+  Inside map entries it skips unknown and mistyped fields exactly as `proto.Unmarshal`
+  does.
+- **Equivalence is fuzzed.** `FuzzWireRedact`: for every input, the rewrite decodes
+  `proto.Equal` to decode → `Redact` → marshal, and the two reject the same inputs. The
+  oracle's three extra rejections come from a scan that walks the descriptors directly,
+  not the rewriter's plan. `TestWirePlan_CoversTheGeneratedRedactor` ties the plan's
+  message set to the generator's (`internal/redactgen`), whose output is checked in CI
+  against the vendored descriptors.
+- The generated `Redactor.Redact` stays: it is the oracle for the rewriter, and the
+  reflection walk remains the oracle for it.
+
+#### 10c. fsync (D4)
+
+A batch costs four syncs: the batch file, the directory after its rename, the head, and
+the directory after the head's rename. Merging the head into the batch file would save
+two, but a local root could then delete the newest unsent batches and the chain would
+continue without a gap. The separate head is kept (about 1.5 % of the pipeline's CPU
+samples). Each batch file carries one HMAC-SHA-384, over the file name, the magic and
+the batch hash (step 7b P2).
+
 ## Consequences
 
 - The backend team implements `relay.telemetry.v1.Collector` and the verifier described

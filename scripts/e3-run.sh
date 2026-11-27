@@ -1069,6 +1069,7 @@ scenario_p4_rss() {
 	t1=$(date +%s.%N)
 	c1=$(awk '{print $14 + $15}' "/proc/${pid}/stat")
 	wait_spool_empty 120 || ok=false
+	scenario_journal | grep -o 'GOMAXPROCS [0-9]*' | head -1
 	grep -E 'VmRSS|VmHWM' "/proc/${pid}/status"
 	rep=$(collector_report "${store}" --decode) || ok=false
 	grep -E 'REPORT (chain|CLEAN)' <<<"${rep}"
@@ -1123,6 +1124,44 @@ scenario_p4_rss() {
 	stop_unit
 	stop_collector
 	record_result P4-RSS "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
+}
+
+# P4-GOMAXPROCS1 (report only, step 7b D1 data for ADR 0041): the E3
+# relayd profile puts most of relayd's CPU in the gRPC reader's syscalls
+# and the Go scheduler, before admission. Same load as P4-RSS, with
+# GOMAXPROCS=1 set by a test drop-in (an environment variable, no
+# privilege), to measure the scheduler's share. Not a pass criterion.
+scenario_p4_gomaxprocs1() {
+	log "P4-GOMAXPROCS1: P4-RSS's load with GOMAXPROCS=1 (report only)"
+	local store=${COLLECTOR_DIR}/p4g.jsonl counts=/tmp/e3-p4g-counts pid clk t0 t1 c0 c1 gen n
+	write_dropins "e3.conf=$(e3_dropin)" "gmp.conf=$(printf '[Service]\nEnvironment=GOMAXPROCS=1')"
+	rm -f "${store}"
+	sudo find "${SPOOL_DIR}" -mindepth 1 -delete
+	start_collector p4g "${store}"
+	SCENARIO_SINCE=$(date '+%Y-%m-%d %H:%M:%S')
+	start_unit || true
+	sleep 5
+	pid=$(systemctl show "${UNIT}" -p MainPID --value)
+	clk=$(getconf CLK_TCK)
+	c0=$(awk '{print $14 + $15}' "/proc/${pid}/stat" 2>/dev/null || echo 0)
+	t0=$(date +%s.%N)
+	flood_pids=()
+	flood 60 "${P4_LOOPS}" "${counts}"
+	wait "${flood_pids[@]}"
+	t1=$(date +%s.%N)
+	c1=$(awk '{print $14 + $15}' "/proc/${pid}/stat" 2>/dev/null || echo 0)
+	gen=$(flood_events "${counts}")
+	wait_spool_empty 120 || true
+	n=$(collector_report "${store}" | grep -o '"kind":"events","class":"[a-z_]*","count":[0-9]*' | awk -F: '{s += $NF} END {print s + 0}')
+	scenario_journal | grep -o 'GOMAXPROCS [0-9]*' | head -1
+	awk -v c0="${c0}" -v c1="${c1}" -v clk="${clk}" -v t0="${t0}" -v t1="${t1}" -v n="${n}" -v g="${gen}" 'BEGIN {
+		cpu = (c1 - c0) / clk; wall = t1 - t0
+		printf "P4-GOMAXPROCS1 generated=%d (%.0f/s) received=%d (%.0f/s) relayd_cpu=%.2fs (%.2f%% of one core) cpu_per_generated=%.0fns\n", g, g / wall, n, n / wall, cpu, 100 * cpu / wall, (g > 0 ? 1e9 * cpu / g : 0)
+	}'
+	stop_unit
+	stop_collector
+	write_dropins "e3.conf=$(e3_dropin)"
+	record_result P4-GOMAXPROCS1 INFO
 }
 
 # flood SECONDS LOOPS OUTFILE: LOOPS shell loops exec /usr/bin/true for
@@ -1381,6 +1420,7 @@ main() {
 			# Last of the telemetry scenarios: after its flood, Tetragon
 			# delivered no events to T-S4/T-S5 (run 46051067160).
 			scenario_p4_rss
+			scenario_p4_gomaxprocs1 # report only
 			scenario_p5  # after P4-RSS: its own bundle at epoch 7
 			scenario_s13 # needs S10's root-v2.json and S12's bundle; restores the index
 			scenario_s4  # last: revocation is terminal for this store (ADR 0035)
