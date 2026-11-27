@@ -79,6 +79,9 @@ type ChainSummary struct {
 	MaxSeq   uint64
 	Received int
 	Declared int
+	// RateLimited is the number of events the chain's rate_limited
+	// dropped records declare (step 7b D0).
+	RateLimited uint64
 	// ResetReason is the seq-1 chain_reset's reason, if received.
 	ResetReason string
 }
@@ -127,6 +130,7 @@ type chain struct {
 	contiguous  uint64
 	received    int
 	declared    int
+	rateLimited uint64
 	resetReason string
 }
 
@@ -257,7 +261,12 @@ func (v *Verifier) Add(header, payload []byte) []Finding {
 			out = append(out, f(BadPayload, cid, h.Seq, "%v", err))
 			break
 		}
-		out = append(out, f(Dropped, cid, h.Seq, "class=%s count=%d", d.Class, len(d.Batches)))
+		if d.Reason == batch.DropRateLimited {
+			c.rateLimited += d.Events
+			out = append(out, f(Dropped, cid, h.Seq, "class=%s reason=%s events=%d", d.Class, d.Reason, d.Events))
+		} else {
+			out = append(out, f(Dropped, cid, h.Seq, "class=%s count=%d", d.Class, len(d.Batches)))
+		}
 		for _, ref := range d.Batches {
 			out = append(out, v.declare(idx, ref)...)
 		}
@@ -383,7 +392,7 @@ func (v *Verifier) Chains() []ChainSummary {
 		c := v.chains[id]
 		out = append(out, ChainSummary{
 			ChainID: id.String(), HostUUID: c.host, BootID: c.boot, Contiguous: c.contiguous,
-			MaxSeq: c.maxSeq, Received: c.received, Declared: c.declared, ResetReason: c.resetReason,
+			MaxSeq: c.maxSeq, Received: c.received, Declared: c.declared, RateLimited: c.rateLimited, ResetReason: c.resetReason,
 		})
 	}
 	return out

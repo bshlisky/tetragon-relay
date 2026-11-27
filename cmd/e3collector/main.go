@@ -276,7 +276,7 @@ func report(args []string) error {
 		fmt.Printf("REPORT %s chain=%s seqs=%d..%d\n", g.Kind, g.ChainID, g.Seq, g.LastSeq)
 	}
 	for _, c := range v.Chains() {
-		fmt.Printf("REPORT chain %s boot=%q contiguous=%d max=%d received=%d declared_dropped=%d reset=%s\n", c.ChainID, c.BootID, c.Contiguous, c.MaxSeq, c.Received, c.Declared, c.ResetReason)
+		fmt.Printf("REPORT chain %s boot=%q contiguous=%d max=%d received=%d declared_dropped=%d rate_limited_events=%d reset=%s\n", c.ChainID, c.BootID, c.Contiguous, c.MaxSeq, c.Received, c.Declared, c.RateLimited, c.ResetReason)
 	}
 	r := chainverify.Verify(*host, in)
 	if !r.Clean() {

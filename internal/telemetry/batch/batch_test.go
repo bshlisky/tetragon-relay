@@ -323,3 +323,46 @@ func TestSplitRecords(t *testing.T) {
 		t.Fatal("hex String")
 	}
 }
+
+func TestDropped_RateLimited(t *testing.T) {
+	d := Dropped{Class: ClassNonSecurity, Reason: DropRateLimited, Events: 1234}
+	raw, err := d.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"class":"non_security","reason":"rate_limited","events":1234}`; string(raw) != want {
+		t.Fatalf("Marshal = %s, want %s", raw, want)
+	}
+	got, err := ParseDropped(raw)
+	if err != nil || got.Reason != DropRateLimited || got.Events != 1234 || got.Class != ClassNonSecurity || len(got.Batches) != 0 {
+		t.Fatalf("ParseDropped: %+v %v", got, err)
+	}
+	s := string(raw)
+	for name, in := range map[string]string{
+		"security class": strings.Replace(s, `"non_security"`, `"security"`, 1),
+		"zero events":    strings.Replace(s, `1234`, `0`, 1),
+		"negative":       strings.Replace(s, `1234`, `-1`, 1),
+		"reason":         strings.Replace(s, `rate_limited`, `spool_overflow`, 1),
+		"order":          `{"class":"non_security","events":1234,"reason":"rate_limited"}`,
+		"with count":     strings.Replace(s, `}`, `,"count":0}`, 1),
+		"with batches":   strings.Replace(s, `}`, `,"batches":[]}`, 1),
+		"unknown key":    strings.Replace(s, `}`, `,"x":1}`, 1),
+		"overflow+events": `{"class":"non_security","count":1,"batches":[{"chain_id":"` + strings.Repeat("01", 16) +
+			`","seq":7,"hash":"` + strings.Repeat("02", 32) + `"}],"events":3}`,
+	} {
+		if _, err := ParseDropped([]byte(in)); !errors.Is(err, ErrBadPayload) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	for name, bad := range map[string]Dropped{
+		"security":       {Class: ClassSecurity, Reason: DropRateLimited, Events: 1},
+		"no events":      {Class: ClassNonSecurity, Reason: DropRateLimited},
+		"with batches":   {Class: ClassNonSecurity, Reason: DropRateLimited, Events: 1, Batches: []Ref{{Seq: 1}}},
+		"unknown reason": {Class: ClassNonSecurity, Reason: "x", Events: 1},
+		"overflow+count": {Class: ClassNonSecurity, Events: 1, Batches: []Ref{{Seq: 1}}},
+	} {
+		if _, err := bad.Marshal(); !errors.Is(err, ErrBadPayload) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}

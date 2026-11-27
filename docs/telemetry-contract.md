@@ -101,6 +101,16 @@ part of the chain. **Check both hashes before you decompress anything.**
   The spool overflowed, so the agent deleted these batches unsent (or sent but not yet
   acked). `count` equals the number of entries. The hashes let you verify the
   `prev_hash` links across the hole.
+- `dropped` with `reason` (admission control, step 7b D0): canonical JSON
+  `{"class":"non_security","reason":"rate_limited","events":1234}`.
+  - The agent dropped `events` non_security events (exec, exit) that arrived over its
+    configured budget (`collector.max_event_rate`, default 2000/s, at most 5000/s), before
+    decoding them. They never formed batches, so no seq is missing.
+  - The header's `first_ts` and `last_ts` bound when they were dropped.
+  - `rate_limited` is the only reason, and its class is always `non_security`: security
+    events (kprobe, LSM, tracepoint, uprobe) are never rate-limited. Any other
+    combination is `bad_payload`.
+  - A dropped record without `reason` is the spool-overflow form above.
 - `chain_reset`: canonical JSON `{"reason":"boot_changed","prev":{"chain_id":"…","seq":41,"hash":"…"}}`
   or `{"reason":"head_missing","prev":null}`. Reasons: `boot_changed`, `head_missing`,
   `head_corrupt`, `tampered_mode`, `boot_id_unknown`.
@@ -132,7 +142,7 @@ ahead of a gap. Flag:
 | `chain_reset` | Every seq-1 batch. Expected after a reboot (`boot_changed`); anything else (`head_missing`, `head_corrupt`, `tampered_mode`, `boot_id_unknown`) is a security event. | `boot_changed`: check it against the maintenance window; others: alert. |
 | `duplicate_mismatch` | The same `(chain_id, seq)` arrives twice with different hashes (also a `chain_fork`). | High. |
 | `bad_header`, `hash_mismatch` | Section 2. | Alert; the batch is not part of the chain. |
-| `dropped` | Every `dropped` record: loss is declared, with class and count. | Informational; `security` class drops are an alert. |
+| `dropped` | Every `dropped` record: loss is declared, with class and count. | Informational; `security` class drops are an alert. A sustained `rate_limited` stream means the host generates more non_security events than its budget: tune the budget or the workload. |
 
 An identical duplicate (same seq, same hash) is expected after a reconnect and is not a
 signal.

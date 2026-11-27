@@ -16,12 +16,24 @@ type Ref struct {
 	Hash    Hash
 }
 
-// Dropped is a dropped record's payload (ADR 0039 section 4b): the
-// batches the spool deleted to make room, all of one class.
+// Dropped is a dropped record's payload. It has two forms:
+//
+//   - spool overflow (ADR 0039 section 4b; Reason empty): the batches the
+//     spool deleted to make room, all of one class;
+//   - admission (step 7b D0; Reason DropRateLimited): Events non_security
+//     events that ingest dropped over the configured event-rate budget,
+//     before they were decoded. They never formed batches, so Batches is
+//     empty, and the header's first_ts/last_ts bound when they were
+//     dropped.
 type Dropped struct {
 	Class   string
 	Batches []Ref
+	Reason  string
+	Events  uint64
 }
+
+// DropRateLimited is the reason of an admission dropped record.
+const DropRateLimited = "rate_limited"
 
 // Reset reasons (ADR 0039 section 3).
 const (
@@ -59,6 +71,25 @@ func appendRef(b []byte, r Ref) []byte {
 
 // Marshal returns d's canonical JSON.
 func (d *Dropped) Marshal() ([]byte, error) {
+	switch d.Reason {
+	case "":
+	case DropRateLimited:
+		// Security events are never rate-limited (step 7b D0).
+		if d.Class != ClassNonSecurity || d.Events == 0 || len(d.Batches) != 0 {
+			return nil, fmt.Errorf("%w: rate_limited dropped record: class %q, %d events, %d batches", ErrBadPayload, d.Class, d.Events, len(d.Batches))
+		}
+		b := append([]byte(`{"class":"`), d.Class...)
+		b = append(b, `","reason":"`...)
+		b = append(b, d.Reason...)
+		b = append(b, `","events":`...)
+		b = strconv.AppendUint(b, d.Events, 10)
+		return append(b, '}'), nil
+	default:
+		return nil, fmt.Errorf("%w: dropped reason %q", ErrBadPayload, d.Reason)
+	}
+	if d.Events != 0 {
+		return nil, fmt.Errorf("%w: spool-overflow dropped record with an event count", ErrBadPayload)
+	}
 	if d.Class != ClassSecurity && d.Class != ClassNonSecurity {
 		return nil, fmt.Errorf("%w: dropped class %q", ErrBadPayload, d.Class)
 	}
@@ -101,6 +132,8 @@ func (w wireRef) ref() (Ref, error) {
 func ParseDropped(raw []byte) (Dropped, error) {
 	var w struct {
 		Class   string    `json:"class"`
+		Reason  string    `json:"reason"`
+		Events  uint64    `json:"events"`
 		Count   int       `json:"count"`
 		Batches []wireRef `json:"batches"`
 	}
@@ -113,7 +146,7 @@ func ParseDropped(raw []byte) (Dropped, error) {
 	if w.Count != len(w.Batches) {
 		return Dropped{}, fmt.Errorf("%w: dropped count %d but %d entries", ErrBadPayload, w.Count, len(w.Batches))
 	}
-	d := Dropped{Class: w.Class}
+	d := Dropped{Class: w.Class, Reason: w.Reason, Events: w.Events}
 	for _, e := range w.Batches {
 		r, err := e.ref()
 		if err != nil {
