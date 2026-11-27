@@ -424,7 +424,13 @@ jobs:
           # The step shell runs with -e; capture rc explicitly so the
           # output is always printed (run 45873245634 exited silently).
           rc=0
-          out="$(sudo systemd-analyze verify "${GITHUB_WORKSPACE}/packaging/systemd/tetragon-relay.service" 2>&1)" || rc=$?
+          # SYSTEMD_LOG_TARGET=console: run 45876885071 failed with rc=1
+          # and no output, because systemd tools may log to the journal
+          # rather than stderr. --man=no: Documentation= is not checked.
+          out="$(sudo env SYSTEMD_LOG_TARGET=console SYSTEMD_LOG_LEVEL=notice systemd-analyze verify --man=no "${GITHUB_WORKSPACE}/packaging/systemd/tetragon-relay.service" 2>&1)" || rc=$?
+          if [ "${rc}" -ne 0 ] && [ -z "${out}" ]; then
+            sudo journalctl -t systemd-analyze --since "-5min" --no-pager || true
+          fi
           printf '%s\n' "${out}"
           if [ "${rc}" -ne 0 ] || [ -n "${out}" ]; then
             echo "systemd-analyze verify reported problems (rc=${rc})" >&2
