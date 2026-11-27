@@ -47,6 +47,8 @@ jobs:
             package: ./internal/telemetry
           - target: FuzzPeekAdmit
             package: ./internal/telemetry
+          - target: FuzzWireRedact
+            package: ./internal/telemetry
           - target: FuzzPayloadDecode
             package: ./internal/telemetry/batch
     steps:
