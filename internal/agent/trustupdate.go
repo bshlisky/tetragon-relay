@@ -18,12 +18,6 @@ type TrustRootStore interface {
 	Tampered() error
 }
 
-// trustUpdateAlertPrefix starts every Alert.detail raised for a rejected
-// trust update. control.proto's Alert.Kind has no trust-update kind, so
-// these alerts carry KIND_UNSPECIFIED and this fixed prefix (step-06b
-// report, open questions).
-const trustUpdateAlertPrefix = "TRUST_UPDATE_REJECTED: "
-
 // set replaces the current trust root. Only the apply worker calls it,
 // between jobs (docs/prompts/step-06b.md C2).
 func (t *TrustState) set(root *trust.Root) {
@@ -81,7 +75,7 @@ func (w *ApplyWorker) processTrustUpdate(roots [][]byte) {
 	d := w.cfg.Deps
 	fail := func(detail string, err error) {
 		w.cfg.Auditor.Record(AuditEvent{Step: "trust_update_rejected", Detail: detail, Err: err})
-		w.cfg.Alerter.Raise(controlv1.Alert_KIND_UNSPECIFIED, trustUpdateAlertPrefix+detail)
+		w.cfg.Alerter.Raise(controlv1.Alert_TRUST_UPDATE_REJECTED, detail)
 	}
 	if terr := d.Roots.Tampered(); terr != nil {
 		fail("store TAMPERED: every trust update is rejected until operator re-enrollment", terr)

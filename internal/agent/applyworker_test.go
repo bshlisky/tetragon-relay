@@ -368,7 +368,7 @@ func TestApplyWorker_TamperedStoreRejectsEveryBundle(t *testing.T) {
 	}
 	p.worker.SubmitBundle(p.bundle("monitor", 2, "a"))
 	r := p.nextResult()
-	if r.GetStatus() != controlv1.ApplyResult_REJECTED_EPOCH || !strings.Contains(r.GetDetail(), "TAMPERED") {
+	if r.GetStatus() != controlv1.ApplyResult_REJECTED_TAMPERED || !strings.Contains(r.GetDetail(), "TAMPERED") {
 		t.Fatalf("tampered: %v", r)
 	}
 	if !p.auditor.hasDetail("alert", "kind=TAMPER") {
@@ -392,7 +392,7 @@ func TestApplyWorker_SupersededPendingAndVerifyAtDequeue(t *testing.T) {
 	p.worker.SubmitBundle(replay)
 
 	r := p.nextResult()
-	if r.GetStatus() != controlv1.ApplyResult_REJECTED_EPOCH || r.GetDetail() != "superseded" || string(r.GetBundleDigest()) != string(digestOf(superseded)) {
+	if r.GetStatus() != controlv1.ApplyResult_SUPERSEDED || r.GetDetail() != "superseded" || string(r.GetBundleDigest()) != string(digestOf(superseded)) {
 		t.Fatalf("superseded result = %v", r)
 	}
 	close(p.engine.block)
@@ -411,7 +411,7 @@ func TestApplyWorker_SupersededPendingAndVerifyAtDequeue(t *testing.T) {
 func TestApplyWorker_NotSteadyIsNotApplied(t *testing.T) {
 	p := newPipeline(t, pipelineOpts{enforceAllowed: true, status: apply.StatusApplied, smState: agent.StateDegraded})
 	p.worker.SubmitBundle(p.bundle("monitor", 1, "a"))
-	if r := p.nextResult(); r.GetStatus() != controlv1.ApplyResult_APPLY_FAILED || !strings.Contains(r.GetDetail(), "DEGRADED") {
+	if r := p.nextResult(); r.GetStatus() != controlv1.ApplyResult_REJECTED_AGENT_STATE || !strings.Contains(r.GetDetail(), "DEGRADED") {
 		t.Fatalf("result = %v", r)
 	}
 	if len(p.engine.applied) != 0 {
@@ -430,7 +430,7 @@ func TestApplyWorker_OutcomeMapping(t *testing.T) {
 	}{
 		{"rolled back", apply.StatusRolledBack, false, controlv1.ApplyResult_ROLLED_BACK, agent.StateSteady, false},
 		{"apply failed", apply.StatusApplyFailed, false, controlv1.ApplyResult_APPLY_FAILED, agent.StateSteady, false},
-		{"rollback failed", apply.StatusRollbackFailed, false, controlv1.ApplyResult_APPLY_FAILED, agent.StateDegraded, true},
+		{"rollback failed", apply.StatusRollbackFailed, false, controlv1.ApplyResult_ROLLBACK_FAILED, agent.StateDegraded, true},
 		{"engine error", apply.StatusApplied, true, controlv1.ApplyResult_APPLY_FAILED, agent.StateSteady, false},
 	}
 	for _, c := range cases {
@@ -441,22 +441,30 @@ func TestApplyWorker_OutcomeMapping(t *testing.T) {
 				p.engine.err = errors.New("tetragon version unsupported")
 			}
 			p.worker.SubmitBundle(p.bundle("monitor", 1, "a"))
-			var gotAlert bool
+			gotAlerts := map[controlv1.Alert_Kind]bool{}
 			var r *controlv1.ApplyResult
 			for r == nil {
 				m := p.next()
-				if a := m.GetAlert(); a != nil && a.GetKind() == controlv1.Alert_DRIFT {
-					gotAlert = true
+				if a := m.GetAlert(); a != nil {
+					gotAlerts[a.GetKind()] = true
 				}
 				r = m.GetApplyResult()
 			}
 			if r.GetStatus() != c.want {
 				t.Fatalf("status = %s, want %s (%s)", r.GetStatus(), c.want, r.GetDetail())
 			}
-			if c.wantAlert && !gotAlert {
-				// The alert is pushed after the result.
-				if a := p.next().GetAlert(); a == nil || a.GetKind() != controlv1.Alert_DRIFT {
-					t.Fatalf("no DRIFT alert for ROLLBACK_FAILED")
+			if c.wantAlert {
+				// The alerts are pushed after the result: ROLLBACK_FAILED,
+				// then DRIFT (ADR 0037).
+				for len(gotAlerts) < 2 {
+					a := p.next().GetAlert()
+					if a == nil {
+						t.Fatal("expected an alert after the ApplyResult")
+					}
+					gotAlerts[a.GetKind()] = true
+				}
+				if !gotAlerts[controlv1.Alert_ROLLBACK_FAILED] || !gotAlerts[controlv1.Alert_DRIFT] {
+					t.Fatalf("alerts for ROLLBACK_FAILED = %v, want ROLLBACK_FAILED and DRIFT", gotAlerts)
 				}
 			}
 			if got := p.sm.Current(); got != c.wantState {
@@ -565,7 +573,7 @@ func TestTrustUpdate_PartialChainKeepsLastGoodRoot(t *testing.T) {
 	bad, _, _ := rotatedRootWithTargets(t, 3, exp, []*genKey{mustKey(t), mustKey(t)}) // not signed by v2's root keys
 	p.worker.SubmitTrustUpdate([][]byte{v2, bad})
 	a := p.nextAlert()
-	if a.GetKind() != controlv1.Alert_KIND_UNSPECIFIED || !strings.HasPrefix(a.GetDetail(), "TRUST_UPDATE_REJECTED: ") || !strings.Contains(a.GetDetail(), "keeping version 2") {
+	if a.GetKind() != controlv1.Alert_TRUST_UPDATE_REJECTED || !strings.Contains(a.GetDetail(), "keeping version 2") {
 		t.Fatalf("alert = %v", a)
 	}
 	if p.rootVersion() != 2 {

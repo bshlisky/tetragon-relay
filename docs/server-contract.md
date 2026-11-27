@@ -61,9 +61,17 @@ bundle: an apply includes the health window (up to 600 s), and an ApplyResult pr
 while the stream is down is sent after the next HelloAck. `status` is one of:
 
 ```
-APPLIED REJECTED_SIGNATURE REJECTED_TARGET REJECTED_EPOCH REJECTED_EXPIRED
-REJECTED_SCHEMA REJECTED_GUARDRAIL APPLY_FAILED ROLLED_BACK REJECTED_CAPABILITY
+STATUS_UNSPECIFIED(0) REJECTED_SIGNATURE(1) REJECTED_TARGET(2) REJECTED_EPOCH(3)
+REJECTED_EXPIRED(4) REJECTED_SCHEMA(5) REJECTED_GUARDRAIL(6) APPLY_FAILED(7)
+ROLLED_BACK(8) REJECTED_CAPABILITY(9) APPLIED(10) SUPERSEDED(11) REJECTED_TAMPERED(12)
+REJECTED_AGENT_STATE(13) ROLLBACK_FAILED(14)
 ```
+
+**Only `APPLIED` means applied.** Treat `STATUS_UNSPECIFIED`, and any status number
+your bindings do not know, as **not applied** (ADR 0037). The agent never sends
+`STATUS_UNSPECIFIED`; receiving it means the message was damaged or built by something
+other than this agent. Never branch on `detail`: every outcome the controller must act
+on has its own status.
 
 `detail` is bounded to 4 KiB and must never contain secrets (enforced agent-side by
 `internal/limits.MaxReasonBytes` for the shorter guardrail-rejection strings this maps from;
@@ -180,7 +188,8 @@ reference since `ApplyResult.Status` is part of this step's proto contract.)
 
 | Status | Meaning |
 | --- | --- |
-| `APPLIED` | Bundle verified and applied. |
+| `STATUS_UNSPECIFIED` | Never sent by the agent. Not applied. |
+| `APPLIED` | Bundle verified and applied. The only status that means applied. |
 | `REJECTED_SIGNATURE` | DSSE signature(s) did not satisfy the current trust root's role threshold/`require_keytypes`. |
 | `REJECTED_TARGET` | This host is not in the bundle's target set. |
 | `REJECTED_EPOCH` | Bundle's epoch is not newer than the host's persisted epoch for that scope (replay/rollback defense — `internal/store`'s monotonic counter backs this, step 5a). |
@@ -190,6 +199,11 @@ reference since `ApplyResult.Status` is part of this step's proto contract.)
 | `APPLY_FAILED` | Verified and accepted, but applying it to Tetragon itself failed. |
 | `ROLLED_BACK` | Applied, then rolled back after a failed health window (architecture `7.7`). |
 | `REJECTED_CAPABILITY` | Host capability probe (`internal/hostprobe`) says this host cannot safely run what the bundle requires. |
+| `SUPERSEDED` | A newer bundle replaced this one in the agent's pending slot before it was started; never verified (section 10.2). |
+| `REJECTED_TAMPERED` | The agent's store is TAMPERED; no bundle is applied until operator re-enrollment. |
+| `REJECTED_AGENT_STATE` | Verified, but the agent's state (e.g. `DEGRADED`, `DRIFT`) does not allow `APPLYING`. Resend after the host returns to steady state. |
+| `ROLLBACK_FAILED` | The health window failed and re-asserting LKG also failed; the agent is `DEGRADED` (section 10.3). |
+| any other number | Unknown to you: treat as not applied. |
 
 ## 7. What the agent trusts the server for, and what it does not
 
@@ -277,7 +291,7 @@ The agent applies one bundle at a time and holds **at most one** bundle waiting:
 - A bundle that arrives while another is being applied is held in a single pending slot.
 - If a further bundle arrives before the pending one was started, the pending one is
   replaced. The replaced bundle is answered at once with
-  `ApplyResult{status: REJECTED_EPOCH, detail: "superseded", bundle_digest: <its digest>, epoch: 0}`.
+  `ApplyResult{status: SUPERSEDED, detail: "superseded", bundle_digest: <its digest>, epoch: 0}`.
   `epoch` is 0 because a superseded bundle is never verified, so nothing from its
   payload is reported.
 - A pending bundle is verified when it is started, not when it arrived. A bundle whose
@@ -294,7 +308,7 @@ wait for its `ApplyResult`; sending a series back to back is safe but wasteful.
 | --- | --- |
 | `bundle_digest` | SHA-256 of the exact `PolicyBundle.envelope` bytes received. |
 | `epoch` | The bundle's epoch once its signature and payload verified; 0 when the bundle was rejected before its payload could be trusted (signature, schema, superseded, tampered store). |
-| `status` | Section 6, refined below. |
+| `status` | Section 6, refined below. Never `STATUS_UNSPECIFIED`; treat that and any unknown number as not applied. |
 | `detail` | At most 4 KiB, no secrets. For a verification rejection, `"<CODE>: <reason>"`; for a guardrail rejection the reason names the rule (`guardrail rejection: G5`). |
 | `loaded_digest_after` | Architecture 6.4's loaded digest, recomputed from Tetragon after the apply (empty for rejections that never reached Tetragon, and if Tetragon could not be listed). The same value the next Heartbeat carries. |
 
@@ -302,12 +316,12 @@ Status refinements:
 
 | Situation | `status` | `detail` |
 | --- | --- | --- |
-| Store is TAMPERED (step 4b C6) | `REJECTED_EPOCH` | `store TAMPERED: every bundle is rejected until operator re-enrollment` |
+| Store is TAMPERED (step 4b C6) | `REJECTED_TAMPERED` | `store TAMPERED: every bundle is rejected until operator re-enrollment` |
 | Enforce bundle, host facts missing/stale or usrmerge check failed | `REJECTED_CAPABILITY` | names the reason |
-| Agent not in `STEADY`/`SYNCING` (e.g. `DEGRADED`, `DRIFT`) | `APPLY_FAILED` | `not applied: agent state <STATE> does not allow APPLYING` — resend after the host returns to steady state |
+| Agent not in `STEADY`/`SYNCING` (e.g. `DEGRADED`, `DRIFT`) | `REJECTED_AGENT_STATE` | `not applied: agent state <STATE> does not allow APPLYING` — resend after the host returns to steady state |
 | Tetragon loaded the bundle but the store commit failed | `APPLY_FAILED` | `loaded in Tetragon but the store commit failed; ...` — the host's epoch did not move; reconcile re-asserts the previous LKG |
 | Health window failed and the previous LKG was re-asserted | `ROLLED_BACK` | `rolled back: <reason>` — halt the rollout wave (architecture 7.7 step 8) |
-| Health window failed and re-asserting LKG also failed | `APPLY_FAILED` | `ROLLBACK_FAILED: ...`; the agent enters `DEGRADED` and raises `Alert{DRIFT}` |
+| Health window failed and re-asserting LKG also failed | `ROLLBACK_FAILED` | the rollback's reason; the agent enters `DEGRADED` and raises `Alert{ROLLBACK_FAILED}` and `Alert{DRIFT}` |
 
 ### 10.4 Alerts
 
@@ -315,12 +329,14 @@ Status refinements:
 
 | Kind | When | What to do |
 | --- | --- | --- |
-| `DRIFT` | A reconcile cycle (every 60 s, at agent start, and at once after a Tetragon restart) found Tetragon's relay-managed policies differing from the agent's LKG. `detail`: `lkg_bundle_digest=<hex> loaded_digest=<hex> missing=[...] unexpected=[...]`. The agent enters `DRIFT` and re-asserts LKG **once**; if that holds it returns to `STEADY` (no further alert). If it does not, it stays in `DRIFT` and alerts on every cycle (`still drifted after re-assert: ...`), subject to the rate limit. Also raised for ROLLBACK_FAILED (section 10.3). | Architecture 10.4: re-assert; quarantine if still mismatched after one cycle. |
+| `DRIFT` | A reconcile cycle (every 60 s, at agent start, and at once after a Tetragon restart) found Tetragon's relay-managed policies differing from the agent's LKG. `detail`: `lkg_bundle_digest=<hex> loaded_digest=<hex> missing=[...] unexpected=[...]`. The agent enters `DRIFT` and re-asserts LKG **once**; if that holds it returns to `STEADY` (no further alert). If it does not, it stays in `DRIFT` and alerts on every cycle (`still drifted after re-assert: ...`), subject to the rate limit. Also raised, together with `ROLLBACK_FAILED`, when a rollback fails (section 10.3). | Architecture 10.4: re-assert; quarantine if still mismatched after one cycle. |
 | `TETRAGON_UNHEALTHY` | Tetragon's `GetHealth` is not serving (checked every 5 s), or Tetragon restarted (detected as a new process behind its socket). | Architecture 10.4: quarantine if repeated 3x in 10 min. |
 | `TRUST_EXPIRED` | The agent's current trust root is expired: once per connection (after HelloAck) and again daily while it stays expired. Every bundle is rejected meanwhile (`REJECTED_SIGNATURE`, reason `trust root metadata has expired`); LKG stays enforced. | Send a `TrustUpdate`. |
 | `TAMPER` | The agent's store was found TAMPERED while running (a bundle, trust update or reconcile read it). From then on every bundle and trust update is rejected and reconcile is suspended (nothing Tetragon has loaded is changed) until operator re-enrollment. | Treat the host as compromised. |
 | `GUARDRAIL_REJECT` | A bundle was rejected `REJECTED_GUARDRAIL` or `REJECTED_CAPABILITY` by a guardrail. `detail`: the bundle digest and the reason, which names the rule (`guardrail rejection: G5`). | Fix the bundle; the agent's guardrails are compiled in. |
-| `KIND_UNSPECIFIED`, `detail` starting `TRUST_UPDATE_REJECTED: ` | A `TrustUpdate` (or a step of it) was not adopted (section 10.5). The proto has no trust-update kind. | Check the root chain you sent. |
+| `TRUST_UPDATE_REJECTED` | A `TrustUpdate` (or a step of it) was not adopted (section 10.5). | Check the root chain you sent. |
+| `ROLLBACK_FAILED` | A health-window rollback could not re-assert LKG (`ApplyResult.ROLLBACK_FAILED`). The agent is `DEGRADED`; Tetragon's loaded set may differ from LKG. | Treat as drift that the agent could not repair; architecture 10.4. |
+| `KIND_UNSPECIFIED` or any other number | Never sent by this agent. | Log and keep it as an alert of unknown kind; never drop it. |
 
 **Rate limit.** At most one alert of each kind per 5 minutes; the first of each kind is
 always sent. A suppressed alert is still written to the agent's local audit log
@@ -351,7 +367,7 @@ the exact signed bytes. The agent:
   threshold, exactly one version forward, not expired, validity at most 365 days) and
   persists it before it becomes current; each step is atomic;
 - stops at the first entry that fails, keeping the last version it reached, and raises
-  `Alert{KIND_UNSPECIFIED, "TRUST_UPDATE_REJECTED: ..."}`. The same happens, adopting
+  `Alert{TRUST_UPDATE_REJECTED}`. The same happens, adopting
   nothing, if the store is TAMPERED, if `signed_roots` is empty or has more than 64
   entries, or if a version requires `mldsa-87` and the agent's build has no ML-DSA;
 - sends no reply on success. The adopted version shows up as `Hello.trust_root_version`

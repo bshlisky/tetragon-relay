@@ -77,10 +77,25 @@ message Heartbeat {
 message ApplyResult {
   bytes  bundle_digest = 1;
   uint64 epoch         = 2;
-  enum Status { APPLIED = 0; REJECTED_SIGNATURE = 1; REJECTED_TARGET = 2;
+  // STATUS_UNSPECIFIED is the zero value so that an unset status can never
+  // read as success. The controller treats STATUS_UNSPECIFIED and any value
+  // it does not know as "not applied" (ADR 0037; review R6B-1). APPLIED was
+  // 0 before ADR 0037 and is now 10; numbers 1-9 are unchanged.
+  enum Status { STATUS_UNSPECIFIED = 0;
+                REJECTED_SIGNATURE = 1; REJECTED_TARGET = 2;
                 REJECTED_EPOCH = 3; REJECTED_EXPIRED = 4; REJECTED_SCHEMA = 5;
                 REJECTED_GUARDRAIL = 6; APPLY_FAILED = 7; ROLLED_BACK = 8;
-                REJECTED_CAPABILITY = 9; }
+                REJECTED_CAPABILITY = 9;
+                APPLIED = 10;
+                // A pending bundle replaced by a newer one before it was
+                // started; never verified (ADR 0036, server-contract 10.2).
+                SUPERSEDED = 11;
+                // The agent's store is TAMPERED; nothing is applied.
+                REJECTED_TAMPERED = 12;
+                // Verified, but the agent's state does not allow APPLYING.
+                REJECTED_AGENT_STATE = 13;
+                // The health window failed and re-asserting LKG also failed.
+                ROLLBACK_FAILED = 14; }
   Status status = 3;
   string detail = 4;               // bounded 4 KiB, no secrets
   bytes  loaded_digest_after = 5;
@@ -127,6 +142,10 @@ message Alert {
     TRUST_EXPIRED       = 3;
     TAMPER              = 4;
     GUARDRAIL_REJECT    = 5;
+    // A TrustUpdate (or one step of it) was not adopted (ADR 0037).
+    TRUST_UPDATE_REJECTED = 6;
+    // A health-window rollback could not re-assert LKG (ADR 0037).
+    ROLLBACK_FAILED     = 7;
   }
   Kind   kind      = 1;
   string detail    = 2; // bounded 4 KiB, no secrets

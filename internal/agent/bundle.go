@@ -256,7 +256,16 @@ func bundleDigest(envelope []byte) []byte {
 // splitting a rune.
 func boundDetail(s string) string { return truncateUTF8(s, limits.MaxApplyResultDetailBytes) }
 
+// applyResultMessage is the only place an ApplyResult is wrapped for
+// sending (TestApplyResult_OnlyWrappedByApplyResultMessage). A status that
+// is STATUS_UNSPECIFIED, or not one this build defines, is sent as
+// APPLY_FAILED: an unset status must never leave the agent, and the
+// controller reads STATUS_UNSPECIFIED as "not applied" anyway (ADR 0037).
 func applyResultMessage(r *controlv1.ApplyResult) *controlv1.AgentMessage {
+	if _, known := controlv1.ApplyResult_Status_name[int32(r.Status)]; !known || r.Status == controlv1.ApplyResult_STATUS_UNSPECIFIED {
+		r.Detail = fmt.Sprintf("internal error: ApplyResult status %d was not set; not applied: %s", int32(r.Status), r.Detail)
+		r.Status = controlv1.ApplyResult_APPLY_FAILED
+	}
 	r.Detail = boundDetail(r.Detail)
 	return &controlv1.AgentMessage{Body: &controlv1.AgentMessage_ApplyResult{ApplyResult: r}}
 }

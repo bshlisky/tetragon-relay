@@ -241,7 +241,7 @@ func (cl *ControlLoop) HandleControllerMessage(ctx context.Context, seqTracker *
 			return Outcome{}, nil
 		}
 		alert := &controlv1.Alert{
-			Kind:     controlv1.Alert_KIND_UNSPECIFIED,
+			Kind:     controlv1.Alert_TRUST_UPDATE_REJECTED,
 			Detail:   "relayd has no apply worker configured; TrustUpdate not processed",
 			UnixTime: cl.Clock().Unix(),
 		}

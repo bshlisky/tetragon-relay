@@ -85,7 +85,7 @@ func NewApplyWorker(cfg ApplyWorkerConfig) (*ApplyWorker, error) {
 // SubmitBundle places envelope in the pending slot and returns at once
 // (the stream loop calls it). If the slot already held a bundle that had
 // not been dequeued, that bundle is answered with ApplyResult
-// REJECTED_EPOCH "superseded". The envelope is copied and kept as raw
+// SUPERSEDED (ADR 0037). The envelope is copied and kept as raw
 // bytes; it is verified only when dequeued (ADR 0036).
 func (w *ApplyWorker) SubmitBundle(envelope []byte) {
 	raw := append([]byte(nil), envelope...)
@@ -97,7 +97,7 @@ func (w *ApplyWorker) SubmitBundle(envelope []byte) {
 		w.cfg.Auditor.Record(AuditEvent{Step: "bundle_superseded", Detail: fmt.Sprintf("pending bundle %x replaced by a newer one before it was applied", bundleDigest(superseded))})
 		w.cfg.Outbox.Push(applyResultMessage(&controlv1.ApplyResult{
 			BundleDigest: bundleDigest(superseded),
-			Status:       controlv1.ApplyResult_REJECTED_EPOCH,
+			Status:       controlv1.ApplyResult_SUPERSEDED,
 			Detail:       supersededDetail,
 		}))
 	}
@@ -210,8 +210,8 @@ func (w *ApplyWorker) processBundle(ctx context.Context, envelope []byte) {
 
 	if terr := d.Store.Tampered(); terr != nil {
 		// Step 4b C6: no epoch information is trustworthy, so accepting
-		// anything could allow a replay; REJECTED_EPOCH names that.
-		res.Status = controlv1.ApplyResult_REJECTED_EPOCH
+		// anything could allow a replay (ADR 0037: REJECTED_TAMPERED).
+		res.Status = controlv1.ApplyResult_REJECTED_TAMPERED
 		res.Detail = "store TAMPERED: every bundle is rejected until operator re-enrollment"
 		w.cfg.Auditor.Record(AuditEvent{Step: "bundle_rejected", Detail: res.Detail, Err: terr})
 		w.tamperAlert(terr)
@@ -249,7 +249,7 @@ func (w *ApplyWorker) processBundle(ctx context.Context, envelope []byte) {
 		}
 	})
 	if !entered {
-		res.Status = controlv1.ApplyResult_APPLY_FAILED
+		res.Status = controlv1.ApplyResult_REJECTED_AGENT_STATE
 		res.Detail = fmt.Sprintf("not applied: agent state %s does not allow APPLYING", from)
 		w.cfg.Auditor.Record(AuditEvent{Step: "bundle_not_applied", Detail: res.Detail})
 		return
@@ -272,6 +272,9 @@ func (w *ApplyWorker) processBundle(ctx context.Context, envelope []byte) {
 	}
 	w.settle(events)
 	if degraded != "" {
+		// ADR 0037: ROLLBACK_FAILED has its own alert kind; the DRIFT
+		// alert stays, since Tetragon's loaded set may differ from LKG.
+		w.cfg.Alerter.Raise(controlv1.Alert_ROLLBACK_FAILED, degraded)
 		w.cfg.Alerter.Raise(controlv1.Alert_DRIFT, degraded)
 	}
 	w.cfg.Auditor.Record(AuditEvent{Step: "apply_result", Detail: fmt.Sprintf("status=%s epoch=%d detail=%s", res.Status, res.Epoch, res.Detail)})
@@ -316,8 +319,8 @@ func (w *ApplyWorker) mapApplyOutcome(res *controlv1.ApplyResult, ar *apply.Resu
 		res.Detail = ar.Detail
 		return rolledBack, ""
 	case apply.StatusRollbackFailed:
-		res.Status = controlv1.ApplyResult_APPLY_FAILED
-		res.Detail = "ROLLBACK_FAILED: " + ar.Detail
+		res.Status = controlv1.ApplyResult_ROLLBACK_FAILED
+		res.Detail = ar.Detail
 		return []Event{EventHealthFail, EventDegradedCondition}, "rollback failed; Tetragon's loaded set may differ from LKG: " + ar.Detail
 	default:
 		res.Status = controlv1.ApplyResult_APPLY_FAILED
