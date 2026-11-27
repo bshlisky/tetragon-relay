@@ -759,10 +759,12 @@ scenario_s11() {
 	done
 	echo "loaded after the re-assert: $(loaded_names)"
 	[ "${reloaded}" = true ] || { echo "${victim} was not loaded again" >&2; ok=false; }
-	journal=$(scenario_journal)
-	echo "${journal}"
-	grep -q '"step":"drift_detected"' <<<"${journal}" || ok=false
-	grep -q '"step":"drift_reasserted"' <<<"${journal}" || ok=false
+	# The policy is back within milliseconds of the re-assert's add, before
+	# relayd's own check-and-audit completes (run 45941496156 grepped too
+	# early), so wait for the records rather than reading the journal once.
+	wait_journal_step drift_detected 30 || ok=false
+	wait_journal_step drift_reasserted 30 || ok=false
+	scenario_journal
 	stop_unit
 	record_result S11 "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
 }
