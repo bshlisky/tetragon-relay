@@ -2,11 +2,8 @@ package agent
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
 
-	controlv1 "github.com/bshlisky/tetragon-relay/api/relay/control/v1"
-	"github.com/bshlisky/tetragon-relay/internal/apply"
 	"github.com/bshlisky/tetragon-relay/internal/store"
 	"github.com/bshlisky/tetragon-relay/internal/tetra"
 )
@@ -33,20 +30,10 @@ type RealSnapshotProvider struct {
 
 // Snapshot implements SnapshotProvider.
 func (p *RealSnapshotProvider) Snapshot(ctx context.Context) (StateSnapshot, error) {
-	statuses, err := p.Client.ListTracingPolicies(ctx, "")
+	snap, err := tetragonSnapshot(ctx, p.Client)
 	if err != nil {
-		return StateSnapshot{}, fmt.Errorf("agent: snapshot: ListTracingPolicies: %w", err)
+		return StateSnapshot{}, err
 	}
-	// architecture doc 6.4's loaded-policy digest, computed from
-	// Tetragon's own view (apply.Digest, step 3 prompt Part D8; see
-	// docs/decisions/0017-loaded-policy-digest-residual-risk.md for the
-	// documented gap between this and the architecture doc's literal
-	// algorithm).
-	digest, err := hex.DecodeString(apply.Digest(statuses))
-	if err != nil {
-		return StateSnapshot{}, fmt.Errorf("agent: snapshot: decode digest: %w", err)
-	}
-
 	epochs := make(map[string]uint64, len(p.Scopes))
 	for _, scope := range p.Scopes {
 		e, err := p.Store.Current(scope)
@@ -55,20 +42,6 @@ func (p *RealSnapshotProvider) Snapshot(ctx context.Context) (StateSnapshot, err
 		}
 		epochs[scope] = e
 	}
-
-	policies := make([]*controlv1.LoadedPolicy, 0, len(statuses))
-	for _, s := range statuses {
-		policies = append(policies, &controlv1.LoadedPolicy{
-			Name:    s.Name,
-			State:   s.State.String(),
-			Enabled: s.Enabled,
-		})
-	}
-
-	return StateSnapshot{
-		Epochs:       epochs,
-		LoadedDigest: digest,
-		Policies:     policies,
-		Health:       &controlv1.TetragonHealth{Serving: true},
-	}, nil
+	snap.Epochs = epochs
+	return snap, nil
 }

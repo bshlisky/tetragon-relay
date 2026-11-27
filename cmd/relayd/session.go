@@ -57,10 +57,14 @@ func buildHelloFields(ctx context.Context, cfg *config.Config, startupResult *ag
 	if tv, err := tetraClient.GetVersion(ctx); err == nil {
 		fields.TetragonVersion = tv
 	}
-	if raw, rootVersion, ok, err := startupResult.Store.TrustRoot(); err == nil && ok {
-		sum := sha256.Sum256(raw)
-		fields.TrustRootDigest = sum[:]
-		fields.TrustRootVersion = rootVersion
+	// Tampered mode (ADR 0038) has no StartupResult: the trust root is
+	// unknown, so Hello carries none.
+	if startupResult != nil {
+		if raw, rootVersion, ok, err := startupResult.Store.TrustRoot(); err == nil && ok {
+			sum := sha256.Sum256(raw)
+			fields.TrustRootDigest = sum[:]
+			fields.TrustRootVersion = rootVersion
+		}
 	}
 	if snap, err := snapshot.Snapshot(ctx); err == nil {
 		fields.Epochs = snap.Epochs

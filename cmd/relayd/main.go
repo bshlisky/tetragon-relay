@@ -28,6 +28,7 @@ import (
 	"github.com/bshlisky/tetragon-relay/internal/controlclient"
 	"github.com/bshlisky/tetragon-relay/internal/hostprobe"
 	"github.com/bshlisky/tetragon-relay/internal/identity"
+	"github.com/bshlisky/tetragon-relay/internal/store"
 	"github.com/bshlisky/tetragon-relay/internal/tetra"
 	"github.com/bshlisky/tetragon-relay/internal/tpm"
 )
@@ -149,6 +150,10 @@ func run(configPath string, auditor *agentAuditor) error {
 		Auditor:          auditor,
 	}, time.Now())
 	if err != nil {
+		if errors.Is(err, store.ErrTampered) {
+			// R6B-5 / ADR 0038: do not exit; connect and report it.
+			return runTampered(cfg, auditor, tpmConn, tpmComponents, err)
+		}
 		return fmt.Errorf("agent startup: %w", err)
 	}
 	defer func() { _ = startupResult.Store.Close() }()

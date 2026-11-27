@@ -195,6 +195,11 @@ func (cl *ControlLoop) HandleControllerMessage(ctx context.Context, seqTracker *
 
 	case *controlv1.ControllerMessage_RotateIdentity:
 		reason := body.RotateIdentity.GetReason()
+		if cl.SM.Current() == StateTampered {
+			// ADR 0038: tampered mode connects with the identity as it is.
+			cl.Auditor.Record(AuditEvent{Step: "rotate_identity_refused", Detail: "tampered mode: identity is not rotated; " + reason})
+			return Outcome{}, nil
+		}
 		cl.Auditor.Record(AuditEvent{Step: "rotate_identity_requested", Detail: reason})
 		if err := cl.Rotator.Rotate(ctx); err != nil {
 			cl.Auditor.Record(AuditEvent{Step: "rotate_identity_failed", Detail: reason, Err: err})

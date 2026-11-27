@@ -197,6 +197,13 @@ func createHostSigner(t transport.TPM, blobPath string) error {
 	return writeFileAtomic(blobPath, b, 0o600)
 }
 
+// LoadHostSigner opens the existing host signing key at blobPath and
+// never creates one: relayd's tampered mode (ADR 0038) connects with the
+// identity as it is.
+func LoadHostSigner(t transport.TPM, blobPath string) (*HostSigner, error) {
+	return loadHostSigner(t, blobPath)
+}
+
 func loadHostSigner(t transport.TPM, blobPath string) (*HostSigner, error) {
 	raw, err := os.ReadFile(blobPath) //nolint:gosec // G304: blobPath is always derived from this package's own caller-supplied store-directory path, never untrusted input
 	if err != nil {

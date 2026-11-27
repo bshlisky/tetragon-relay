@@ -122,3 +122,17 @@ func TestCreateHostSigner_SRKNotProvisionedIsError(t *testing.T) {
 		t.Fatalf("err = %v, want ErrSRKNotProvisioned", err)
 	}
 }
+
+// ADR 0038: LoadHostSigner never creates a key; a missing blob is an
+// error and leaves nothing behind.
+func TestLoadHostSigner_MissingBlobIsErrorAndCreatesNothing(t *testing.T) {
+	dir := t.TempDir()
+	blobPath := filepath.Join(dir, "host-signer.json")
+	rtpm := startSWTPM(t)
+	if _, err := LoadHostSigner(rtpm, blobPath); err == nil {
+		t.Fatal("LoadHostSigner with no blob unexpectedly succeeded")
+	}
+	if _, err := os.Stat(blobPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("LoadHostSigner created %s (stat err %v)", blobPath, err)
+	}
+}

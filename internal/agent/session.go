@@ -232,6 +232,9 @@ func linkDown(cfg SessionConfig, fire func()) {
 // the worker returns the agent to STEADY when it settles.
 func fireConnected(cfg SessionConfig) {
 	sm := cfg.ControlLoop.SM
+	if sm.Current() == StateTampered {
+		return // ADR 0038: TAMPERED has no connection edges
+	}
 	if applyOwnsState(sm.Current()) {
 		cfg.Auditor.Record(AuditEvent{Step: "session_connected_during_apply", Detail: "state left to the apply worker"})
 		return
@@ -253,7 +256,7 @@ func fireConnected(cfg SessionConfig) {
 // apply owns the state machine.
 func fireStreamLost(cfg SessionConfig) {
 	sm := cfg.ControlLoop.SM
-	if cur := sm.Current(); cur == StateRevoked || applyOwnsState(cur) {
+	if cur := sm.Current(); cur == StateRevoked || cur == StateTampered || applyOwnsState(cur) {
 		return
 	}
 	if ferr := sm.Fire(EventStreamLost); ferr != nil {

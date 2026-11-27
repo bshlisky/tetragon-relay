@@ -20,6 +20,10 @@ const (
 	StateDrift
 	StateDegraded
 	StateRevoked
+	// StateTampered is tampered mode (ADR 0038): the store was found
+	// TAMPERED at startup. relayd connects to report it and never writes
+	// to Tetragon. Its only exits are a restart and Terminate{REVOKED}.
+	StateTampered
 )
 
 // String implements fmt.Stringer, matching architecture doc 8.4's state
@@ -46,6 +50,8 @@ func (s State) String() string {
 		return "DEGRADED"
 	case StateRevoked:
 		return "REVOKED"
+	case StateTampered:
+		return "TAMPERED"
 	default:
 		return fmt.Sprintf("UNKNOWN(%d)", int(s))
 	}
@@ -109,6 +115,10 @@ const (
 	// diagram's own DEGRADED -> CONNECTING; see docs/reports/step-06a.md
 	// for this deviation and the open question it is recorded against.
 	EventDegradedCondition
+	// EventStoreTampered: CONNECTING -> TAMPERED (ADR 0038). Fired once,
+	// at startup, when the store was found TAMPERED; the session then
+	// runs in tampered mode.
+	EventStoreTampered
 )
 
 func (e Event) String() string {
@@ -132,6 +142,7 @@ func (e Event) String() string {
 		EventTerminateRevoked:  "terminate_revoked",
 		EventOperatorReenroll:  "operator_reenroll",
 		EventDegradedCondition: "degraded_condition",
+		EventStoreTampered:     "store_tampered",
 	}
 	if n, ok := names[e]; ok {
 		return n
@@ -156,6 +167,7 @@ var transitions = map[State]map[Event]State{
 	StateConnecting: {
 		EventHelloAck:       StateSyncing,
 		EventConnectTimeout: StateDegraded,
+		EventStoreTampered:  StateTampered,
 	},
 	StateSyncing: {
 		EventInSync:            StateSteady,
@@ -188,6 +200,9 @@ var transitions = map[State]map[Event]State{
 	StateRevoked: {
 		EventOperatorReenroll: StateUnenrolled,
 	},
+	// ADR 0038: no exit but a restart (or Terminate{REVOKED}, valid from
+	// every state).
+	StateTampered: {},
 }
 
 // ErrInvalidTransition is returned by (*StateMachine).Fire when event is

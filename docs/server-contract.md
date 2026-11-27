@@ -25,6 +25,12 @@ opens from the same SPIFFE ID (not source IP — the identity, from the client c
 the gateway must terminate the OLDER stream and raise a duplicate-identity alert. The agent
 does not implement this check; it is the gateway's job entirely.
 
+**Server-side revocation is authoritative.** The gateway must refuse a revoked SPIFFE ID
+at the mTLS layer (the denylist check in section 3), on every new connection, not rely on
+the agent remembering that it was revoked. The agent persists a REVOKED marker (ADR 0035)
+and normally stays away, but an agent whose store is TAMPERED cannot read that marker
+(tampered mode, ADR 0038), so it will try to connect again after a restart.
+
 ### 1.1 `AgentMessage` (agent → controller), `control.proto:25-34`
 
 | Field | Type | Semantics |
@@ -48,7 +54,10 @@ Hello field-by-field table, since this repository is the one that fills these in
 ### 1.4 `Heartbeat`, `control.proto:68-75`
 
 Sent every 15 s in steady state (architecture `6.3` step 5). `epochs` and `loaded_digest`
-are the same values (recomputed each time) as `Hello`'s — see section 11. `health` comes
+are the same values (recomputed each time) as `Hello`'s — see section 11. A normal agent
+reports one `epochs` entry for every scope it serves, even when that epoch is 0. **An
+empty `epochs` map means the agent has no trustworthy epochs at all**: it is in tampered
+mode (section 10.6). Never read an empty map as "every epoch is zero". `health` comes
 from Tetragon's `GetHealth` plus the agent's own process liveness (not yet implemented in
 this repository; step 6). `telemetry_last_seq`/`telemetry_backlog` describe the separate
 telemetry pipeline (architecture section 10), not this stream.
@@ -368,9 +377,8 @@ time, so 16 ApplyResults are reached only if the controller sends many bundles t
 host that cannot reach it; a bundle with no ApplyResult after reconnect should be
 resent.
 
-**Not yet sent.** `TAMPER` for a store found TAMPERED at agent *startup*: today the agent
-refuses to start in that case (systemd restarts it), so it never connects. See the
-step 6b report's open questions.
+**TAMPER at startup.** A store found TAMPERED at agent *startup* puts the agent in
+tampered mode (section 10.6), which sends `TAMPER` after every HelloAck.
 
 ### 10.5 `TrustUpdate`
 
@@ -396,3 +404,24 @@ the exact signed bytes. The agent:
 At most 4 `TrustUpdate` messages are held while a bundle apply runs; beyond that the
 oldest is dropped. You resend trust metadata on every reconcile anyway (architecture 6.3
 step 4).
+
+### 10.6 Tampered mode (step 7a, ADR 0038)
+
+If the agent's store is TAMPERED when relayd starts, relayd does not exit. It connects
+to report the tamper, and otherwise changes nothing:
+
+| What you see | Meaning |
+| --- | --- |
+| `Alert{TAMPER}` right after HelloAck, before the first heartbeat | Store TAMPERED at startup. Treat the host as compromised. |
+| `Hello` with no trust root, no LKG digest and an empty `epochs` map | No epoch, LKG or trust root on the host can be trusted. |
+| Heartbeats with live `loaded_digest` and `health` and an empty `epochs` map | Tetragon's real loaded set, still reported; no epochs. |
+| `ApplyResult{REJECTED_TAMPERED}` for every bundle, `epoch: 0` | Nothing is verified or applied. |
+| `Alert{TRUST_UPDATE_REJECTED}` for every trust update | Nothing is adopted. |
+| `RotateIdentity` has no effect | The agent keeps the identity it has. |
+
+The agent never writes to Tetragon in this mode, so what Tetragon had loaded stays
+loaded. It stays in this mode until it is restarted; recovery is operator
+re-enrollment. If you send `Terminate{REVOKED}`, it stops connecting for the life of
+the process and tries to persist the marker; it may not be able to, so after a restart
+it will connect again, and your gateway must refuse it (section 1).
+
