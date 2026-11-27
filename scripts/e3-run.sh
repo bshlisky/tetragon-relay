@@ -1016,7 +1016,7 @@ scenario_ts3() {
 }
 
 # P4-RSS (step 7b P4/Z4): relayd under the real unit at a sustained event
-# rate. P4_LOOPS shell loops exec /usr/bin/true for 60 s (each exec is an
+# rate. P4_LOOPS (3; 2 gave about 5.6k events/s in session 1) shell loops exec /usr/bin/true for 60 s (each exec is an
 # exec and an exit event). Records relayd's VmRSS every second (max must stay
 # < 64 MiB with the unit's MemoryMax untouched), relayd's own CPU per event
 # (utime+stime from /proc, so this includes gRPC decode and TLS, which the
@@ -1025,7 +1025,7 @@ scenario_ts3() {
 # the unit and the collector stopped with the e3 drop-in in place: P4
 # starts both and stops both again at the end. The load loops run with xtrace off (the job runs under set -x, which
 # would otherwise throttle them and flood the log).
-P4_LOOPS=${P4_LOOPS:-2}
+P4_LOOPS=${P4_LOOPS:-3}
 E3_OUT=${E3_OUT:-${REPO_ROOT:-.}/e3-out}
 scenario_p4_rss() {
 	log "P4-RSS: relayd RSS and CPU at a sustained event rate (${P4_LOOPS} exec loops, 60 s)"
