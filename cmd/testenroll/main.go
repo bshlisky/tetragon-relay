@@ -1,9 +1,9 @@
-//go:build testca && testtpm
+//go:build testca
 
 // Command testenroll is E3's out-of-band identity provisioning tool
 // (docs/prompts/step-06a-e3-prompt.md, docs/reports/step-06a.md section
 // 9's plan). It is test-only by construction (C1): built only with
-// -tags testca,testtpm, never part of production relayd or the RPM, and
+// -tags testca, never part of production relayd or the RPM, and
 // never invoked by relayd itself -- it is run once, by the E3 CI job,
 // BEFORE relayd starts, as a separate process with access to the test
 // CA's private key relayd itself must never hold (that would make

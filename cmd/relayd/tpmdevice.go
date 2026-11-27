@@ -1,32 +1,21 @@
-//go:build !testtpm
-
 package main
 
 import (
-	"fmt"
-
 	"github.com/bshlisky/tetragon-relay/internal/tpm"
 	"github.com/google/go-tpm/tpm2/transport"
 )
 
-// openTPMDevice implements C3: path must be exactly productionTPMDevice
-// in a production build; any other value (e.g. an operator passing
-// --tpm-device for a software TPM) is refused outright, never silently
-// honored.
-func openTPMDevice(path string) (transport.TPMCloser, error) {
-	if path != productionTPMDevice {
-		return nil, fmt.Errorf("relayd: --tpm-device must be %q in a production build, got %q", productionTPMDevice, path)
-	}
-	return tpm.OpenDevice(path)
-}
+// productionTPMDevice is the only TPM path relayd ever opens, in every
+// build (docs/prompts/step-06a.md C3: "production builds accept only
+// /dev/tpmrm0"). relayd defines no --tpm-device flag at all (R6A-3), so
+// the standard flag package itself rejects one. R6A-5
+// (docs/reviews/step-06a-final-review.md) removed the testtpm build's
+// TCP swtpm transport: E3 uses a vtpm-proxy-backed swtpm at this same
+// path in every scenario.
+const productionTPMDevice = "/dev/tpmrm0"
 
-// tpmDeviceFlag implements R6A-3: a production build (no test build
-// tags) never even defines a --tpm-device flag, so passing one is
-// rejected by the standard flag package itself ("flag provided but not
-// defined") rather than accepted and then refused by openTPMDevice
-// above. Only the testtpm build (tpmdevice_testtpm.go) defines the flag,
-// for CI/E3's swtpm-backed runs.
-func tpmDeviceFlag() *string {
-	device := productionTPMDevice
-	return &device
+// openTPMDevice opens productionTPMDevice through tpm.OpenDevice, the
+// same opener relay-probe and cmd/testenroll use.
+func openTPMDevice() (transport.TPMCloser, error) {
+	return tpm.OpenDevice(productionTPMDevice)
 }

@@ -10,12 +10,12 @@
 // drives the scenarios that need an agent to actually connect over the
 // network.
 //
-// Gated behind its own build tag, "e3": unlike cmd/testenroll (testca
-// && testtpm), e3controller is purely CI harness code with no identity-
-// or TPM-provisioning logic of its own, so it has no reason to share
-// those tags, and this keeps "testca"/"testtpm" meaning exactly what
-// they already mean elsewhere (identity and TPM test doubles) rather
-// than also covering "is part of the E3 test harness."
+// Gated behind its own build tag, "e3": unlike cmd/testenroll (testca),
+// e3controller is purely CI harness code with no identity- or TPM-
+// provisioning logic of its own, so it has no reason to share that tag,
+// and this keeps "testca" meaning exactly what it already means
+// elsewhere (identity test doubles) rather than also covering "is part
+// of the E3 test harness."
 //
 // e3controller self-asserts pass/fail for the one scenario named by
 // --mode and exits 0 (pass) or 1 (fail); the E3 CI job's shell checks

@@ -52,13 +52,10 @@ const (
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	configPath := flag.String("config", defaultConfigPath, "path to relay.yaml")
-	// R6A-3: tpmDeviceFlag only defines a --tpm-device flag under the
-	// testtpm build tag (tpmdevice_testtpm.go); a production build
-	// (tpmdevice.go) returns a fixed pointer to productionTPMDevice and
-	// defines no flag at all, so docs/prompts/step-06a.md's "only
-	// --config and --version" is enforced by the standard flag package
-	// itself rejecting an unknown --tpm-device in that build.
-	tpmDevice := tpmDeviceFlag()
+	// R6A-3/R6A-5: no --tpm-device flag in any build; relayd opens
+	// only productionTPMDevice (tpmdevice.go), so docs/prompts/step-06a.md's
+	// "only --config and --version" is enforced by the standard flag
+	// package itself rejecting an unknown --tpm-device.
 	flag.Parse()
 
 	if *showVersion {
@@ -71,7 +68,7 @@ func main() {
 	// per record on stderr, which systemd's own default (no
 	// StandardError= override in packaging/systemd/tetragon-relay.service)
 	// already forwards to the journal. C4 forbids this from being a
-	// testca/testtpm-only behavior difference, so it is wired here,
+	// testca-only behavior difference, so it is wired here,
 	// unconditionally, before anything else in main can fail.
 	jsonAuditor, err := audit.NewJSONAuditor(os.Stderr, time.Now)
 	if err != nil {
@@ -79,7 +76,7 @@ func main() {
 		os.Exit(1)
 	}
 	auditor := &agentAuditor{inner: jsonAuditor}
-	if err := run(*configPath, *tpmDevice, auditor); err != nil {
+	if err := run(*configPath, auditor); err != nil {
 		fmt.Fprintf(os.Stderr, "relayd: %v\n", err)
 		os.Exit(1)
 	}
@@ -119,7 +116,7 @@ func errString(err error) string {
 // exactly the "never skip checks" property architecture doc 8.3 asks for.
 // Reconcile scheduling (retrying a degraded Tetragon/controller connection
 // without restarting the whole process) is explicitly step 6b's job.
-func run(configPath, tpmDevicePath string, auditor *agentAuditor) error {
+func run(configPath string, auditor *agentAuditor) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
@@ -128,7 +125,7 @@ func run(configPath, tpmDevicePath string, auditor *agentAuditor) error {
 		auditor.Record(agent.AuditEvent{Step: "config_security_relaxation", Detail: relaxation})
 	}
 
-	tpmConn, err := openTPMDevice(tpmDevicePath)
+	tpmConn, err := openTPMDevice()
 	if err != nil {
 		return fmt.Errorf("open TPM device: %w", err)
 	}

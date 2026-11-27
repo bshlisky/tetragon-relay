@@ -14,7 +14,7 @@
 # (the path the unit's host-facts ExecStartPre hashes) and started it as
 # the transient unit tetragon.service (the unit's BindsTo=), and built
 # every binary this script invokes: relayd (no tags) at the unit's own
-# ExecStart path, relayd-e3 (-tags testca,testtpm), relay-probe (no
+# ExecStart path, relayd-e3 (-tags testca), relay-probe (no
 # tags), plus cmd/testenroll, cmd/e3root, cmd/e3controller, cmd/e3tetra
 # with their own tags. REPO_ROOT, BIN_DIR and TETRAGON_BIN must be set.
 #
@@ -30,7 +30,7 @@ set -x
 : "${BIN_DIR:?}"
 : "${TETRAGON_BIN:?}"
 
-# RELAYD_DIR: the two relayd binaries (production and the testca,testtpm
+# RELAYD_DIR: the two relayd binaries (production and the testca
 # E3 build) MUST live outside /home and /root -- packaging/systemd/
 # tetragon-relay.service's own ProtectHome=yes/InaccessiblePaths=/root
 # /home (reproduced verbatim for every scenario below) would make a
@@ -268,7 +268,7 @@ install_unit() {
 
 # e3_dropin: S3-S6 only. Two directives, each the minimum a test-only
 # difference needs:
-#  - ExecStart: the testca,testtpm build (C4) instead of the production
+#  - ExecStart: the testca build (C4) instead of the production
 #    binary, same arguments. "ExecStart=" first clears the unit's own
 #    value (systemd.service(5): a drop-in must reset ExecStart before
 #    setting it for a Type= other than oneshot). ExecStartPre is NOT

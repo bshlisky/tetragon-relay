@@ -304,7 +304,7 @@ jobs:
   # docs/prompts/step-06a-e3-prompt.md: relayd as a real process under the
   # production systemd unit's own sandbox settings (reproduced verbatim by
   # scripts/e3-run.sh, parsed directly from packaging/systemd/
-  # tetragon-relay.service), with swtpm (testtpm build tag) and the test
+  # tetragon-relay.service), with swtpm at /dev/tpmrm0 (vtpm proxy) and the test
   # CA (testca build tag) for identity, against a real Tetragon and
   # cmd/e3controller. See docs/reports/step-06a.md section 9/14 for the
   # full design and per-scenario evidence.
@@ -399,10 +399,10 @@ jobs:
           sudo cp /tmp/relay-probe /usr/libexec/tetragon-relay/relay-probe
           sudo chmod 0755 /usr/libexec/tetragon-relay/relay-probe
 
-      - name: "Build relayd (E3: -tags testca,testtpm) and the E3 harness tools"
+      - name: "Build relayd (E3: -tags testca) and the E3 harness tools"
         run: |
           set -euo pipefail
-          go build -tags testca,testtpm -o /tmp/relayd-e3 ./cmd/relayd
+          go build -tags testca -o /tmp/relayd-e3 ./cmd/relayd
           sudo cp /tmp/relayd-e3 /usr/libexec/tetragon-relay/relayd-e3
           sudo chmod 0755 /usr/libexec/tetragon-relay/relayd-e3
 
@@ -415,7 +415,7 @@ jobs:
           # just hitting plain directory permissions instead of a systemd
           # sandbox this time.
           sudo mkdir -p /opt/e3bin
-          go build -tags testca,testtpm -o /tmp/testenroll ./cmd/testenroll
+          go build -tags testca -o /tmp/testenroll ./cmd/testenroll
           go build -tags e3 -o /tmp/e3controller ./cmd/e3controller
           go build -tags e3 -o /tmp/e3tetra ./cmd/e3tetra
           go build -tags e3 -o /tmp/e3root ./cmd/e3root
