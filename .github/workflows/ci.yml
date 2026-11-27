@@ -510,6 +510,14 @@ jobs:
         run: |
           sudo journalctl -u tetragon-relay --no-pager 2>&1 || true
 
+      # Step 7b: after P4-RSS's 60 s flood, relayd received no events from
+      # Tetragon (run 46051067160). Tetragon's own log is the evidence for
+      # T-S6 (how Tetragon treats a slow GetEvents client).
+      - name: Dump Tetragon logs (always, for debugging)
+        if: always()
+        run: |
+          sudo journalctl -u tetragon.service --no-pager 2>&1 | tail -n 2000 || true
+
       - name: Stop Tetragon
         if: always()
         run: sudo systemctl stop tetragon.service || true

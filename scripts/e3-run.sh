@@ -1021,9 +1021,9 @@ scenario_ts3() {
 # < 64 MiB with the unit's MemoryMax untouched), relayd's own CPU per event
 # (utime+stime from /proc, so this includes gRPC decode and TLS, which the
 # benchmark does not), the events the collector received, and the
-# compression ratio on these real events. T-S3 leaves the unit stopped
-# with the e3 drop-in in place: P4 starts it, and stops it again at the
-# end. The load loops run with xtrace off (the job runs under set -x, which
+# compression ratio on these real events. It runs after T-S5, which leaves
+# the unit and the collector stopped with the e3 drop-in in place: P4
+# starts both and stops both again at the end. The load loops run with xtrace off (the job runs under set -x, which
 # would otherwise throttle them and flood the log).
 P4_LOOPS=${P4_LOOPS:-2}
 scenario_p4_rss() {
@@ -1043,7 +1043,6 @@ scenario_p4_rss() {
 	if [ "${pid}" = 0 ] || [ ! -r "/proc/${pid}/stat" ]; then
 		echo "relayd is not running (MainPID=${pid})" >&2
 		stop_collector
-		start_collector ts "${TS_STORE}"
 		record_result P4-RSS FAIL
 		return
 	fi
@@ -1081,9 +1080,24 @@ scenario_p4_rss() {
 	[ "${n1}" -gt 10000 ] || { echo "too few events (${n1}) for a sustained-rate measurement" >&2; ok=false; }
 	[ "${maxrss}" -lt $((64 * 1024)) ] || { echo "relayd VmRSS reached ${maxrss} KiB (>= 64 MiB)" >&2; ok=false; }
 	[ "$(systemctl show "${UNIT}" -p MainPID --value)" = "${pid}" ] || { echo "relayd restarted under load" >&2; ok=false; }
+	# Observation for T-S6 (not a pass criterion): does Tetragon still
+	# deliver events to this relayd 10 s after the flood, and to a fresh
+	# one? In run 46051067160 the next scenarios received none.
+	local before after
+	before=$(grep -c . "${store}" 2>/dev/null || echo 0)
+	events_for 10
+	sleep 3
+	after=$(grep -c . "${store}" 2>/dev/null || echo 0)
+	echo "P4-RSS after the flood: collector store lines ${before} -> ${after} over 10 s of events (same relayd)"
+	sudo systemctl restart "${UNIT}" || true
+	sleep 5
+	before=${after}
+	events_for 10
+	sleep 3
+	after=$(grep -c . "${store}" 2>/dev/null || echo 0)
+	echo "P4-RSS after the flood: collector store lines ${before} -> ${after} over 10 s of events (restarted relayd)"
 	stop_unit
 	stop_collector
-	start_collector ts "${TS_STORE}"
 	record_result P4-RSS "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
 }
 
@@ -1242,9 +1256,11 @@ main() {
 			scenario_ts1
 			scenario_ts2 # needs T-S1's relayd and collector store
 			scenario_ts3 # needs T-S2's
-			scenario_p4_rss
 			scenario_ts4
 			scenario_ts5
+			# Last of the telemetry scenarios: after its flood, Tetragon
+			# delivered no events to T-S4/T-S5 (run 46051067160).
+			scenario_p4_rss
 			scenario_s13 # needs S10's root-v2.json and S12's bundle; restores the index
 			scenario_s4  # last: revocation is terminal for this store (ADR 0035)
 		else
