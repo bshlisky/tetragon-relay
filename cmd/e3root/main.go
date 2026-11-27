@@ -1,19 +1,19 @@
 //go:build e3
 
-// Command e3root generates a throwaway, self-signed, valid trust-root
-// metadata envelope (architecture doc section 7.6's wire format) for the
-// E3 CI job's RPM-shipped-initial-root bootstrap
-// (/etc/tetragon-relay/trust/root.json, cmd/relayd/main.go's
-// trustRootPath constant): internal/agent.Startup's establishTrustRoot
-// refuses to start a brand-new (first-boot) store at all without one
-// (ErrNoTrustRoot).
+// Command e3root generates the E3 CI job's throwaway trust root: a valid,
+// self-signed root metadata envelope (architecture doc section 7.6's wire
+// format) for the RPM-shipped initial root (/etc/tetragon-relay/trust/
+// root.json, cmd/relayd's trustRootPath), which internal/agent.Startup
+// needs to start a first-boot store at all.
 //
-// This root is never used to sign or verify a policy bundle in E3 (step
-// 6a does not process PolicyBundle/TrustUpdate at all, D2's own scope);
-// it exists purely so relayd's startup sequence has something to adopt
-// and persist. The three private keys this tool generates (root,
-// targets, log) are discarded the moment this process exits -- nothing
-// downstream needs them again.
+// Step 6b (docs/prompts/step-06b.md F2) delivers real bundles and trust
+// updates over the stream, so with --keys-out the root and targets
+// private keys are kept (PKCS#8 PEM, 0600, in a runner-owned directory
+// relayd never reads): cmd/bundlesign-test e3-bundle signs bundles with
+// targets.key, and a later e3root run with --version N --prev-keys signs
+// root N under the previous root key and its own new root key, the
+// old-and-new threshold (*trust.Root).Update requires (S10). Every key
+// is ECDSA P-384, threshold 1 per role, require_keytypes ecdsa-p384.
 package main
 
 import (
@@ -24,9 +24,11 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/bshlisky/tetragon-relay/internal/dsse"
@@ -80,18 +82,24 @@ func run(args []string) error {
 	fs := flag.NewFlagSet("e3root", flag.ContinueOnError)
 	out := fs.String("out", "", "path to write the signed root metadata envelope")
 	validity := fs.Duration("validity", 365*24*time.Hour, "root metadata validity (expires - now)")
+	version := fs.Uint64("version", 1, "root metadata version")
+	keysOut := fs.String("keys-out", "", "directory to write root.key and targets.key (PKCS#8 PEM, 0600); empty discards them")
+	prevKeys := fs.String("prev-keys", "", "directory holding the previous version's root.key; required when --version > 1")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *out == "" {
 		return fmt.Errorf("--out is required")
 	}
+	if *version == 0 || (*version > 1) != (*prevKeys != "") {
+		return fmt.Errorf("--prev-keys is required exactly when --version > 1")
+	}
 
 	rootKey, rootKeyID, rootDER, err := genKey()
 	if err != nil {
 		return fmt.Errorf("generate root key: %w", err)
 	}
-	_, targetsKeyID, targetsDER, err := genKey()
+	targetsKey, targetsKeyID, targetsDER, err := genKey()
 	if err != nil {
 		return fmt.Errorf("generate targets key: %w", err)
 	}
@@ -103,7 +111,7 @@ func run(args []string) error {
 	now := time.Now()
 	payload := wireRootPayload{
 		Schema:  trust.RootSchema,
-		Version: 1,
+		Version: *version,
 		Expires: now.Add(*validity),
 		Keys: map[string]wireKeyEntry{
 			string(rootKeyID):    {KeyType: string(trust.KeyTypeECDSAP384), PublicKeyDER: base64.StdEncoding.EncodeToString(rootDER)},
@@ -122,25 +130,40 @@ func run(args []string) error {
 	}
 
 	pae := dsse.PAE(trust.RootPayloadType, payloadBytes)
-	sig, err := signPAE(rootKey, pae)
-	if err != nil {
-		return fmt.Errorf("sign root payload: %w", err)
+	type signer struct {
+		key *ecdsa.PrivateKey
+		id  trust.KeyID
+	}
+	signers := []signer{{rootKey, rootKeyID}}
+	if *version > 1 {
+		prev, err := readKey(filepath.Join(*prevKeys, "root.key"))
+		if err != nil {
+			return fmt.Errorf("read previous root key: %w", err)
+		}
+		prevID, err := trust.DeriveKeyID(&prev.PublicKey)
+		if err != nil {
+			return err
+		}
+		signers = append([]signer{{prev, prevID}}, signers...)
+	}
+	sigs := make([]wireSignature, 0, len(signers))
+	for _, sg := range signers {
+		sig, err := signPAE(sg.key, pae)
+		if err != nil {
+			return fmt.Errorf("sign root payload: %w", err)
+		}
+		sigs = append(sigs, wireSignature{KeyID: string(sg.id), Sig: base64.StdEncoding.EncodeToString(sig)})
 	}
 	env := wireEnvelope{
 		PayloadType: trust.RootPayloadType,
 		Payload:     base64.StdEncoding.EncodeToString(payloadBytes),
-		Signatures:  []wireSignature{{KeyID: string(rootKeyID), Sig: base64.StdEncoding.EncodeToString(sig)}},
+		Signatures:  sigs,
 	}
 	envBytes, err := json.Marshal(env)
 	if err != nil {
 		return fmt.Errorf("marshal envelope: %w", err)
 	}
 
-	// Round-trip through trust.LoadInitialRoot itself before writing
-	// anything to disk: this tool must never hand relayd a root its own
-	// startup sequence would then reject, which would turn an E3 setup
-	// bug into a confusing relayd-side failure instead of a clear one
-	// here.
 	if _, err := trust.LoadInitialRoot(envBytes); err != nil {
 		return fmt.Errorf("generated root metadata does not parse via trust.LoadInitialRoot (e3root bug): %w", err)
 	}
@@ -148,8 +171,47 @@ func run(args []string) error {
 	if err := os.WriteFile(*out, envBytes, 0o644); err != nil { //nolint:gosec // G306: 0644 matches the RPM-shipped root.json's own readable-by-anyone convention (architecture doc 8.5); --out is an operator-supplied flag for this one-shot CI tool
 		return fmt.Errorf("write %s: %w", *out, err)
 	}
-	fmt.Printf("e3root: wrote a throwaway self-signed root metadata envelope (version 1) to %s\n", *out)
+	if *keysOut != "" {
+		if err := os.MkdirAll(*keysOut, 0o700); err != nil {
+			return err
+		}
+		if err := writeKey(filepath.Join(*keysOut, "root.key"), rootKey); err != nil {
+			return err
+		}
+		if err := writeKey(filepath.Join(*keysOut, "targets.key"), targetsKey); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("e3root: wrote root metadata version %d (%d signature(s)) to %s\n", *version, len(sigs), *out)
 	return nil
+}
+
+func writeKey(path string, key *ecdsa.PrivateKey) error {
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600)
+}
+
+func readKey(path string) (*ecdsa.PrivateKey, error) {
+	raw, err := os.ReadFile(path) //nolint:gosec // G304: operator-supplied flag for this one-shot CI tool
+	if err != nil {
+		return nil, err
+	}
+	block, _ := pem.Decode(raw)
+	if block == nil {
+		return nil, fmt.Errorf("%s: no PEM block", path)
+	}
+	k, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	ec, ok := k.(*ecdsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("%s: not an ECDSA key", path)
+	}
+	return ec, nil
 }
 
 func genKey() (key *ecdsa.PrivateKey, keyID trust.KeyID, der []byte, err error) {
