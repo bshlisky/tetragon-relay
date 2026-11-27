@@ -113,7 +113,8 @@ proto:
 # commit, the proto was unreleased and changed freely across steps. This is
 # set to the commit that lands the A8 rewrite itself, once it exists; see
 # that ADR and docs/reports/step-02.md for the actual SHA.
-PROTO_BASELINE := 54e450a68b786971ba20ff15d1febc15113a5921
+# Advanced to the commit landing ADR 0037 (STATUS_UNSPECIFIED = 0, step 7a A1).
+PROTO_BASELINE := 6bc2b62c8aa31685b61e351bc42c4bb33f33367e
 
 .PHONY: breaking
 breaking:
