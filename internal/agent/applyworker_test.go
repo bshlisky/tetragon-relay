@@ -32,6 +32,17 @@ func (a *lockedAuditor) Record(e agent.AuditEvent) {
 	a.events = append(a.events, e)
 }
 
+func (a *lockedAuditor) hasDetail(step, substr string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, e := range a.events {
+		if e.Step == step && strings.Contains(e.Detail, substr) {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *lockedAuditor) has(step string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -60,6 +71,34 @@ type scriptedEngine struct {
 	mu      sync.Mutex
 	applied []uint64
 	started chan uint64
+
+	// reports is the scripted sequence of Reconcile results (the last
+	// one repeats); reassertCalls counts Reconcile(true) calls.
+	reports       []*apply.DriftReport
+	reconcileErr  error
+	reconcileCall int
+	reassertCalls int
+}
+
+func (e *scriptedEngine) Reconcile(_ context.Context, reassert bool) (*apply.DriftReport, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if reassert {
+		e.reassertCalls++
+	}
+	if e.reconcileErr != nil {
+		return nil, e.reconcileErr
+	}
+	if len(e.reports) == 0 {
+		return &apply.DriftReport{InSync: true}, nil
+	}
+	i := e.reconcileCall
+	if i >= len(e.reports) {
+		i = len(e.reports) - 1
+	}
+	e.reconcileCall++
+	r := *e.reports[i]
+	return &r, nil
 }
 
 func (e *scriptedEngine) Apply(ctx context.Context, r *verify.Result) (*apply.Result, error) {
@@ -164,7 +203,7 @@ func newPipeline(t *testing.T, o pipelineOpts) *pipeline {
 	}
 	w, err := agent.NewApplyWorker(agent.ApplyWorkerConfig{
 		Deps: agent.BundleDeps{
-			Store: st, Roots: st, Commit: commit, Trust: ts, Engine: engine, Version: fixedVersion{"v1.8.0"},
+			Store: st, Roots: st, Commit: commit, Trust: ts, Engine: engine, Reconciler: engine, Version: fixedVersion{"v1.8.0"},
 			HostCaps: allCaps{}, EnforceAllowed: o.enforceAllowed, Crypto: agent.Capabilities{MLDSAAvailable: true},
 			HostUUID: testHostUUID, AllowedScopes: []string{"prod"},
 			Digest: func(context.Context) ([]byte, error) { return []byte{0xd1}, nil },
@@ -331,6 +370,9 @@ func TestApplyWorker_TamperedStoreRejectsEveryBundle(t *testing.T) {
 	r := p.nextResult()
 	if r.GetStatus() != controlv1.ApplyResult_REJECTED_EPOCH || !strings.Contains(r.GetDetail(), "TAMPERED") {
 		t.Fatalf("tampered: %v", r)
+	}
+	if !p.auditor.hasDetail("alert", "kind=TAMPER") {
+		t.Fatal("no Alert TAMPER for a store found TAMPERED at runtime")
 	}
 }
 
@@ -574,5 +616,138 @@ func TestTrustUpdate_TamperedStoreRejects(t *testing.T) {
 	p.worker.SubmitTrustUpdate([][]byte{v2})
 	if a := p.nextAlert(); !strings.Contains(a.GetDetail(), "TAMPERED") {
 		t.Fatalf("alert = %v", a)
+	}
+}
+
+func (p *pipeline) reconcileCalls() int {
+	p.engine.mu.Lock()
+	defer p.engine.mu.Unlock()
+	return p.engine.reconcileCall
+}
+
+func (p *pipeline) reasserts() int {
+	p.engine.mu.Lock()
+	defer p.engine.mu.Unlock()
+	return p.engine.reassertCalls
+}
+
+// cycle requests one reconcile cycle and waits until it has made want
+// Reconcile calls in total (including re-asserts).
+func (p *pipeline) cycle(restarted bool, want int) {
+	p.t.Helper()
+	p.worker.RequestReconcile(restarted)
+	deadline := time.Now().Add(5 * time.Second)
+	for p.reconcileCalls() < want {
+		if time.Now().After(deadline) {
+			p.t.Fatalf("reconcile calls = %d, want %d", p.reconcileCalls(), want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond) // let the cycle's transitions land
+}
+
+func drift(missing ...string) *apply.DriftReport {
+	return &apply.DriftReport{Missing: missing}
+}
+
+func TestReconcile_DriftReassertHolds(t *testing.T) {
+	p := newPipeline(t, pipelineOpts{enforceAllowed: true, status: apply.StatusApplied})
+	p.worker.SubmitBundle(p.bundle("monitor", 1, "a"))
+	_ = p.nextResult()
+	p.engine.mu.Lock()
+	p.engine.reports = []*apply.DriftReport{drift("a-v1-x"), {Reasserted: true}, {InSync: true}}
+	p.engine.mu.Unlock()
+	p.cycle(false, 3)
+	a := p.nextAlert()
+	if a.GetKind() != controlv1.Alert_DRIFT || !strings.Contains(a.GetDetail(), "lkg_bundle_digest=") || !strings.Contains(a.GetDetail(), "loaded_digest=d1") || !strings.Contains(a.GetDetail(), "missing=[a-v1-x]") {
+		t.Fatalf("alert = %v", a)
+	}
+	if strings.Contains(a.GetDetail(), "lkg_bundle_digest= ") {
+		t.Fatalf("LKG digest missing: %q", a.GetDetail())
+	}
+	if p.sm.Current() != agent.StateSteady || p.reasserts() != 1 {
+		t.Fatalf("state = %s, reasserts = %d; want STEADY, 1", p.sm.Current(), p.reasserts())
+	}
+	if !p.auditor.has("drift_reasserted") {
+		t.Fatal("no drift_reasserted audit")
+	}
+}
+
+func TestReconcile_DriftReassertFailsStaysInDriftAndAlertsEachCycle(t *testing.T) {
+	p := newPipeline(t, pipelineOpts{status: apply.StatusApplied})
+	p.engine.reports = []*apply.DriftReport{drift("x"), {Reasserted: false}, drift("x")}
+	p.cycle(false, 2)
+	if p.sm.Current() != agent.StateDrift || p.reasserts() != 1 {
+		t.Fatalf("state = %s, reasserts = %d; want DRIFT, 1", p.sm.Current(), p.reasserts())
+	}
+	_ = p.nextAlert()
+	// Next cycle: still drifted, no second re-assert, alert again (the
+	// fixed test clock keeps it inside the rate limit, so it is audited
+	// as suppressed).
+	p.cycle(false, 3)
+	if p.sm.Current() != agent.StateDrift || p.reasserts() != 1 {
+		t.Fatalf("second cycle: state = %s, reasserts = %d", p.sm.Current(), p.reasserts())
+	}
+	if !p.auditor.has("alert_suppressed") || !p.auditor.has("drift_reassert_failed") {
+		t.Fatal("expected the repeat DRIFT alert to be rate-limited and the failed re-assert audited")
+	}
+	// A Tetragon restart starts a new episode: one more re-assert.
+	p.engine.mu.Lock()
+	p.engine.reports = []*apply.DriftReport{drift("x"), {Reasserted: true}, {InSync: true}}
+	p.engine.reconcileCall = 0
+	p.engine.mu.Unlock()
+	p.cycle(true, 3)
+	if p.sm.Current() != agent.StateSteady || p.reasserts() != 2 {
+		t.Fatalf("after restart: state = %s, reasserts = %d; want STEADY, 2", p.sm.Current(), p.reasserts())
+	}
+}
+
+func TestReconcile_DriftClearsOnItsOwn(t *testing.T) {
+	p := newPipeline(t, pipelineOpts{status: apply.StatusApplied})
+	p.engine.reports = []*apply.DriftReport{drift("x"), {Reasserted: false}, drift("x"), {InSync: true}}
+	p.cycle(false, 2) // drift, re-assert does not hold
+	p.cycle(false, 3) // still drifted
+	p.cycle(false, 4) // in sync on its own
+	if p.sm.Current() != agent.StateSteady || !p.auditor.has("drift_resolved") {
+		t.Fatalf("state = %s", p.sm.Current())
+	}
+}
+
+func TestReconcile_ErrorAndTamperedStore(t *testing.T) {
+	p := newPipeline(t, pipelineOpts{enforceAllowed: true, status: apply.StatusApplied})
+	p.engine.mu.Lock()
+	p.engine.reconcileErr = errors.New("tetragon down")
+	p.engine.mu.Unlock()
+	p.worker.RequestReconcile(false)
+	deadline := time.Now().Add(5 * time.Second)
+	for !p.auditor.has("reconcile_failed") {
+		if time.Now().After(deadline) {
+			t.Fatal("no reconcile_failed audit")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	p.engine.mu.Lock()
+	p.engine.reconcileErr = nil
+	p.engine.mu.Unlock()
+
+	p.worker.SubmitBundle(p.bundle("monitor", 1, "a"))
+	_ = p.nextResult()
+	blobs, _ := os.ReadDir(p.dir + "/blobs")
+	for _, b := range blobs {
+		_ = os.WriteFile(p.dir+"/blobs/"+b.Name(), []byte("x"), 0o600)
+	}
+	_, _ = p.st.Get(apply.RelayDomain)
+	before := p.reconcileCalls()
+	p.worker.RequestReconcile(false)
+	p.worker.RequestReconcile(false)
+	deadline = time.Now().Add(5 * time.Second)
+	for !p.auditor.has("reconcile_skipped") {
+		if time.Now().After(deadline) {
+			t.Fatal("no reconcile_skipped audit")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if p.reconcileCalls() != before {
+		t.Fatal("reconcile ran against a TAMPERED store")
 	}
 }

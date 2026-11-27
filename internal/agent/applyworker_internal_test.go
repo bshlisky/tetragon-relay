@@ -212,7 +212,7 @@ func TestConstructorValidation(t *testing.T) {
 	if _, err := NewApplyWorker(ApplyWorkerConfig{}); err == nil {
 		t.Fatal("NewApplyWorker(zero) = nil error")
 	}
-	deps := BundleDeps{Store: &store.Store{}, Roots: &store.Store{}, Commit: &CommitOnPut{}, Trust: &TrustState{}, Engine: &apply.Engine{},
+	deps := BundleDeps{Store: &store.Store{}, Roots: &store.Store{}, Commit: &CommitOnPut{}, Trust: &TrustState{}, Engine: &apply.Engine{}, Reconciler: &apply.Engine{},
 		Version: fakeVersion{}, HostCaps: noCaps{}, Digest: func(context.Context) ([]byte, error) { return nil, nil }}
 	if err := deps.validate(); err == nil {
 		t.Fatal("BundleDeps without HostUUID validated")
@@ -650,5 +650,66 @@ func TestTrustExpiryMonitor_OncePerConnectionAndDaily(t *testing.T) {
 	m.Check()
 	if o.Len() != 3 {
 		t.Fatal("no daily TRUST_EXPIRED")
+	}
+}
+
+func TestReconcileScheduler_PeriodicRestartAndHealth(t *testing.T) {
+	clk := &syncClock{now: time.Unix(1000, 0)}
+	reg, _ := NewLivenessRegistry(clk.Now)
+	o := NewOutbox()
+	aud := &syncAuditor{}
+	alerter, _ := NewAlerter(o, aud, clk.Now)
+	w := &ApplyWorker{wake: make(chan struct{}, 1)}
+	var mu sync.Mutex
+	pid := int32(0)
+	serving := true
+	s := &ReconcileScheduler{
+		Worker: w, Alerter: alerter, Auditor: aud, Liveness: reg, Clock: clk.Now, checkEvery: time.Millisecond,
+		Peer:  func() (int32, uint64) { mu.Lock(); defer mu.Unlock(); return pid, 0 },
+		Probe: func(context.Context) bool { mu.Lock(); defer mu.Unlock(); return serving },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { s.Run(ctx); close(done) }()
+	waitFor(t, "initial reconcile", func() bool { due, _ := w.takeReconcile(); return due })
+
+	mu.Lock()
+	pid = 100
+	mu.Unlock()
+	time.Sleep(5 * time.Millisecond)
+	if due, _ := w.takeReconcile(); due {
+		t.Fatal("first pid seen counted as a restart")
+	}
+	mu.Lock()
+	pid = 200
+	mu.Unlock()
+	waitFor(t, "restart reconcile", func() bool { _, restarted := w.takeReconcile(); return restarted })
+	if !aud.HasStep("tetragon_restarted") {
+		t.Fatal("restart not audited")
+	}
+
+	clk.Advance(61 * time.Second)
+	waitFor(t, "periodic reconcile", func() bool { due, restarted := w.takeReconcile(); return due && !restarted })
+
+	clk.Advance(limits.AlertRateLimitInterval) // past the restart alert's rate limit
+	mu.Lock()
+	serving = false
+	mu.Unlock()
+	waitFor(t, "TETRAGON_UNHEALTHY", func() bool {
+		for m := o.Peek(); m != nil; m = o.Peek() {
+			o.Pop(m)
+			if m.GetAlert().GetKind() == controlv1.Alert_TETRAGON_UNHEALTHY && strings.Contains(m.GetAlert().GetDetail(), "not serving") {
+				return true
+			}
+		}
+		return false
+	})
+	if ok, stale, _ := reg.Healthy(); !ok {
+		t.Fatalf("%s stale", stale)
+	}
+	cancel()
+	<-done
+	if (&ReconcileScheduler{}).interval() != 60*time.Second {
+		t.Fatal("default interval is not 60s")
 	}
 }
