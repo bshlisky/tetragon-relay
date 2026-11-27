@@ -8,3 +8,4 @@ complete. The progress log below records every push.
 One dated line per push: commit, what changed, the CI result observed.
 
 - 2026-11-27 `da095c6` (with `83512c5` prompt/review, `29def2e` A1, `efb3bd0` atomic commit, `8217553`/`ee93f6b`/`016af02`/`f89ffbd`/`cf6649d` Part B): run 45935962231: ci ✓, integration ✓, e3 ✓. S1–S6 PASS with the apply worker, outbox and real reachability wired in (no S7+ yet).
+- 2026-11-27 `77e5222` (with Part C `81e0351`/`418837c`/`fa63f86`/`33ac160`, Part D/E `17e94d7`/`10e8575`/`5185493`/`484af7d`/`8dc9fe7`/`074dbc7`/`c187ecc`, E3 tooling `929efcd`/`f67f6d4`/`5d29c3e`/`08f45bf`, `be3c97e`, runner `/var/run` fix): run 45938072565: ci ✗ at the gofmt check (`cmd/bundlesign-test/e3bundle.go`: a comment inserted into a struct literal broke field alignment); integration and e3 skipped. Fixed in the next commit.
