@@ -51,6 +51,8 @@ type fakeServer struct {
 	// stream.Context().Done() — a genuine, live-context stream failure,
 	// as opposed to one caused by ctx itself ending.
 	getEventsErr error
+	// lastGetEvents is the last GetEventsRequest received.
+	lastGetEvents *tetragonpb.GetEventsRequest
 }
 
 func newFakeServer() *fakeServer {
@@ -124,8 +126,9 @@ func (f *fakeServer) ListTracingPolicies(_ context.Context, req *tetragonpb.List
 	return &tetragonpb.ListTracingPoliciesResponse{Policies: out}, nil
 }
 
-func (f *fakeServer) GetEvents(_ *tetragonpb.GetEventsRequest, stream grpc.ServerStreamingServer[tetragonpb.GetEventsResponse]) error {
+func (f *fakeServer) GetEvents(req *tetragonpb.GetEventsRequest, stream grpc.ServerStreamingServer[tetragonpb.GetEventsResponse]) error {
 	f.mu.Lock()
+	f.lastGetEvents = req
 	events := append([]*tetragonpb.GetEventsResponse(nil), f.events...)
 	delay := f.eventDelay
 	getEventsErr := f.getEventsErr

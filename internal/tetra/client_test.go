@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
 	tetragonpb "github.com/bshlisky/tetragon-relay/third_party/tetragon/v1.8.0/api/v1/tetragon"
 
@@ -295,7 +296,7 @@ func TestClient_StreamEvents(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var got [][]byte
-	err := c.StreamEvents(ctx, []tetragonpb.EventType{tetragonpb.EventType_PROCESS_EXEC}, func(raw []byte) bool {
+	err := c.StreamEvents(ctx, []tetragonpb.EventType{tetragonpb.EventType_PROCESS_EXEC}, nil, func(raw []byte) bool {
 		got = append(got, raw)
 		return len(got) < 2
 	})
@@ -309,20 +310,44 @@ func TestClient_StreamEvents(t *testing.T) {
 			t.Fatalf("event %d: %v, %v", i, err, &r)
 		}
 	}
-	if err := c.StreamEvents(ctx, nil, func([]byte) bool { return true }); !errors.Is(err, ErrProtocol) {
+	if err := c.StreamEvents(ctx, nil, nil, func([]byte) bool { return true }); !errors.Is(err, ErrProtocol) {
 		t.Fatalf("empty event types: %v", err)
 	}
 	f.mu.Lock()
 	f.events = nil
 	f.getEventsErr = status.Error(codes.Unavailable, "gone")
 	f.mu.Unlock()
-	if err := c.StreamEvents(ctx, []tetragonpb.EventType{tetragonpb.EventType_PROCESS_EXEC}, func([]byte) bool { return true }); !errors.Is(err, ErrUnavailable) {
+	if err := c.StreamEvents(ctx, []tetragonpb.EventType{tetragonpb.EventType_PROCESS_EXEC}, nil, func([]byte) bool { return true }); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("stream error: %v", err)
 	}
 	cctx, ccancel := context.WithCancel(context.Background())
 	ccancel()
-	if err := c.StreamEvents(cctx, []tetragonpb.EventType{tetragonpb.EventType_PROCESS_EXEC}, func([]byte) bool { return true }); err != nil {
+	if err := c.StreamEvents(cctx, []tetragonpb.EventType{tetragonpb.EventType_PROCESS_EXEC}, nil, func([]byte) bool { return true }); err != nil {
 		t.Fatalf("canceled ctx: %v", err)
+	}
+}
+
+func TestClient_StreamEvents_ExcludeFields(t *testing.T) {
+	f := newFakeServer()
+	f.events = []*tetragonpb.GetEventsResponse{{Event: &tetragonpb.GetEventsResponse_ProcessExec{ProcessExec: &tetragonpb.ProcessExec{}}}}
+	c, cleanup := startFakeServer(t, f)
+	defer cleanup()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	types := []tetragonpb.EventType{tetragonpb.EventType_PROCESS_EXEC, tetragonpb.EventType_PROCESS_KPROBE}
+	paths := []string{"process.environment_variables", "parent.environment_variables"}
+	if err := c.StreamEvents(ctx, types, paths, func([]byte) bool { return false }); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	req := f.lastGetEvents
+	f.mu.Unlock()
+	want := &tetragonpb.GetEventsRequest{
+		AllowList:    []*tetragonpb.Filter{{EventSet: types}},
+		FieldFilters: []*tetragonpb.FieldFilter{{EventSet: types, Fields: &fieldmaskpb.FieldMask{Paths: paths}, Action: tetragonpb.FieldFilterAction_EXCLUDE}},
+	}
+	if !proto.Equal(req, want) {
+		t.Fatalf("GetEventsRequest = %v, want %v", req, want)
 	}
 }
 

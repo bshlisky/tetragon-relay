@@ -12,6 +12,7 @@ import (
 	"google.golang.org/grpc/mem"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
 	tetragonpb "github.com/bshlisky/tetragon-relay/third_party/tetragon/v1.8.0/api/v1/tetragon"
 
@@ -337,13 +338,27 @@ func (c *Client) GetEvents(ctx context.Context, policyNames []string) (<-chan Ev
 // stop. StreamEvents returns nil when ctx ends or deliver stops it, and
 // a typed error (ErrUnavailable, ...) when the stream fails. An empty
 // eventTypes is refused: it would ask Tetragon for every event type.
-func (c *Client) StreamEvents(ctx context.Context, eventTypes []tetragonpb.EventType, deliver func(raw []byte) bool) error {
+//
+// excludeFields, if any, are field paths (relative to the event message,
+// e.g. "process.environment_variables") that Tetragon is asked not to
+// send, for every type in eventTypes: one GetEventsRequest.field_filters
+// entry with action EXCLUDE (step 7b D1). The receiver must not rely on
+// it; it saves bytes, it is not a redaction.
+func (c *Client) StreamEvents(ctx context.Context, eventTypes []tetragonpb.EventType, excludeFields []string, deliver func(raw []byte) bool) error {
 	if len(eventTypes) == 0 {
 		return fmt.Errorf("%w: StreamEvents: no event types", ErrProtocol)
 	}
-	stream, err := c.stub.GetEvents(ctx, &tetragonpb.GetEventsRequest{
+	req := &tetragonpb.GetEventsRequest{
 		AllowList: []*tetragonpb.Filter{{EventSet: append([]tetragonpb.EventType(nil), eventTypes...)}},
-	}, grpc.ForceCodecV2(rawResponseCodec{}))
+	}
+	if len(excludeFields) > 0 {
+		req.FieldFilters = []*tetragonpb.FieldFilter{{
+			EventSet: append([]tetragonpb.EventType(nil), eventTypes...),
+			Fields:   &fieldmaskpb.FieldMask{Paths: append([]string(nil), excludeFields...)},
+			Action:   tetragonpb.FieldFilterAction_EXCLUDE,
+		}}
+	}
+	stream, err := c.stub.GetEvents(ctx, req, grpc.ForceCodecV2(rawResponseCodec{}))
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil //nolint:nilerr // ctx ending is StreamEvents' clean stop, not a stream failure
