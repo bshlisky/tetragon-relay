@@ -85,6 +85,9 @@ fuzz-short:
 	$(GO) test -run=NONE -fuzz=FuzzGuard -fuzztime=60s ./internal/guard/...
 	$(GO) test -run=NONE -fuzz=FuzzStoreIndex -fuzztime=60s ./internal/store/...
 	$(GO) test -run=NONE -fuzz=FuzzConfig -fuzztime=60s ./internal/config/...
+	$(GO) test -run=NONE -fuzz=FuzzBatchHeader -fuzztime=60s ./internal/telemetry/batch
+	$(GO) test -run=NONE -fuzz=FuzzSpoolFile -fuzztime=60s ./internal/telemetry
+	$(GO) test -run=NONE -fuzz=FuzzChainVerify -fuzztime=60s ./internal/telemetry/chainverify
 
 .PHONY: lint
 lint:

@@ -74,6 +74,8 @@ type memCollector struct {
 	noAck bool
 	// down makes Dial fail.
 	down bool
+	// discard keeps nothing (the benchmark).
+	discard bool
 }
 
 type memStream struct {
@@ -99,7 +101,9 @@ func (s *memStream) Send(b *telemetryv1.Batch) error {
 		return s.ctx.Err()
 	}
 	s.c.mu.Lock()
-	s.c.received = append(s.c.received, chainverify.Input{Header: b.GetHeader(), Payload: b.GetPayload()})
+	if !s.c.discard {
+		s.c.received = append(s.c.received, chainverify.Input{Header: b.GetHeader(), Payload: b.GetPayload()})
+	}
 	hostile, noAck := s.c.hostileOnce && s.n == 1, s.c.noAck
 	s.c.mu.Unlock()
 	h, err := batch.ParseHeader(b.GetHeader())

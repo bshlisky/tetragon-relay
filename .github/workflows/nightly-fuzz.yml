@@ -35,6 +35,12 @@ jobs:
             package: ./internal/store/...
           - target: FuzzConfig
             package: ./internal/config/...
+          - target: FuzzBatchHeader
+            package: ./internal/telemetry/batch
+          - target: FuzzSpoolFile
+            package: ./internal/telemetry
+          - target: FuzzChainVerify
+            package: ./internal/telemetry/chainverify
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -63,5 +69,8 @@ jobs:
             internal/guard/testdata/fuzz/**
             internal/store/testdata/fuzz/**
             internal/config/testdata/fuzz/**
+            internal/telemetry/testdata/fuzz/**
+            internal/telemetry/batch/testdata/fuzz/**
+            internal/telemetry/chainverify/testdata/fuzz/**
           if-no-files-found: ignore
           retention-days: 30
