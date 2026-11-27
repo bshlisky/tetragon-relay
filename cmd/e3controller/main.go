@@ -214,12 +214,16 @@ func revokeScript(cfg config, resultCh chan<- error) testcontroller.Script {
 			return err
 		}
 		fmt.Printf("e3controller: sent Terminate{REVOKED} to connection #1; watching for a reconnect for %s\n", cfg.reconnectAssertFor)
-		select {
-		case <-time.After(cfg.reconnectAssertFor):
+		// The window is a timer, independent of this stream: relayd
+		// closes the stream right after Terminate{REVOKED}, which cancels
+		// ctx, and run 45924877288 showed the old select returning on
+		// ctx.Done without ever reporting. trySend is first-wins, so a
+		// second connection's error (above) beats this nil.
+		time.AfterFunc(cfg.reconnectAssertFor, func() {
 			fmt.Printf("e3controller: no reconnect observed within %s\n", cfg.reconnectAssertFor)
 			trySend(resultCh, nil)
-		case <-ctx.Done():
-		}
+		})
+		<-ctx.Done()
 		return nil
 	}
 }
