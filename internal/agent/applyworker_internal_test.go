@@ -41,19 +41,19 @@ func alertMsg(n int) *controlv1.AgentMessage {
 }
 
 func TestOutbox_BoundDropsOldestAndCounts(t *testing.T) {
-	o := NewOutbox()
-	for i := 0; i < limits.MaxOutboxMessages+3; i++ {
+	o := testOutbox()
+	for i := 0; i < limits.MaxOutboxAlerts+3; i++ {
 		o.Push(alertMsg(i))
 	}
-	if o.Len() != limits.MaxOutboxMessages || o.Dropped() != 3 {
-		t.Fatalf("Len = %d, Dropped = %d; want %d, 3", o.Len(), o.Dropped(), limits.MaxOutboxMessages)
+	if o.Len() != limits.MaxOutboxAlerts || o.Dropped() != 3 || o.DroppedAlerts() != 3 || o.DroppedApplyResults() != 0 {
+		t.Fatalf("Len = %d, Dropped = %d; want %d, 3", o.Len(), o.Dropped(), limits.MaxOutboxAlerts)
 	}
 	head := o.Peek()
 	if head.GetAlert().GetUnixTime() != 3 {
 		t.Fatalf("oldest kept = %d, want 3", head.GetAlert().GetUnixTime())
 	}
 	o.Pop(alertMsg(99)) // not the head: no-op
-	if o.Len() != limits.MaxOutboxMessages {
+	if o.Len() != limits.MaxOutboxAlerts {
 		t.Fatal("Pop of a non-head message removed something")
 	}
 	o.Pop(head)
@@ -65,11 +65,92 @@ func TestOutbox_BoundDropsOldestAndCounts(t *testing.T) {
 	default:
 		t.Fatal("Push did not notify")
 	}
-	empty := NewOutbox()
+	empty := testOutbox()
 	if empty.Peek() != nil {
 		t.Fatal("Peek on empty outbox")
 	}
-	empty.Pop(head)
+}
+
+func resultMsg(n int) *controlv1.AgentMessage {
+	return applyResultMessage(&controlv1.ApplyResult{Epoch: uint64(n), Status: controlv1.ApplyResult_APPLIED})
+}
+
+// R6B-3: a flood of alerts never evicts an ApplyResult.
+func TestOutbox_AlertsNeverEvictApplyResults(t *testing.T) {
+	o := testOutbox()
+	for i := 0; i < limits.MaxOutboxApplyResults; i++ {
+		o.Push(resultMsg(i))
+	}
+	for i := 0; i < 10*limits.MaxOutboxMessages; i++ {
+		o.Push(alertMsg(i))
+	}
+	if o.DroppedApplyResults() != 0 {
+		t.Fatalf("alerts evicted %d ApplyResults", o.DroppedApplyResults())
+	}
+	if o.Len() != limits.MaxOutboxMessages {
+		t.Fatalf("Len = %d, want %d", o.Len(), limits.MaxOutboxMessages)
+	}
+	// Order is still production order: the 16 results first, then the
+	// newest MaxOutboxAlerts alerts.
+	for i := 0; i < limits.MaxOutboxApplyResults; i++ {
+		m := o.Peek()
+		if m.GetApplyResult().GetEpoch() != uint64(i) {
+			t.Fatalf("message %d = %v, want ApplyResult epoch %d", i, m, i)
+		}
+		o.Pop(m)
+	}
+	if first := o.Peek().GetAlert().GetUnixTime(); first != int64(10*limits.MaxOutboxMessages-limits.MaxOutboxAlerts) {
+		t.Fatalf("oldest alert kept = %d", first)
+	}
+}
+
+// R6B-3: past its own bound the oldest ApplyResult is dropped, counted
+// and audited; queued alerts are untouched.
+func TestOutbox_ApplyResultBoundDropsOldestResultAndAudits(t *testing.T) {
+	aud := &FakeAuditor{}
+	o, err := NewOutbox(aud)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.Push(alertMsg(1))
+	for i := 0; i < limits.MaxOutboxApplyResults+2; i++ {
+		o.Push(resultMsg(i))
+	}
+	if o.DroppedApplyResults() != 2 || o.DroppedAlerts() != 0 {
+		t.Fatalf("dropped results=%d alerts=%d, want 2, 0", o.DroppedApplyResults(), o.DroppedAlerts())
+	}
+	if o.Len() != limits.MaxOutboxApplyResults+1 {
+		t.Fatalf("Len = %d", o.Len())
+	}
+	if o.Peek().GetAlert().GetUnixTime() != 1 {
+		t.Fatal("the alert was evicted by ApplyResults")
+	}
+	o.Pop(o.Peek())
+	if e := o.Peek().GetApplyResult().GetEpoch(); e != 2 {
+		t.Fatalf("oldest ApplyResult kept = %d, want 2", e)
+	}
+	n := 0
+	for _, e := range aud.Events {
+		if e.Step == "outbox_apply_result_dropped" {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Fatalf("%d outbox_apply_result_dropped audit records, want 2", n)
+	}
+	// Popping keeps the class count right: refill to the bound with no drop.
+	for o.Len() > 0 {
+		o.Pop(o.Peek())
+	}
+	for i := 0; i < limits.MaxOutboxApplyResults; i++ {
+		o.Push(resultMsg(i))
+	}
+	if o.DroppedApplyResults() != 2 {
+		t.Fatal("Pop did not release ApplyResult capacity")
+	}
+	if _, err := NewOutbox(nil); err == nil {
+		t.Fatal("NewOutbox(nil) accepted")
+	}
 }
 
 func TestLink_Reachability(t *testing.T) {
@@ -116,7 +197,7 @@ func TestAlerter_RateLimitPerKind(t *testing.T) {
 		t.Fatal("NewAlerter(nil outbox) = nil error")
 	}
 	clk := &syncClock{now: time.Unix(1000, 0)}
-	o := NewOutbox()
+	o := testOutbox()
 	aud := &syncAuditor{}
 	a, _ := NewAlerter(o, aud, clk.Now)
 	if !a.Raise(controlv1.Alert_DRIFT, "first") {
@@ -224,8 +305,8 @@ func TestConstructorValidation(t *testing.T) {
 	link, _ := NewLink(time.Now, time.Second)
 	reg, _ := NewLivenessRegistry(time.Now)
 	sm, _ := NewStateMachine(&FakeAuditor{})
-	alerter, _ := NewAlerter(NewOutbox(), &FakeAuditor{}, time.Now)
-	cfg := ApplyWorkerConfig{Deps: deps, SM: sm, Link: link, Outbox: NewOutbox(), Alerter: alerter, Auditor: &FakeAuditor{}, Liveness: reg, Clock: time.Now}
+	alerter, _ := NewAlerter(testOutbox(), &FakeAuditor{}, time.Now)
+	cfg := ApplyWorkerConfig{Deps: deps, SM: sm, Link: link, Outbox: testOutbox(), Alerter: alerter, Auditor: &FakeAuditor{}, Liveness: reg, Clock: time.Now}
 	if _, err := NewApplyWorker(cfg); err == nil {
 		t.Fatal("NewApplyWorker with zero HealthWindow = nil error")
 	}
@@ -340,7 +421,7 @@ func TestRunSession_HeartbeatsContinueDuringApply(t *testing.T) {
 	clk := &syncClock{now: time.Unix(1000, 0)}
 	reg, _ := NewLivenessRegistry(clk.Now)
 	link, _ := NewLink(clk.Now, 15*time.Second)
-	outbox := NewOutbox()
+	outbox := testOutbox()
 	jobs := &blockingJobs{sm: sm, link: link, outbox: outbox, release: make(chan struct{}), started: make(chan struct{})}
 	cl.Jobs = jobs
 	stream := newFakeStream()
@@ -407,7 +488,7 @@ func TestRunSession_StreamLostDuringApplyIsSettledByWorker(t *testing.T) {
 	aud := &syncAuditor{}
 	cl.Auditor = aud
 	link, _ := NewLink(time.Now, time.Hour)
-	outbox := NewOutbox()
+	outbox := testOutbox()
 	jobs := &blockingJobs{sm: sm, link: link, outbox: outbox, release: make(chan struct{}), started: make(chan struct{})}
 	cl.Jobs = jobs
 	s1, s2 := newFakeStream(), newFakeStream()
@@ -570,7 +651,7 @@ func (f *fakeRootStore) Tampered() error { return nil }
 func trustWorker(t *testing.T, root *trust.Root, roots *fakeRootStore, mldsa bool, now time.Time) (*ApplyWorker, *Outbox, *TrustState) {
 	t.Helper()
 	ts, _ := NewTrustState(root)
-	o := NewOutbox()
+	o := testOutbox()
 	alerter, _ := NewAlerter(o, &syncAuditor{}, func() time.Time { return now })
 	return &ApplyWorker{cfg: ApplyWorkerConfig{
 		Deps:    BundleDeps{Trust: ts, Roots: roots, Crypto: Capabilities{MLDSAAvailable: mldsa}},
@@ -649,7 +730,7 @@ func TestTrustExpiryMonitor_OncePerConnectionAndDaily(t *testing.T) {
 	}
 	clk := &syncClock{now: now}
 	ts, _ := NewTrustState(root)
-	o := NewOutbox()
+	o := testOutbox()
 	alerter, _ := NewAlerter(o, &syncAuditor{}, clk.Now)
 	m := &TrustExpiryMonitor{Trust: ts, Alerter: alerter, Clock: clk.Now}
 	m.Connected()
@@ -681,7 +762,7 @@ func TestTrustExpiryMonitor_OncePerConnectionAndDaily(t *testing.T) {
 func TestReconcileScheduler_PeriodicRestartAndHealth(t *testing.T) {
 	clk := &syncClock{now: time.Unix(1000, 0)}
 	reg, _ := NewLivenessRegistry(clk.Now)
-	o := NewOutbox()
+	o := testOutbox()
 	aud := &syncAuditor{}
 	alerter, _ := NewAlerter(o, aud, clk.Now)
 	w := &ApplyWorker{wake: make(chan struct{}, 1)}
@@ -737,4 +818,12 @@ func TestReconcileScheduler_PeriodicRestartAndHealth(t *testing.T) {
 	if (&ReconcileScheduler{}).interval() != 60*time.Second {
 		t.Fatal("default interval is not 60s")
 	}
+}
+
+func testOutbox() *Outbox {
+	o, err := NewOutbox(&FakeAuditor{})
+	if err != nil {
+		panic(err)
+	}
+	return o
 }

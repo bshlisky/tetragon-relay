@@ -334,6 +334,19 @@ const (
 	// without limit.
 	MaxOutboxMessages = 64
 
+	// MaxOutboxApplyResults bounds the ApplyResults within
+	// MaxOutboxMessages (docs/reviews/step-06b-review.md R6B-3). One apply
+	// runs at a time, plus one superseded result per replaced bundle, so
+	// 16 is never reached in practice. Alerts never evict an ApplyResult;
+	// past this bound the oldest ApplyResult is dropped, counted and
+	// audited.
+	MaxOutboxApplyResults = 16
+
+	// MaxOutboxAlerts bounds the Alerts (and any other non-ApplyResult
+	// message) within MaxOutboxMessages: the remainder after the
+	// ApplyResults' own bound. Past it the oldest alert is dropped.
+	MaxOutboxAlerts = MaxOutboxMessages - MaxOutboxApplyResults
+
 	// AlertRateLimitInterval is the per-kind Alert rate limit: at most
 	// one Alert of each kind per this interval, except the first (docs/prompts/step-06b.md E1).
 	AlertRateLimitInterval = 5 * time.Minute

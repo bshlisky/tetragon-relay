@@ -190,7 +190,7 @@ func newPipeline(t *testing.T, o pipelineOpts) *pipeline {
 	clock := func() time.Time { return now }
 	link, _ := agent.NewLink(clock, 15*time.Second)
 	link.Up(func() {})
-	outbox := agent.NewOutbox()
+	outbox, _ := agent.NewOutbox(&agent.FakeAuditor{})
 	alerter, _ := agent.NewAlerter(outbox, auditor, clock)
 	liveness, _ := agent.NewLivenessRegistry(time.Now)
 	commit := &agent.CommitOnPut{Store: st}

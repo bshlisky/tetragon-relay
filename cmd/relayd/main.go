@@ -306,7 +306,11 @@ func run(configPath string, auditor *agentAuditor) error {
 		auditor.Record(agent.AuditEvent{Step: "agent_build_digest", Detail: "could not hash /proc/self/exe; Hello will carry no agent_build_digest", Err: digestErr})
 	}
 
-	outbox := agent.NewOutbox()
+	outbox, err := agent.NewOutbox(auditor)
+	if err != nil {
+		cancelSession()
+		return fmt.Errorf("new outbox: %w", err)
+	}
 	alerter, err := agent.NewAlerter(outbox, auditor, time.Now)
 	if err != nil {
 		cancelSession()

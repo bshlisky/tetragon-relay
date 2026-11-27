@@ -345,8 +345,14 @@ absence of a repeat: the agent sends no "cleared" alert. Use `Heartbeat.loaded_d
 and `StateReport` for current state.
 
 **While disconnected.** ApplyResults and alerts produced while the stream is down are
-queued (at most 64 in total; when full, the oldest is dropped and counted locally) and
-sent right after the next HelloAck, before anything else, each with a fresh `seq`.
+queued and sent right after the next HelloAck, before anything else, in the order they
+were produced, each with a fresh `seq`. The queue has a bound per class (R6B-3):
+ApplyResults at most 16, alerts at most 48. Alerts never push out an ApplyResult. Past
+its own bound, the oldest message of the same class is dropped and counted locally; a
+dropped ApplyResult is also audited (`outbox_apply_result_dropped`). One apply runs at a
+time, so 16 ApplyResults are reached only if the controller sends many bundles to a
+host that cannot reach it; a bundle with no ApplyResult after reconnect should be
+resent.
 
 **Not yet sent.** `TAMPER` for a store found TAMPERED at agent *startup*: today the agent
 refuses to start in that case (systemd restarts it), so it never connects. See the
