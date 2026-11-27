@@ -88,6 +88,10 @@ type CommitOnPut struct {
 // Get implements apply.LKGStore.
 func (c *CommitOnPut) Get(domain string) (apply.LKGSet, bool) { return c.Store.Get(domain) }
 
+// Tampered implements apply.TamperReporter: the engine refuses to
+// re-assert (reconcile, rollback) an LKG the store cannot vouch for.
+func (c *CommitOnPut) Tampered() error { return c.Store.Tampered() }
+
 // Put implements apply.LKGStore.
 func (c *CommitOnPut) Put(domain string, set apply.LKGSet) error {
 	c.mu.Lock()
@@ -126,11 +130,14 @@ func (c *CommitOnPut) disarm() (committed bool, err error) {
 type BundleDeps struct {
 	Store BundleStore
 	// Roots persists adopted trust roots (TrustUpdate, C1).
-	Roots   TrustRootStore
-	Commit  *CommitOnPut
-	Trust   *TrustState
-	Engine  Applier
-	Version VersionSource
+	Roots  TrustRootStore
+	Commit *CommitOnPut
+	Trust  *TrustState
+	Engine Applier
+	// Reconciler runs reconcile cycles (D1); production passes the same
+	// *apply.Engine as Engine.
+	Reconciler Reconciler
+	Version    VersionSource
 	// HostCaps is hostprobe.Load's result for this boot (R6A-2). When
 	// the facts were stale or missing, Load already returned its
 	// fail-closed value, which reports no enforcement capability, so
@@ -154,7 +161,7 @@ type BundleDeps struct {
 
 func (d BundleDeps) validate() error {
 	switch {
-	case d.Store == nil, d.Roots == nil, d.Commit == nil, d.Trust == nil, d.Engine == nil, d.Version == nil, d.HostCaps == nil, d.Digest == nil:
+	case d.Store == nil, d.Roots == nil, d.Commit == nil, d.Trust == nil, d.Engine == nil, d.Reconciler == nil, d.Version == nil, d.HostCaps == nil, d.Digest == nil:
 		return fmt.Errorf("agent: BundleDeps: every dependency must be set")
 	case d.HostUUID == "":
 		return fmt.Errorf("agent: BundleDeps: HostUUID must be set")

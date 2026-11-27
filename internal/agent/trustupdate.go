@@ -85,6 +85,7 @@ func (w *ApplyWorker) processTrustUpdate(roots [][]byte) {
 	}
 	if terr := d.Roots.Tampered(); terr != nil {
 		fail("store TAMPERED: every trust update is rejected until operator re-enrollment", terr)
+		w.tamperAlert(terr)
 		return
 	}
 	if len(roots) == 0 || len(roots) > limits.MaxRootChainFiles {

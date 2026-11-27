@@ -59,6 +59,13 @@ type ApplyWorker struct {
 	has        bool
 	trustQueue [][][]byte
 	wake       chan struct{}
+
+	reconcileDue     bool
+	reconcileRestart bool
+
+	// Worker-goroutine-only reconcile state.
+	driftReasserted        bool
+	reconcileTamperAudited bool
 }
 
 // NewApplyWorker validates cfg and returns a worker. Call Run to start it.
@@ -142,7 +149,8 @@ func (w *ApplyWorker) Run(ctx context.Context) {
 }
 
 // drainJobs runs queued jobs until none are left: every queued trust
-// update first (in arrival order), then the pending bundle, so a bundle
+// update first (in arrival order), then the pending bundle, then a
+// requested reconcile cycle, so a bundle
 // is always verified against the newest adopted root and a root never
 // changes during a bundle's verification or apply (C2).
 func (w *ApplyWorker) drainJobs(ctx context.Context) {
@@ -151,11 +159,15 @@ func (w *ApplyWorker) drainJobs(ctx context.Context) {
 			w.runJob(ctx, func(context.Context) { w.processTrustUpdate(roots) })
 			continue
 		}
-		env, ok := w.takePending()
-		if !ok {
+		if env, ok := w.takePending(); ok {
+			w.runJob(ctx, func(jctx context.Context) { w.processBundle(jctx, env) })
+			continue
+		}
+		due, restarted := w.takeReconcile()
+		if !due {
 			return
 		}
-		w.runJob(ctx, func(jctx context.Context) { w.processBundle(jctx, env) })
+		w.runJob(ctx, func(jctx context.Context) { w.processReconcile(jctx, restarted) })
 	}
 }
 
@@ -202,6 +214,7 @@ func (w *ApplyWorker) processBundle(ctx context.Context, envelope []byte) {
 		res.Status = controlv1.ApplyResult_REJECTED_EPOCH
 		res.Detail = "store TAMPERED: every bundle is rejected until operator re-enrollment"
 		w.cfg.Auditor.Record(AuditEvent{Step: "bundle_rejected", Detail: res.Detail, Err: terr})
+		w.tamperAlert(terr)
 		return
 	}
 
@@ -329,6 +342,12 @@ func (w *ApplyWorker) settle(events []Event) {
 			}
 		}
 	})
+}
+
+// tamperAlert raises Alert TAMPER for a store found TAMPERED at runtime
+// (rate-limited per kind like every alert).
+func (w *ApplyWorker) tamperAlert(err error) {
+	w.cfg.Alerter.Raise(controlv1.Alert_TAMPER, "store TAMPERED: bundles and trust updates are rejected and reconcile is suspended until operator re-enrollment: "+errDetail(err))
 }
 
 func errDetail(err error) string {
