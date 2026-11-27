@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -40,14 +41,16 @@ func (l *fakeLiveness) Touch(n string) {
 type chanSource struct {
 	ch    chan *tetragonpb.GetEventsResponse
 	calls int
-	mu    sync.Mutex
-	types []tetragonpb.EventType
+	mu      sync.Mutex
+	types   []tetragonpb.EventType
+	exclude []string
 }
 
-func (s *chanSource) StreamEvents(ctx context.Context, types []tetragonpb.EventType, deliver func([]byte) bool) error {
+func (s *chanSource) StreamEvents(ctx context.Context, types []tetragonpb.EventType, exclude []string, deliver func([]byte) bool) error {
 	s.mu.Lock()
 	s.calls++
 	s.types = types
+	s.exclude = exclude
 	s.mu.Unlock()
 	for {
 		select {
@@ -379,6 +382,12 @@ func TestPipeline_ConfigAndIngestReconnect(t *testing.T) {
 		return r.src.calls >= 2
 	})
 	r.stop()
+	r.src.mu.Lock()
+	exclude := r.src.exclude
+	r.src.mu.Unlock()
+	if !slices.Equal(exclude, ExcludedFields) {
+		t.Fatalf("GetEvents excluded fields %v, want %v", exclude, ExcludedFields)
+	}
 	if r.aud.count("telemetry_ingest_stream_ended") < 1 {
 		t.Fatal("ingest stream end not audited")
 	}

@@ -25,8 +25,20 @@ import (
 // EventSource is Tetragon's GetEvents with an allow-list (cmd/relayd adapts
 // tetra.Client.StreamEvents to it). Each response is delivered as its
 // undecoded wire bytes, which the pipeline then owns. deliver may block.
+// excludeFields are field paths Tetragon is asked not to send
+// (GetEventsRequest.field_filters, EXCLUDE): a saving, not a redaction.
 type EventSource interface {
-	StreamEvents(ctx context.Context, eventTypes []tetragonpb.EventType, deliver func(raw []byte) bool) error
+	StreamEvents(ctx context.Context, eventTypes []tetragonpb.EventType, excludeFields []string, deliver func(raw []byte) bool) error
+}
+
+// ExcludedFields are the fields telemetry asks Tetragon not to send (step
+// 7b D1): the environment, which redaction removes anyway. Redaction still
+// removes it, as defense in depth. Paths are relative to the event message
+// (verified on the real v1.8.0 binary: TestIntegration_FieldFilters).
+var ExcludedFields = []string{
+	"process.environment_variables",
+	"parent.environment_variables",
+	"ancestors.environment_variables",
 }
 
 // Liveness is the agent's liveness registry (agent.LivenessRegistry).
@@ -240,7 +252,7 @@ func (p *Pipeline) ingest(ctx context.Context) {
 		started := p.cfg.Clock()
 		res := make(chan error, 1)
 		go func() {
-			res <- p.cfg.Source.StreamEvents(ctx, p.cfg.EventTypes, func(raw []byte) bool {
+			res <- p.cfg.Source.StreamEvents(ctx, p.cfg.EventTypes, ExcludedFields, func(raw []byte) bool {
 				if peekAdmit(raw) == admitOther {
 					if now := p.cfg.Clock(); !bucket.allow(now) {
 						p.rateLimited.Add(1)

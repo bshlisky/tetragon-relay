@@ -50,8 +50,8 @@ func (t telemetryAuditor) Record(step, detail string, err error) {
 // section 8).
 type tetraEventSource struct{ c *tetra.Client }
 
-func (s tetraEventSource) StreamEvents(ctx context.Context, types []tetragonpb.EventType, deliver func([]byte) bool) error {
-	return s.c.StreamEvents(ctx, types, nil, deliver)
+func (s tetraEventSource) StreamEvents(ctx context.Context, types []tetragonpb.EventType, exclude []string, deliver func([]byte) bool) error {
+	return s.c.StreamEvents(ctx, types, exclude, deliver)
 }
 
 // startTelemetry builds the pipeline and runs it until ctx ends. A failure

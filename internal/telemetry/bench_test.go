@@ -48,7 +48,7 @@ type bytesSource struct {
 	delivered atomic.Int64
 }
 
-func (s *bytesSource) StreamEvents(ctx context.Context, _ []tetragonpb.EventType, deliver func([]byte) bool) error {
+func (s *bytesSource) StreamEvents(ctx context.Context, _ []tetragonpb.EventType, _ []string, deliver func([]byte) bool) error {
 	for i := int(s.delivered.Load()); i < s.n; i++ {
 		if !deliver(s.corpus[i%len(s.corpus)]) {
 			return nil

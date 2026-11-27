@@ -112,7 +112,7 @@ func TestTokenBucket(t *testing.T) {
 // rawSource delivers raw bytes as they are.
 type rawSource struct{ ch chan []byte }
 
-func (s *rawSource) StreamEvents(ctx context.Context, _ []tetragonpb.EventType, deliver func([]byte) bool) error {
+func (s *rawSource) StreamEvents(ctx context.Context, _ []tetragonpb.EventType, _ []string, deliver func([]byte) bool) error {
 	for {
 		select {
 		case <-ctx.Done():
