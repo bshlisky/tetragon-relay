@@ -200,10 +200,14 @@ func RunSession(ctx context.Context, cfg SessionConfig) error {
 }
 
 // applyOwnsState reports whether the apply worker currently owns the
-// state machine (APPLYING or ROLLBACK). Connection transitions are left
-// to the worker in those states; it settles them when the apply ends
-// (see Link).
-func applyOwnsState(s State) bool { return s == StateApplying || s == StateRollback }
+// state machine: APPLYING or ROLLBACK (an apply), or DRIFT (a reconcile
+// episode). Architecture doc 8.4 has no connection edges out of these
+// states, so connection transitions are left to the worker, which
+// settles them when the apply or drift episode ends (see Link). E3 run
+// 45941496156 (S11) showed the stream closing while in DRIFT.
+func applyOwnsState(s State) bool {
+	return s == StateApplying || s == StateRollback || s == StateDrift
+}
 
 func linkUp(cfg SessionConfig, fire func()) {
 	if cfg.Link != nil {

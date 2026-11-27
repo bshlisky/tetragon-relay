@@ -48,11 +48,13 @@ every bundle would apply bundles the controller has already replaced.
    limits.ApplyWorkerLivenessSlack` (120 s). A job still running past that
    bound is stalled: the worker stops touching, and systemd's watchdog
    restarts relayd.
-6. **State-machine ownership.** While APPLYING or ROLLBACK, the worker owns
-   the state machine's transitions. RunSession does not fire
-   StreamLost/HelloAck/InSync in those states (architecture 8.4 has no such
-   edges). When the worker settles in STEADY with the stream down, it fires
-   StreamLost itself. Both sides decide under `agent.Link`'s mutex.
+6. **State-machine ownership.** While APPLYING, ROLLBACK or DRIFT (a
+   reconcile episode), the worker owns the state machine's transitions.
+   RunSession does not fire StreamLost/HelloAck/InSync in those states
+   (architecture 8.4 has no such edges). When the worker settles in STEADY
+   with the stream down, it fires StreamLost itself. Both sides decide under
+   `agent.Link`'s mutex. (DRIFT was added after E3 run 45941496156, S11, saw
+   the stream close mid-episode.)
 7. **Later work runs on the same worker** (steps 6b C/D): trust updates and
    reconcile cycles. That one goroutine is what guarantees that a trust
    root never changes mid-verification (C2) and that reconcile never runs

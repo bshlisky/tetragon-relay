@@ -137,11 +137,18 @@ func (w *ApplyWorker) driftDetail(ctx context.Context, report *apply.DriftReport
 		lkgDigest, loaded, strings.Join(report.Missing, ","), strings.Join(report.Unexpected, ","))
 }
 
-// fire fires e under the Link's lock (see Link), auditing a refusal.
+// fire fires e under the Link's lock (see Link), auditing a refusal. If
+// that leaves the agent in STEADY while the stream is down, it also fires
+// StreamLost: RunSession leaves DRIFT to the worker (applyOwnsState).
 func (w *ApplyWorker) fire(e Event) {
-	w.cfg.Link.Settle(func(bool) {
+	w.cfg.Link.Settle(func(connected bool) {
 		if err := w.cfg.SM.Fire(e); err != nil {
 			w.cfg.Auditor.Record(AuditEvent{Step: "reconcile_state_transition_failed", Detail: e.String(), Err: err})
+		}
+		if !connected && w.cfg.SM.Current() == StateSteady {
+			if err := w.cfg.SM.Fire(EventStreamLost); err != nil {
+				w.cfg.Auditor.Record(AuditEvent{Step: "reconcile_state_transition_failed", Detail: EventStreamLost.String(), Err: err})
+			}
 		}
 	})
 }

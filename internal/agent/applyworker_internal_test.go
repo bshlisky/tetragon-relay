@@ -463,6 +463,31 @@ func TestRunSession_ConnectDuringApplyLeavesState(t *testing.T) {
 	}
 }
 
+// TestReconcileFire_SettlesStreamLostOutOfDrift: the stream drops while
+// in DRIFT (RunSession leaves the state alone); when the re-assert holds,
+// the worker moves DRIFT -> STEADY -> CONNECTING.
+func TestReconcileFire_SettlesStreamLostOutOfDrift(t *testing.T) {
+	aud := &syncAuditor{}
+	sm, _ := NewStateMachine(aud)
+	for _, e := range []Event{EventJoinTokenValid, EventSVIDIssued, EventHelloAck, EventInSync, EventDigestMismatch} {
+		if err := sm.Fire(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cl, _ := NewControlLoop(sm, aud, time.Now, &fakeSnapshotProvider{}, &fakeRotator{})
+	link, _ := NewLink(time.Now, time.Second)
+	link.Up(func() {})
+	link.Down(func() { fireStreamLost(SessionConfig{ControlLoop: cl, Auditor: aud}) })
+	if sm.Current() != StateDrift {
+		t.Fatalf("after stream loss in DRIFT: %s, want DRIFT", sm.Current())
+	}
+	w := &ApplyWorker{cfg: ApplyWorkerConfig{SM: sm, Link: link, Auditor: aud}}
+	w.fire(EventReassertHolds)
+	if sm.Current() != StateConnecting {
+		t.Fatalf("after the re-assert held while disconnected: %s, want CONNECTING", sm.Current())
+	}
+}
+
 func TestControlLoop_BundleGoesToJobSink(t *testing.T) {
 	cl, sm, _, _ := newSessionTestFixtures(t)
 	_ = sm
