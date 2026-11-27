@@ -244,7 +244,6 @@ forwarding, the full message loop) — do not use it as a reference for those.
 
 ## 9. What this repository does not implement yet (so you don't wait on it)
 
-- Reconcile scheduling and reconcile-driven drift alerts (step 6b Parts D-E, in progress).
 - Remote attestation (`Hello.pcr_quote` is always empty from this repository today).
 - The production controller, gateway, signer and collector themselves — this repository only
   ever builds the agent, plus `cmd/testcontroller` (handshake-only test tooling) and this
@@ -310,18 +309,32 @@ Status refinements:
 | Health window failed and the previous LKG was re-asserted | `ROLLED_BACK` | `rolled back: <reason>` — halt the rollout wave (architecture 7.7 step 8) |
 | Health window failed and re-asserting LKG also failed | `APPLY_FAILED` | `ROLLBACK_FAILED: ...`; the agent enters `DEGRADED` and raises `Alert{DRIFT}` |
 
-### 10.4 Alerts the agent sends today
+### 10.4 Alerts
 
-| Kind | When |
-| --- | --- |
-| `GUARDRAIL_REJECT` | A bundle was rejected `REJECTED_GUARDRAIL` or `REJECTED_CAPABILITY`; `detail` carries the bundle digest and rule ID. |
-| `DRIFT` | ROLLBACK_FAILED (above). Reconcile-driven drift alerts follow in step 6b Part D. |
-| `TRUST_EXPIRED` | The agent's current trust root is expired: once per connection (after HelloAck) and again daily while it stays expired. Every bundle is rejected meanwhile (`REJECTED_SIGNATURE`, reason `trust root metadata has expired`); LKG stays enforced. Send a `TrustUpdate`. |
-| `KIND_UNSPECIFIED`, detail `TRUST_UPDATE_REJECTED: ...` | A `TrustUpdate` (or a step of it) was not adopted (section 10.5). The proto has no trust-update alert kind. |
+`Alert{kind, detail, unix_time}`; `detail` is at most 4 KiB and carries no secrets.
 
-Every kind is rate-limited agent-side to one per 5 minutes (the first is always sent).
-Alerts and ApplyResults produced while disconnected are queued (at most 64; the oldest
-is dropped when full) and sent after the next HelloAck, before anything else.
+| Kind | When | What to do |
+| --- | --- | --- |
+| `DRIFT` | A reconcile cycle (every 60 s, at agent start, and at once after a Tetragon restart) found Tetragon's relay-managed policies differing from the agent's LKG. `detail`: `lkg_bundle_digest=<hex> loaded_digest=<hex> missing=[...] unexpected=[...]`. The agent enters `DRIFT` and re-asserts LKG **once**; if that holds it returns to `STEADY` (no further alert). If it does not, it stays in `DRIFT` and alerts on every cycle (`still drifted after re-assert: ...`), subject to the rate limit. Also raised for ROLLBACK_FAILED (section 10.3). | Architecture 10.4: re-assert; quarantine if still mismatched after one cycle. |
+| `TETRAGON_UNHEALTHY` | Tetragon's `GetHealth` is not serving (checked every 5 s), or Tetragon restarted (detected as a new process behind its socket). | Architecture 10.4: quarantine if repeated 3x in 10 min. |
+| `TRUST_EXPIRED` | The agent's current trust root is expired: once per connection (after HelloAck) and again daily while it stays expired. Every bundle is rejected meanwhile (`REJECTED_SIGNATURE`, reason `trust root metadata has expired`); LKG stays enforced. | Send a `TrustUpdate`. |
+| `TAMPER` | The agent's store was found TAMPERED while running (a bundle, trust update or reconcile read it). From then on every bundle and trust update is rejected and reconcile is suspended (nothing Tetragon has loaded is changed) until operator re-enrollment. | Treat the host as compromised. |
+| `GUARDRAIL_REJECT` | A bundle was rejected `REJECTED_GUARDRAIL` or `REJECTED_CAPABILITY` by a guardrail. `detail`: the bundle digest and the reason, which names the rule (`guardrail rejection: G5`). | Fix the bundle; the agent's guardrails are compiled in. |
+| `KIND_UNSPECIFIED`, `detail` starting `TRUST_UPDATE_REJECTED: ` | A `TrustUpdate` (or a step of it) was not adopted (section 10.5). The proto has no trust-update kind. | Check the root chain you sent. |
+
+**Rate limit.** At most one alert of each kind per 5 minutes; the first of each kind is
+always sent. A suppressed alert is still written to the agent's local audit log
+(`alert_suppressed`); every sent alert is too (`alert`). Do not infer "resolved" from the
+absence of a repeat: the agent sends no "cleared" alert. Use `Heartbeat.loaded_digest`
+and `StateReport` for current state.
+
+**While disconnected.** ApplyResults and alerts produced while the stream is down are
+queued (at most 64 in total; when full, the oldest is dropped and counted locally) and
+sent right after the next HelloAck, before anything else, each with a fresh `seq`.
+
+**Not yet sent.** `TAMPER` for a store found TAMPERED at agent *startup*: today the agent
+refuses to start in that case (systemd restarts it), so it never connects. See the
+step 6b report's open questions.
 
 ### 10.5 `TrustUpdate`
 
