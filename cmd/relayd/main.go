@@ -171,7 +171,7 @@ func run(configPath string, auditor *agentAuditor) error {
 		bootID = facts.BootID
 	}
 	if !fresh {
-		auditor.Record(agent.AuditEvent{Step: "host_facts", Detail: "host facts missing or stale; enforcement bundles will be rejected (REJECTED_CAPABILITY) once step 6b processes bundles", Err: factsErr})
+		auditor.Record(agent.AuditEvent{Step: "host_facts", Detail: "host facts missing or stale; enforcement bundles are rejected (REJECTED_CAPABILITY)", Err: factsErr})
 	}
 
 	tetraClient, err := tetra.Dial(context.Background(), tetra.Config{
@@ -184,14 +184,23 @@ func run(configPath string, auditor *agentAuditor) error {
 	}
 	defer func() { _ = tetraClient.Close() }()
 
-	engine := apply.NewEngine(tetraClient, apply.RealPolicyParser{}, startupResult.Store, noopReachability{}, &engineAuditorAdapter{auditor.inner}, apply.Config{
+	// docs/prompts/step-06b.md B4: the health window's "agent can still
+	// reach the controller" check is the real control-stream state.
+	link, err := agent.NewLink(time.Now, cfg.HeartbeatInterval)
+	if err != nil {
+		return fmt.Errorf("new link: %w", err)
+	}
+	// B1: the engine's LKG writes go through CommitOnPut, which commits
+	// the LKG together with the epoch and monitor history the apply
+	// worker armed, in one store generation.
+	commit := &agent.CommitOnPut{Store: startupResult.Store}
+	engine := apply.NewEngine(tetraClient, apply.RealPolicyParser{}, commit, link, &engineAuditorAdapter{auditor.inner}, apply.Config{
 		PersistDir: cfg.PersistDir,
 		HealthWindow: apply.HealthWindowConfig{
 			Window:         cfg.HealthWindow,
 			SurgeThreshold: cfg.EnforcementSurgeThreshold,
 		},
 	})
-	_ = engine // wired and ready for 6b's reconcile scheduling; not driven by this step
 
 	// Part D1: the state machine starts in UNENROLLED (architecture doc
 	// 8.4) on every boot; it is only advanced by a running control loop
@@ -297,6 +306,52 @@ func run(configPath string, auditor *agentAuditor) error {
 		auditor.Record(agent.AuditEvent{Step: "agent_build_digest", Detail: "could not hash /proc/self/exe; Hello will carry no agent_build_digest", Err: digestErr})
 	}
 
+	outbox := agent.NewOutbox()
+	alerter, err := agent.NewAlerter(outbox, auditor, time.Now)
+	if err != nil {
+		cancelSession()
+		return fmt.Errorf("new alerter: %w", err)
+	}
+	trustState, err := agent.NewTrustState(startupResult.TrustRoot)
+	if err != nil {
+		cancelSession()
+		return fmt.Errorf("new trust state: %w", err)
+	}
+	worker, err := agent.NewApplyWorker(agent.ApplyWorkerConfig{
+		Deps: agent.BundleDeps{
+			Store:          startupResult.Store,
+			Commit:         commit,
+			Trust:          trustState,
+			Engine:         engine,
+			Version:        tetraClient,
+			HostCaps:       hostCaps,
+			EnforceAllowed: fresh && hostCaps.UsrmergeOK(),
+			Crypto:         startupResult.Capabilities,
+			HostUUID:       cfg.HostUUID,
+			AllowedScopes:  cfg.AllowedScopes,
+			Digest: func(ctx context.Context) ([]byte, error) {
+				snap, err := snapshotProvider.Snapshot(ctx)
+				if err != nil {
+					return nil, err
+				}
+				return snap.LoadedDigest, nil
+			},
+		},
+		SM:           sm,
+		Link:         link,
+		Outbox:       outbox,
+		Alerter:      alerter,
+		Auditor:      auditor,
+		Liveness:     liveness,
+		Clock:        time.Now,
+		HealthWindow: cfg.HealthWindow,
+	})
+	if err != nil {
+		cancelSession()
+		return fmt.Errorf("new apply worker: %w", err)
+	}
+	controlLoop.Jobs = worker
+
 	sessionCfg := agent.SessionConfig{
 		Connector: &agent.RealConnector{
 			Config: func() controlclient.Config {
@@ -318,7 +373,13 @@ func run(configPath string, auditor *agentAuditor) error {
 		Liveness:          liveness,
 		Revocations:       startupResult.Store,
 		HeartbeatInterval: cfg.HeartbeatInterval,
+		Outbox:            outbox,
+		Link:              link,
 	}
+
+	// The apply worker outlives individual streams (an apply keeps
+	// running across a reconnect) and stops with the session.
+	go worker.Run(sessionCtx)
 
 	sessionDone := make(chan error, 1)
 	go func() { sessionDone <- agent.RunSession(sessionCtx, sessionCfg) }()
@@ -426,16 +487,6 @@ func stopSession(auditor agent.Auditor, assembled *assembledAgent) {
 		auditor.Record(agent.AuditEvent{Step: "session_shutdown", Detail: "session runner did not stop within 5s of cancellation"})
 	}
 }
-
-// noopReachability always reports the control plane as unreachable:
-// Part C builds the apply.Engine but does not drive the control stream
-// (see run's own doc comment), so there is nothing real to report yet.
-// 6b's reconcile scheduling replaces this with a real
-// apply.ReachabilityChecker backed by the control client's connection
-// state.
-type noopReachability struct{}
-
-func (noopReachability) Reachable(context.Context) bool { return false }
 
 // engineAuditorAdapter adapts apply.Auditor (Step/Detail/Err/Domain/
 // Policy) to internal/audit.Sink's Event shape, which already carries
