@@ -1,0 +1,36 @@
+// Telemetry protocol between the relay agent and the collector,
+// docs/decisions/0039-telemetry-wire-format-and-chain.md (amends
+// architecture doc 8.10 and 10.1). docs/telemetry-contract.md is the
+// backend team's reference: the header format, the hash, the chain rules
+// and the ack rules.
+//
+// The collector is an untrusted peer of the agent (architecture doc 10):
+// it can acknowledge batches and nothing else. There is deliberately no
+// other message in either direction.
+syntax = "proto3";
+package relay.telemetry.v1;
+
+option go_package = "github.com/bshlisky/tetragon-relay/api/relay/telemetry/v1;telemetryv1";
+
+service Collector {
+  // The agent sends Batches in chain order (oldest chain first); the
+  // collector sends cumulative Acks as it durably accepts them.
+  rpc Export(stream Batch) returns (stream Ack);
+}
+
+message Batch {
+  // Canonical JSON (ADR 0039 section 2). Never re-encode it: the batch
+  // hash is SHA-256(uint32_be(len(header)) || header || payload) over the
+  // exact bytes received.
+  bytes header = 1;
+  // events: uint32_be-length-prefixed tetragon.GetEventsResponse messages;
+  // dropped and chain_reset: canonical JSON.
+  bytes payload = 2;
+}
+
+message Ack {
+  // The chain (header chain_id, 16 raw bytes) this ack is for.
+  bytes  chain_id = 1;
+  // Every batch of chain_id with seq <= this value is durably accepted.
+  uint64 seq      = 2;
+}

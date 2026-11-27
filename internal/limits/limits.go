@@ -322,6 +322,31 @@ const (
 	// fit comfortably inside one liveness window with margin to spare.
 	ControlConnectAttemptTimeout = 8 * time.Second
 
+	// --- internal/telemetry: step 7a (ADR 0039) ---
+
+	// MaxTelemetryHeaderBytes bounds a batch header's canonical JSON.
+	// The fixed keys take under 400 bytes; the rest is room for
+	// MaxTelemetryEpochScopes scope names and epochs.
+	MaxTelemetryHeaderBytes = 16 << 10
+	// MaxTelemetryEpochScopes bounds the epochs object in a header.
+	MaxTelemetryEpochScopes = 64
+	// MaxTelemetryStringBytes bounds host_uuid, boot_id, agent_version and
+	// each scope name in a header.
+	MaxTelemetryStringBytes = 128
+	// MaxTelemetryPayloadBytes bounds one batch payload: a batch is cut
+	// before it would exceed this (ADR 0039 section 7), so 2000 large
+	// events can never produce an oversized gRPC message.
+	MaxTelemetryPayloadBytes = 1 << 20
+	// MaxTelemetryEventBytes bounds one marshaled, redacted event. A
+	// larger event is dropped and counted (it could not fit a batch).
+	MaxTelemetryEventBytes = 256 << 10
+	// MaxTelemetryMessageBytes is the gRPC send/receive limit on the
+	// telemetry connection: header + payload + framing, with margin.
+	MaxTelemetryMessageBytes = 2 << 20
+	// MaxDroppedEntriesPerRecord bounds the (chain_id, seq, hash) entries
+	// in one dropped record; more drops produce more records.
+	MaxDroppedEntriesPerRecord = 512
+
 	// --- internal/agent: step 6b's apply worker and outbox ---
 
 	// MaxOutboxMessages bounds the queue of ApplyResult and Alert
