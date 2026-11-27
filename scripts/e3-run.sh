@@ -1015,6 +1015,59 @@ scenario_ts3() {
 	record_result T-S3 "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
 }
 
+# P4-RSS (step 7b P4/Z4): relayd under the real unit at a sustained event
+# rate. P4_LOOPS shell loops exec /usr/bin/true for 60 s (each exec is an
+# exec and an exit event). Records relayd's VmRSS every second (max must stay
+# < 64 MiB with the unit's MemoryMax untouched), relayd's own CPU per event
+# (utime+stime from /proc, so this includes gRPC decode and TLS, which the
+# benchmark does not), the events the collector received, and the
+# compression ratio on these real events. Runs on T-S3's relayd and
+# collector; everything is drained before and after.
+P4_LOOPS=${P4_LOOPS:-2}
+scenario_p4_rss() {
+	log "P4-RSS: relayd RSS and CPU at a sustained event rate (${P4_LOOPS} exec loops, 60 s)"
+	ok=true
+	wait_spool_empty 60 || true
+	local store=${COLLECTOR_DIR}/p4.jsonl pid clk t0 t1 c0 c1 maxrss=0 rss n1 sent decoded zb
+	stop_collector
+	rm -f "${store}"
+	start_collector p4 "${store}"
+	pid=$(systemctl show "${UNIT}" -p MainPID --value)
+	clk=$(getconf CLK_TCK)
+	echo "P4-RSS unit MemoryMax=$(systemctl show "${UNIT}" -p MemoryMax --value) MainPID=${pid}"
+	grep -E 'VmRSS|VmHWM' "/proc/${pid}/status"
+	c0=$(awk '{print $14 + $15}' "/proc/${pid}/stat")
+	t0=$(date +%s.%N)
+	for _ in $(seq 1 "${P4_LOOPS}"); do
+		(end=$((SECONDS + 60)); while [ "${SECONDS}" -lt "${end}" ]; do /usr/bin/true; done) &
+	done
+	for _ in $(seq 1 60); do
+		rss=$(awk '/^VmRSS:/ {print $2}' "/proc/${pid}/status")
+		[ "${rss}" -gt "${maxrss}" ] && maxrss=${rss}
+		sleep 1
+	done
+	wait
+	t1=$(date +%s.%N)
+	c1=$(awk '{print $14 + $15}' "/proc/${pid}/stat")
+	wait_spool_empty 120 || ok=false
+	grep -E 'VmRSS|VmHWM' "/proc/${pid}/status"
+	rep=$(collector_report "${store}" --decode) || ok=false
+	grep -E 'REPORT (chain|CLEAN)' <<<"${rep}"
+	n1=$(grep -o '"kind":"events","class":"[a-z_]*","count":[0-9]*' <<<"${rep}" | awk -F: '{s += $NF} END {print s + 0}')
+	read -r sent decoded zb < <(grep '^REPORT   events enc=' <<<"${rep}" | awk '{for (i = 1; i <= NF; i++) {split($i, kv, "="); v[kv[1]] = kv[2]} s += v["sent"]; d += v["decoded"]; if (v["enc"] == "zstd") z++} END {print s + 0, d + 0, z + 0}')
+	awk -v c0="${c0}" -v c1="${c1}" -v clk="${clk}" -v t0="${t0}" -v t1="${t1}" -v n="${n1}" -v m="${maxrss}" -v s="${sent}" -v d="${decoded}" -v z="${zb}" 'BEGIN {
+		cpu = (c1 - c0) / clk; wall = t1 - t0
+		printf "P4-RSS events=%d wall=%.1fs rate=%.0f/s relayd_cpu=%.2fs (%.2f%% of one core) cpu_per_event=%.0fns max_vmrss=%.1fMiB\n", n, wall, n / wall, cpu, 100 * cpu / wall, (n > 0 ? 1e9 * cpu / n : 0), m / 1024
+		if (s > 0) printf "P4-RSS payload sent=%d decoded=%d ratio=%.2f zstd_batches=%d sent_B/event=%.0f decoded_B/event=%.0f\n", s, d, d / s, z, s / n, d / n
+	}'
+	[ "${n1}" -gt 10000 ] || { echo "too few events (${n1}) for a sustained-rate measurement" >&2; ok=false; }
+	[ "${maxrss}" -lt $((64 * 1024)) ] || { echo "relayd VmRSS reached ${maxrss} KiB (>= 64 MiB)" >&2; ok=false; }
+	[ "$(systemctl show "${UNIT}" -p NRestarts --value)" = 0 ] || { echo "relayd restarted under load" >&2; ok=false; }
+	stop_collector
+	start_collector ts "${TS_STORE}"
+	record_result P4-RSS "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
+}
+
 # T-S4: a tiny spool cap. The only difference is collector.spool_max_bytes
 # = 524288 (512 KiB), in a copy of relay.yaml that a second drop-in line
 # points ExecStart at. With the collector down, non_security batches are
@@ -1149,7 +1202,7 @@ main() {
 
 	if ! start_swtpm_chardev; then
 		echo "no /dev/tpmrm0; every scenario needs it" >&2
-		for s in S1 S2 S3 S4 S5 S6 S7 S8 S9 S10 S11 S12 S13 T-S1 T-S2 T-S3 T-S4 T-S5; do record_result "${s}" FAIL; done
+		for s in S1 S2 S3 S4 S5 S6 S7 S8 S9 S10 S11 S12 S13 T-S1 T-S2 T-S3 P4-RSS T-S4 T-S5; do record_result "${s}" FAIL; done
 	else
 		# C5: the two identity-free scenarios first, then testenroll,
 		# then the identity scenarios.
@@ -1168,12 +1221,13 @@ main() {
 			scenario_ts1
 			scenario_ts2 # needs T-S1's relayd and collector store
 			scenario_ts3 # needs T-S2's
+			scenario_p4_rss
 			scenario_ts4
 			scenario_ts5
 			scenario_s13 # needs S10's root-v2.json and S12's bundle; restores the index
 			scenario_s4  # last: revocation is terminal for this store (ADR 0035)
 		else
-			for s in S3 S4 S5 S6 S7 S8 S9 S10 S11 S12 S13 T-S1 T-S2 T-S3 T-S4 T-S5; do record_result "${s}" FAIL; done
+			for s in S3 S4 S5 S6 S7 S8 S9 S10 S11 S12 S13 T-S1 T-S2 T-S3 P4-RSS T-S4 T-S5; do record_result "${s}" FAIL; done
 		fi
 		write_dropins
 		no_sigsys_in_job
