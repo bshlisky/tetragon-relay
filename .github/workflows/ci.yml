@@ -489,7 +489,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run E3 scenarios (S1-S13, T-S1-T-S5)
+      - name: Run E3 scenarios (S1-S13, T-S1-T-S5, P4-RSS, P5-CONTROL-UNDER-LOAD)
         run: |
           # e3-run.sh re-points the runner's /var/run to RHEL 9's ../run
           # (Ubuntu ships /run), so relay-probe's usrmerge check passes
@@ -504,6 +504,16 @@ jobs:
           export BIN_DIR="${BIN_DIR}"
           export TETRAGON_BIN="${TETRAGON_BIN}"
           sg tetragon-relay -c 'bash scripts/e3-run.sh'
+
+      # Step 7b D1: relayd's own CPU profile under P4-RSS's load (testca
+      # build, SIGUSR1), with the binary for pprof.
+      - name: Upload the E3 relayd CPU profile
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e3-relayd-profile-${{ github.run_id }}
+          path: e3-out/
+          if-no-files-found: warn
 
       - name: Dump relayd unit logs (always, for debugging)
         if: always()

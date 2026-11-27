@@ -1026,10 +1026,11 @@ scenario_ts3() {
 # starts both and stops both again at the end. The load loops run with xtrace off (the job runs under set -x, which
 # would otherwise throttle them and flood the log).
 P4_LOOPS=${P4_LOOPS:-2}
+E3_OUT=${E3_OUT:-${REPO_ROOT:-.}/e3-out}
 scenario_p4_rss() {
 	log "P4-RSS: relayd RSS and CPU at a sustained event rate (${P4_LOOPS} exec loops, 60 s)"
 	ok=true
-	local store=${COLLECTOR_DIR}/p4.jsonl pid clk t0 t1 c0 c1 maxrss=0 rss n1 sent decoded zb
+	local store=${COLLECTOR_DIR}/p4.jsonl pid clk t0 t1 c0 c1 maxrss=0 rss n1 sent decoded zb gen counts=/tmp/e3-p4-counts
 	stop_collector
 	rm -f "${store}"
 	# A fresh chain (harness setup, as in T-S1/T-S4), so the collector
@@ -1051,19 +1052,20 @@ scenario_p4_rss() {
 	grep -E 'VmRSS|VmHWM' "/proc/${pid}/status"
 	c0=$(awk '{print $14 + $15}' "/proc/${pid}/stat")
 	t0=$(date +%s.%N)
-	local loops=()
-	for _ in $(seq 1 "${P4_LOOPS}"); do
-		(set +x; end=$((SECONDS + 60)); while [ "${SECONDS}" -lt "${end}" ]; do /usr/bin/true; done) &
-		loops+=($!)
-	done
-	for _ in $(seq 1 60); do
+	flood_pids=()
+	flood 60 "${P4_LOOPS}" "${counts}"
+	for i in $(seq 1 60); do
 		rss=$(awk '/^VmRSS:/ {print $2}' "/proc/${pid}/status" 2>/dev/null || echo 0)
 		[ "${rss:-0}" -gt "${maxrss}" ] && maxrss=${rss}
+		# Step 7b D1: a 50 s CPU profile of relayd itself (testca build,
+		# SIGUSR1), from 5 s into the load.
+		[ "${i}" = 5 ] && sudo kill -USR1 "${pid}"
 		sleep 1
 	done
 	# Only the load loops: a bare wait would also wait for the collector
 	# and controller, which never exit.
-	wait "${loops[@]}"
+	wait "${flood_pids[@]}"
+	gen=$(flood_events "${counts}")
 	t1=$(date +%s.%N)
 	c1=$(awk '{print $14 + $15}' "/proc/${pid}/stat")
 	wait_spool_empty 120 || ok=false
@@ -1072,11 +1074,33 @@ scenario_p4_rss() {
 	grep -E 'REPORT (chain|CLEAN)' <<<"${rep}"
 	n1=$(grep -o '"kind":"events","class":"[a-z_]*","count":[0-9]*' <<<"${rep}" | awk -F: '{s += $NF} END {print s + 0}')
 	read -r sent decoded zb < <(grep '^REPORT   events enc=' <<<"${rep}" | awk '{for (i = 1; i <= NF; i++) {split($i, kv, "="); v[kv[1]] = kv[2]} s += v["sent"]; d += v["decoded"]; if (v["enc"] == "zstd") z++} END {print s + 0, d + 0, z + 0}')
-	awk -v c0="${c0}" -v c1="${c1}" -v clk="${clk}" -v t0="${t0}" -v t1="${t1}" -v n="${n1}" -v m="${maxrss}" -v s="${sent}" -v d="${decoded}" -v z="${zb}" 'BEGIN {
+	awk -v c0="${c0}" -v c1="${c1}" -v clk="${clk}" -v t0="${t0}" -v t1="${t1}" -v n="${n1}" -v m="${maxrss}" -v s="${sent}" -v d="${decoded}" -v z="${zb}" -v g="${gen}" 'BEGIN {
 		cpu = (c1 - c0) / clk; wall = t1 - t0
-		printf "P4-RSS events=%d wall=%.1fs rate=%.0f/s relayd_cpu=%.2fs (%.2f%% of one core) cpu_per_event=%.0fns max_vmrss=%.1fMiB\n", n, wall, n / wall, cpu, 100 * cpu / wall, (n > 0 ? 1e9 * cpu / n : 0), m / 1024
+		printf "P4-RSS generated=%d (%.0f/s) events=%d wall=%.1fs rate=%.0f/s relayd_cpu=%.2fs (%.2f%% of one core) cpu_per_event=%.0fns cpu_per_generated=%.0fns max_vmrss=%.1fMiB\n", g, g / wall, n, wall, n / wall, cpu, 100 * cpu / wall, (n > 0 ? 1e9 * cpu / n : 0), (g > 0 ? 1e9 * cpu / g : 0), m / 1024
 		if (s > 0) printf "P4-RSS payload sent=%d decoded=%d ratio=%.2f zstd_batches=%d sent_B/event=%.0f decoded_B/event=%.0f\n", s, d, d / s, z, s / n, d / n
 	}'
+	# Step 7b D1's E3 gate (ADR 0041): at >= 5k generated events/s, the
+	# whole relayd uses <= 15 % of one core (admission control may drop
+	# non_security events to get there: that is the budget's job).
+	read -r gen_rate cpu_pct < <(awk -v c0="${c0}" -v c1="${c1}" -v clk="${clk}" -v t0="${t0}" -v t1="${t1}" -v g="${gen}" 'BEGIN { w = t1 - t0; printf "%.0f %.2f\n", g / w, 100 * (c1 - c0) / clk / w }')
+	if [ "${gen_rate}" -ge 5000 ]; then
+		awk -v p="${cpu_pct}" 'BEGIN { exit !(p <= 15) }' || { echo "E3 CPU gate: relayd used ${cpu_pct}% of one core at ${gen_rate} events/s (> 15%)" >&2; ok=false; }
+		echo "P4-RSS E3 CPU gate: ${cpu_pct}% of one core at ${gen_rate} generated events/s (limit 15%)"
+	else
+		echo "P4-RSS E3 CPU gate not evaluated: the runner generated ${gen_rate} events/s (< 5000)" >&2
+		ok=false
+	fi
+	# The relayd CPU profile (D1), for the artifact and a summary here.
+	mkdir -p "${E3_OUT}"
+	if sudo cp /run/tetragon-relay/e3-cpu.pprof "${E3_OUT}/relayd-cpu.pprof" 2>/dev/null; then
+		sudo chown "$(id -u)" "${E3_OUT}/relayd-cpu.pprof"
+		cp "${RELAYD_DIR}/relayd-e3" "${E3_OUT}/relayd-e3"
+		(cd "${REPO_ROOT}" && go tool pprof -top -nodecount=40 "${E3_OUT}/relayd-e3" "${E3_OUT}/relayd-cpu.pprof" 2>/dev/null | tee "${E3_OUT}/relayd-cpu-top.txt" | head -50) || true
+		(cd "${REPO_ROOT}" && go tool pprof -top -cum -nodecount=60 "${E3_OUT}/relayd-e3" "${E3_OUT}/relayd-cpu.pprof" 2>/dev/null >"${E3_OUT}/relayd-cpu-cum.txt") || true
+	else
+		echo "no relayd CPU profile at /run/tetragon-relay/e3-cpu.pprof" >&2
+		scenario_journal | grep e3_cpu_profile >&2 || true
+	fi
 	[ "${n1}" -gt 10000 ] || { echo "too few events (${n1}) for a sustained-rate measurement" >&2; ok=false; }
 	[ "${maxrss}" -lt $((64 * 1024)) ] || { echo "relayd VmRSS reached ${maxrss} KiB (>= 64 MiB)" >&2; ok=false; }
 	[ "$(systemctl show "${UNIT}" -p MainPID --value)" = "${pid}" ] || { echo "relayd restarted under load" >&2; ok=false; }

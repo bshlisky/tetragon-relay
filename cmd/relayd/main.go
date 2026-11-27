@@ -364,6 +364,8 @@ func run(configPath string, auditor *agentAuditor) error {
 	}
 	controlLoop.Jobs = worker
 
+	startE3Profiler(sessionCtx, auditor)
+
 	// Step 7a (ADR 0039): the telemetry pipeline, on its own connection.
 	// It shares only two narrow interfaces with the control path: epochs
 	// for its headers, and HeartbeatStats for the heartbeat.
