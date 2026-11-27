@@ -19,6 +19,13 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "e3-bundle" {
+		if err := runE3Bundle(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "bundlesign-test e3-bundle:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	out := flag.String("out", "testdata/vectors", "output directory for generated vectors")
 	flag.Parse()
 
