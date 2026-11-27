@@ -74,7 +74,11 @@ func runE3Bundle(args []string) error {
 		hostUUIDs:          []string{*hostUUID},
 		notBefore:          now.Add(-5 * time.Minute),
 		expires:            now.Add(*validity),
-		tetragonMinVersion: "1.8.0",
+		// E3 tests delivery, not verify's version gate (covered by
+		// internal/verify's tests and vectors): a low minimum keeps a
+		// pre-release suffix in the CI tarball's GetVersion (which
+		// sorts below 1.8.0) from failing every scenario.
+		tetragonMinVersion: "1.0.0",
 		mode:               *mode,
 		policies:           pp,
 	})
