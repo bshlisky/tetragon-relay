@@ -848,7 +848,70 @@ scenario_s12() {
 	record_result S12 "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
 }
 
+# ---------------------------------------------------------------------
+# S13 (step 7a A4, ADR 0038): tampered mode. With relayd stopped, one
+# hex digit of the store index's HMAC is changed in place (same file,
+# owner and mode), so store.Open reports HMAC mismatch -> TAMPERED.
+# relayd must start (READY=1, no restart loop), send Alert{TAMPER} as its
+# first message, heartbeat with an empty epochs map, answer a bundle
+# REJECTED_TAMPERED and a TrustUpdate with TRUST_UPDATE_REJECTED, leave
+# Tetragon's loaded set unchanged, and never die of SIGSYS. The original
+# index is restored afterwards so S4 runs on an intact store.
+# ---------------------------------------------------------------------
+scenario_s13() {
+	log "S13: store index tampered while stopped -> tampered mode: TAMPER, empty epochs, REJECTED_TAMPERED"
+	write_dropins "e3.conf=$(e3_dropin)"
+	ok=true
+	stop_unit
+	sudo cp -p "${STORE_DIR}/index" /var/tmp/e3-s13-index.bak || ok=false
+	sudo python3 - "${STORE_DIR}/index" <<'PY' || ok=false
+import sys
+p = sys.argv[1]
+s = open(p).read()
+i = s.index('"hmac":"') + len('"hmac":"')
+s = s[:i] + ('1' if s[i] != '1' else '2') + s[i + 1:]
+with open(p, 'r+') as f:  # same inode, owner and mode
+    f.write(s)
+PY
+	sudo ls -l "${STORE_DIR}/index"
+	before=$(loaded_names)
+	start_controller s13 --mode tampered --min-heartbeats 2 --overall-timeout 150s --apply-timeout 30s --alert-timeout 30s \
+		--bundle "${BUNDLE_DIR}/s12-monitor.json" --expect REJECTED_TAMPERED \
+		--trust-update "${BUNDLE_DIR}/root-v2.json"
+	start_unit || ok=false
+	wait "${ctrl_pid}" || ok=false
+	cat /tmp/e3controller-s13.log
+	check_loaded_unchanged "${before}" || ok=false
+	journal=$(scenario_journal)
+	echo "${journal}"
+	grep -q '"step":"tampered_mode"' <<<"${journal}" || { echo "no tampered_mode record" >&2; ok=false; }
+	grep -q 'HMAC mismatch' <<<"${journal}" || { echo "tamper reason is not the HMAC mismatch" >&2; ok=false; }
+	if grep -E 'status=31/SYS|code=dumped' <<<"${journal}"; then
+		echo "relayd died (SIGSYS or core dump) in tampered mode" >&2
+		ok=false
+	fi
+	restarts=$(systemctl show "${UNIT}" -p NRestarts --value)
+	echo "S13 NRestarts=${restarts}"
+	[ "${restarts}" = 0 ] || { echo "relayd restarted in tampered mode" >&2; ok=false; }
+	stop_unit
+	sudo cp -p /var/tmp/e3-s13-index.bak "${STORE_DIR}/index" || ok=false
+	record_result S13 "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
+}
+
+# no_sigsys_in_job: step 7a: no SIGSYS anywhere in the job. Every
+# syscall relayd makes must be allowed by the unit as shipped.
+no_sigsys_in_job() {
+	local j
+	j=$(sudo journalctl -u "${UNIT}" --since "${JOB_SINCE}" --no-pager)
+	if grep -E 'status=31/SYS' <<<"${j}"; then
+		record_result NO_SIGSYS FAIL
+	else
+		record_result NO_SIGSYS PASS
+	fi
+}
+
 main() {
+	JOB_SINCE=$(date '+%Y-%m-%d %H:%M:%S')
 	setup_users_and_dirs
 	write_relay_yaml
 	write_throwaway_ca
@@ -858,7 +921,7 @@ main() {
 
 	if ! start_swtpm_chardev; then
 		echo "no /dev/tpmrm0; every scenario needs it" >&2
-		for s in S1 S2 S3 S4 S5 S6 S7 S8 S9 S10 S11 S12; do record_result "${s}" FAIL; done
+		for s in S1 S2 S3 S4 S5 S6 S7 S8 S9 S10 S11 S12 S13; do record_result "${s}" FAIL; done
 	else
 		# C5: the two identity-free scenarios first, then testenroll,
 		# then the identity scenarios.
@@ -874,11 +937,13 @@ main() {
 			scenario_s10
 			scenario_s11 # needs S10's relay-managed e3-s10
 			scenario_s12
-			scenario_s4 # last: revocation is terminal for this store (ADR 0035)
+			scenario_s13 # needs S10's root-v2.json and S12's bundle; restores the index
+			scenario_s4  # last: revocation is terminal for this store (ADR 0035)
 		else
-			for s in S3 S4 S5 S6 S7 S8 S9 S10 S11 S12; do record_result "${s}" FAIL; done
+			for s in S3 S4 S5 S6 S7 S8 S9 S10 S11 S12 S13; do record_result "${s}" FAIL; done
 		fi
 		write_dropins
+		no_sigsys_in_job
 	fi
 
 	echo

@@ -448,8 +448,11 @@ jobs:
             exit 1
           fi
 
-      - name: Run E3 scenarios (S1-S12)
+      - name: Run E3 scenarios (S1-S13)
         run: |
+          # e3-run.sh re-points the runner's /var/run to RHEL 9's ../run
+          # (Ubuntu ships /run), so relay-probe's usrmerge check passes
+          # unrelaxed; production targets RHEL 9 only (step 6b review Q3).
           # sg tetragon-relay (not just the usermod -a -G above): a group
           # added to this user mid-session only takes effect in a freshly
           # spawned process with that supplementary group active, the

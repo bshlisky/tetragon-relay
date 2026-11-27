@@ -102,12 +102,12 @@ func parseFlags(args []string) (config, error) {
 	}
 	switch c.mode {
 	case "steady", "revoke", "state":
-	case "bundles":
+	case "bundles", "tampered":
 		if len(c.bundles) != len(c.expects) {
-			return config{}, fmt.Errorf("bundles mode: %d --bundle but %d --expect", len(c.bundles), len(c.expects))
+			return config{}, fmt.Errorf("%s mode: %d --bundle but %d --expect", c.mode, len(c.bundles), len(c.expects))
 		}
 	default:
-		return config{}, fmt.Errorf("--mode must be steady, revoke, bundles or state, got %q", c.mode)
+		return config{}, fmt.Errorf("--mode must be steady, revoke, bundles, state or tampered, got %q", c.mode)
 	}
 	return c, nil
 }
@@ -138,6 +138,8 @@ func run(args []string) error {
 		script = bundlesScript(cfg, resultCh)
 	case "state":
 		script = stateScript(cfg, resultCh)
+	case "tampered":
+		script = tamperedScript(cfg, resultCh)
 	}
 
 	srv := testcontroller.NewServer(testcontroller.Config{
