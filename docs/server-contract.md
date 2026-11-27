@@ -299,6 +299,20 @@ The agent applies one bundle at a time and holds **at most one** bundle waiting:
   commits is rejected `REJECTED_EPOCH` (with a verification reason, not
   `"superseded"`).
 
+**The slot is per host, not per scope.** Epochs are per scope, but the agent only
+learns a bundle's scope by verifying it, and it verifies at dequeue, not on arrival. So
+a scope-A bundle waiting in the slot can be replaced by a scope-B bundle, and scope A
+then gets nothing until you resend (review R6B-4). The controller must therefore follow
+these rules:
+
+- **On `SUPERSEDED`, if the host's reported epoch for that bundle's scope is still below
+  the bundle's epoch, resend the latest bundle for that scope.** Use the epochs from the
+  next `Heartbeat` or `StateReport` (the `ApplyResult` of a superseded bundle carries
+  `epoch: 0`, so use your own record of which scope and epoch you sent with that
+  digest).
+- **A controller should keep at most one bundle in flight per host**: send the next
+  bundle only after the previous one's `ApplyResult`. Then nothing is ever superseded.
+
 A controller that wants a specific bundle applied should send only the newest one and
 wait for its `ApplyResult`; sending a series back to back is safe but wasteful.
 
