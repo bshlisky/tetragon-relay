@@ -297,14 +297,17 @@ func TestPipeline_HostileAckDeletesNothingAndResends(t *testing.T) {
 	if r.aud.count("telemetry_protocol_error") < 1 || r.p.Counters()["protocol_errors"] < 1 {
 		t.Fatal("hostile ack not audited/counted")
 	}
-	// Everything was resent on the second stream, in order.
+	// Everything was resent on the second stream, in order: the chain
+	// holds seq 1 (chain_reset) and seq 2 (the exec batch), whichever of
+	// them the first stream carried before the hostile ack closed it
+	// (3 or 4 batches received, depending on that timing).
 	got := col.snapshot()
-	if len(got) < 4 {
-		t.Fatalf("only %d batches received", len(got))
-	}
 	rep := chainverify.Verify(testHost, got)
 	if !rep.Clean() {
 		t.Fatalf("findings: %+v", rep.Findings)
+	}
+	if len(rep.Chains) != 1 || rep.Chains[0].Contiguous < 2 || len(got) < 3 {
+		t.Fatalf("%d batches received, chains %+v", len(got), rep.Chains)
 	}
 	dups := 0
 	for _, f := range rep.Findings {
