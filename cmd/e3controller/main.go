@@ -208,7 +208,8 @@ func steadyScript(cfg config, resultCh chan<- error) testcontroller.Script {
 				continue // ignore anything that is not a Heartbeat (e.g. a StateReport this test never requested)
 			}
 			heartbeats++
-			fmt.Printf("e3controller: heartbeat %d/%d from connection #%d at %s\n", heartbeats, cfg.minHeartbeats, n, time.Now().UTC().Format(time.RFC3339))
+			hb := msg.GetHeartbeat()
+			fmt.Printf("e3controller: heartbeat %d/%d from connection #%d at %s telemetry_last_seq=%d telemetry_backlog=%d\n", heartbeats, cfg.minHeartbeats, n, time.Now().UTC().Format(time.RFC3339), hb.GetTelemetryLastSeq(), hb.GetTelemetryBacklog())
 		}
 		trySend(resultCh, nil)
 		// Keep the stream (and this connection's Script call) open so a

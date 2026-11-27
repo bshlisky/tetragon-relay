@@ -78,6 +78,8 @@ type config struct {
 	controllerCertOut  string
 	controllerKeyOut   string
 	controllerSPIFFEID string
+	// Step 7a: optional collector server certificate for cmd/e3collector.
+	collectorCertOut, collectorKeyOut, collectorSPIFFEID string
 }
 
 func parseFlags(args []string) (config, error) {
@@ -92,6 +94,9 @@ func parseFlags(args []string) (config, error) {
 	fs.StringVar(&c.controllerCertOut, "controller-cert-out", "", "path to write the test controller's server certificate (PEM)")
 	fs.StringVar(&c.controllerKeyOut, "controller-key-out", "", "path to write the test controller's server private key (PEM, PKCS8)")
 	fs.StringVar(&c.controllerSPIFFEID, "controller-spiffe-id", "", "SPIFFE ID embedded in the controller's server certificate (must match relay.yaml's controller.spiffe_id)")
+	fs.StringVar(&c.collectorCertOut, "collector-cert-out", "", "optional: path to write the E3 collector's server certificate (PEM)")
+	fs.StringVar(&c.collectorKeyOut, "collector-key-out", "", "optional: path to write the E3 collector's server private key (PEM, PKCS8)")
+	fs.StringVar(&c.collectorSPIFFEID, "collector-spiffe-id", "", "optional: SPIFFE ID in the collector's certificate (must match relay.yaml's collector.spiffe_id)")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
@@ -136,8 +141,16 @@ func run(args []string) error {
 		return fmt.Errorf("enroll host identity: %w", err)
 	}
 
-	if err := issueControllerCertificate(ca, cfg); err != nil {
+	if err := issueServerCertificate(ca, cfg.controllerSPIFFEID, cfg.controllerCertOut, cfg.controllerKeyOut, cfg.certTTL); err != nil {
 		return fmt.Errorf("issue controller certificate: %w", err)
+	}
+	if cfg.collectorCertOut != "" {
+		if cfg.collectorKeyOut == "" || cfg.collectorSPIFFEID == "" {
+			return fmt.Errorf("--collector-cert-out needs --collector-key-out and --collector-spiffe-id")
+		}
+		if err := issueServerCertificate(ca, cfg.collectorSPIFFEID, cfg.collectorCertOut, cfg.collectorKeyOut, cfg.certTTL); err != nil {
+			return fmt.Errorf("issue collector certificate: %w", err)
+		}
 	}
 
 	fmt.Printf("testenroll: host identity (trust domain %q, host %q) and controller certificate; CA written to %s\n",
@@ -178,36 +191,38 @@ func enrollHost(ca *identity.TestCA, signer crypto.Signer, cfg config) error {
 	return nil
 }
 
-func issueControllerCertificate(ca *identity.TestCA, cfg config) error {
+// issueServerCertificate issues a server certificate for spiffeID (the
+// test controller's or the E3 collector's) and writes it and its key.
+func issueServerCertificate(ca *identity.TestCA, spiffeID, certOut, keyOut string, ttl time.Duration) error {
 	key, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
 	if err != nil {
-		return fmt.Errorf("generate controller key: %w", err)
+		return fmt.Errorf("generate server key: %w", err)
 	}
-	u, err := url.Parse(cfg.controllerSPIFFEID)
+	u, err := url.Parse(spiffeID)
 	if err != nil {
-		return fmt.Errorf("parse controller SPIFFE ID %q: %w", cfg.controllerSPIFFEID, err)
+		return fmt.Errorf("parse SPIFFE ID %q: %w", spiffeID, err)
 	}
 	template := &x509.CertificateRequest{
-		Subject: pkix.Name{CommonName: "controller"}, URIs: []*url.URL{u},
+		Subject: pkix.Name{CommonName: "server"}, URIs: []*url.URL{u},
 		SignatureAlgorithm: x509.ECDSAWithSHA384,
 	}
 	csrDER, err := x509.CreateCertificateRequest(rand.Reader, template, key)
 	if err != nil {
-		return fmt.Errorf("create controller CSR: %w", err)
+		return fmt.Errorf("create CSR: %w", err)
 	}
 	now := time.Now()
-	chain, err := ca.IssueServerCertificate(csrDER, now.Add(-time.Minute), now.Add(cfg.certTTL))
+	chain, err := ca.IssueServerCertificate(csrDER, now.Add(-time.Minute), now.Add(ttl))
 	if err != nil {
-		return fmt.Errorf("issue controller server certificate: %w", err)
+		return fmt.Errorf("issue server certificate: %w", err)
 	}
-	if err := writePEM(cfg.controllerCertOut, "CERTIFICATE", chain[0].Raw, 0o644); err != nil {
-		return fmt.Errorf("write controller certificate: %w", err)
+	if err := writePEM(certOut, "CERTIFICATE", chain[0].Raw, 0o644); err != nil {
+		return fmt.Errorf("write certificate: %w", err)
 	}
 	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
-		return fmt.Errorf("marshal controller private key: %w", err)
+		return fmt.Errorf("marshal private key: %w", err)
 	}
-	return writePEM(cfg.controllerKeyOut, "PRIVATE KEY", keyDER, 0o600)
+	return writePEM(keyOut, "PRIVATE KEY", keyDER, 0o600)
 }
 
 func writePEM(path, blockType string, der []byte, mode os.FileMode) error {

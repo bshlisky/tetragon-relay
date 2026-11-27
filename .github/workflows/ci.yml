@@ -419,9 +419,10 @@ jobs:
           go build -tags e3 -o /tmp/e3controller ./cmd/e3controller
           go build -tags e3 -o /tmp/e3tetra ./cmd/e3tetra
           go build -tags e3 -o /tmp/e3root ./cmd/e3root
+          go build -tags e3 -o /tmp/e3collector ./cmd/e3collector
           go build -tags testtools -o /tmp/bundlesign-test ./cmd/bundlesign-test
-          sudo cp /tmp/testenroll /tmp/e3controller /tmp/e3tetra /tmp/e3root /tmp/bundlesign-test /opt/e3bin/
-          sudo chmod 0755 /opt/e3bin/testenroll /opt/e3bin/e3controller /opt/e3bin/e3tetra /opt/e3bin/e3root /opt/e3bin/bundlesign-test
+          sudo cp /tmp/testenroll /tmp/e3controller /tmp/e3tetra /tmp/e3root /tmp/bundlesign-test /tmp/e3collector /opt/e3bin/
+          sudo chmod 0755 /opt/e3bin/testenroll /opt/e3bin/e3controller /opt/e3bin/e3tetra /opt/e3bin/e3root /opt/e3bin/bundlesign-test /opt/e3bin/e3collector
           echo "BIN_DIR=/opt/e3bin" >> "$GITHUB_ENV"
 
       - name: Verify the production unit file (systemd-analyze verify)
@@ -448,7 +449,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run E3 scenarios (S1-S13)
+      - name: Run E3 scenarios (S1-S13, T-S1-T-S5)
         run: |
           # e3-run.sh re-points the runner's /var/run to RHEL 9's ../run
           # (Ubuntu ships /run), so relay-probe's usrmerge check passes

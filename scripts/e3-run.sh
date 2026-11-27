@@ -64,6 +64,14 @@ CONTROLLER_DIR=/tmp/e3-controller
 CONTROLLER_CERT=${CONTROLLER_DIR}/controller-cert.pem
 CONTROLLER_KEY=${CONTROLLER_DIR}/controller-key.pem
 CONTROLLER_SPIFFE=spiffe://e3.tetragon-relay.internal/mgmt/controller
+# Step 7a: cmd/e3collector, the test collector (runner-owned, like the
+# controller). Its endpoint is inside the e3 drop-in's IPAddressAllow
+# (127.0.0.1/32) and matches relay.yaml's collector.endpoints.
+COLLECTOR_ADDR=127.0.0.1:18444
+COLLECTOR_DIR=/tmp/e3-collector
+COLLECTOR_CERT=${COLLECTOR_DIR}/collector-cert.pem
+COLLECTOR_KEY=${COLLECTOR_DIR}/collector-key.pem
+COLLECTOR_SPIFFE=spiffe://e3.tetragon-relay.internal/mgmt/collector
 TRUST_DOMAIN=e3.tetragon-relay.internal
 HOST_UUID=11111111-1111-1111-1111-111111111111
 BASELINE_POLICY_NAME=e3-baseline
@@ -196,7 +204,7 @@ controller:
   heartbeat_interval: "15s"
 collector:
   endpoints: ["127.0.0.1:18444"]
-  spiffe_id: "spiffe://${TRUST_DOMAIN}/mgmt/collector"
+  spiffe_id: "${COLLECTOR_SPIFFE}"
 identity:
   trust_domain: "${TRUST_DOMAIN}"
   trust_bundle: "${CA_CERT}"
@@ -264,14 +272,22 @@ run_testenroll() {
 		--ca-cert-out /tmp/e3-ca.pem \
 		--controller-cert-out /tmp/e3-controller-cert.pem \
 		--controller-key-out /tmp/e3-controller-key.pem \
-		--controller-spiffe-id "${CONTROLLER_SPIFFE}" &&
+		--controller-spiffe-id "${CONTROLLER_SPIFFE}" \
+		--collector-cert-out /tmp/e3-collector-cert.pem \
+		--collector-key-out /tmp/e3-collector-key.pem \
+		--collector-spiffe-id "${COLLECTOR_SPIFFE}" &&
 		sudo cp /tmp/e3-ca.pem "${CA_CERT}" &&
 		sudo chmod 0644 "${CA_CERT}" &&
 		mkdir -p "${CONTROLLER_DIR}" &&
 		chmod 0700 "${CONTROLLER_DIR}" &&
 		sudo install -o "$(id -u)" -g "$(id -g)" -m 0644 /tmp/e3-controller-cert.pem "${CONTROLLER_CERT}" &&
 		sudo install -o "$(id -u)" -g "$(id -g)" -m 0600 /tmp/e3-controller-key.pem "${CONTROLLER_KEY}" &&
-		sudo rm -f /tmp/e3-controller-key.pem
+		sudo rm -f /tmp/e3-controller-key.pem &&
+		mkdir -p "${COLLECTOR_DIR}" &&
+		chmod 0700 "${COLLECTOR_DIR}" &&
+		sudo install -o "$(id -u)" -g "$(id -g)" -m 0644 /tmp/e3-collector-cert.pem "${COLLECTOR_CERT}" &&
+		sudo install -o "$(id -u)" -g "$(id -g)" -m 0600 /tmp/e3-collector-key.pem "${COLLECTOR_KEY}" &&
+		sudo rm -f /tmp/e3-collector-key.pem
 }
 
 # ---------------------------------------------------------------------
@@ -849,6 +865,218 @@ scenario_s12() {
 }
 
 # ---------------------------------------------------------------------
+# Step 7a telemetry scenarios (T-S1..T-S5). relayd runs the real unit
+# with the e3 drop-in, talking to cmd/e3collector on 127.0.0.1:18444
+# (inside the drop-in's IPAddressAllow). The collector appends every batch
+# to a store file before acking it; `e3collector report` re-runs the
+# reference verifier over that file.
+# ---------------------------------------------------------------------
+start_collector() {
+	local name="$1" store="$2"
+	shift 2
+	"${BIN_DIR}/e3collector" serve --listen "${COLLECTOR_ADDR}" --ca-cert "${CA_CERT}" \
+		--cert "${COLLECTOR_CERT}" --key "${COLLECTOR_KEY}" --trust-domain "${TRUST_DOMAIN}" \
+		--store "${store}" "$@" >>"/tmp/e3collector-${name}.log" 2>&1 &
+	coll_pid=$!
+	sleep 1
+}
+
+stop_collector() {
+	kill "${coll_pid}" 2>/dev/null || true
+	wait "${coll_pid}" 2>/dev/null || true
+}
+
+collector_report() {
+	"${BIN_DIR}/e3collector" report --store "$1" --host-uuid "${HOST_UUID}" "${@:2}"
+}
+
+spool_batches() {
+	sudo find "${SPOOL_DIR}" -maxdepth 1 -name '*.batch' | wc -l
+}
+
+# wait_spool_empty SECONDS: every spooled batch acked and deleted.
+wait_spool_empty() {
+	for _ in $(seq 1 "$1"); do
+		[ "$(spool_batches)" = 0 ] && return 0
+		sleep 1
+	done
+	echo "spool still holds $(spool_batches) batch(es)" >&2
+	return 1
+}
+
+# events_for SECONDS: exec events (non_security) every 0.3 s, plus a
+# kprobe event (security) every second through the baseline policy's
+# Post action on /tmp/e3-baseline-placeholder.
+events_for() {
+	local end=$((SECONDS + $1))
+	while [ "${SECONDS}" -lt "${end}" ]; do
+		/usr/bin/true
+		/tmp/e3-baseline-placeholder -c '/usr/bin/true; /usr/bin/true' 2>/dev/null || true
+		sleep 0.3
+	done
+}
+
+TS_STORE=${COLLECTOR_DIR}/ts123.jsonl
+
+# T-S1: events arrive with a valid chain; a canary exec shows up with argv
+# redacted, no environment, and a hashed ~/.ssh path. The spool is emptied
+# first (harness setup, like S13's store restore) so the collector sees
+# the chain from seq 1.
+scenario_ts1() {
+	log "T-S1: valid chain; canary exec redacted (argv, env, ~/.ssh)"
+	write_dropins "e3.conf=$(e3_dropin)"
+	ok=true
+	stop_unit
+	sudo find "${SPOOL_DIR}" -mindepth 1 -delete
+	rm -f "${TS_STORE}"
+	sudo install -o root -g root -m 0755 /usr/bin/bash /tmp/e3-baseline-placeholder
+	sudo mkdir -p /home/e3canary/.ssh
+	sudo chmod 0755 /home/e3canary /home/e3canary/.ssh
+	start_collector ts "${TS_STORE}"
+	start_controller ts1 --mode steady --min-heartbeats 3 --heartbeat-deadline 90s
+	start_unit || ok=false
+	sleep 3
+	# The canary: cwd under ~/.ssh, a ~/.ssh path, a password and a token
+	# in argv, and a secret in the environment.
+	# (The environment variable is set without sudo/env, so the secret is
+	# in the process environment only, never in anyone's argv.)
+	E3_SECRET_ENV=e3-env-secret sh -c 'cd /home/e3canary/.ssh && /usr/bin/cat /home/e3canary/.ssh/id_e3 --password=hunter2 token=e3tok >/dev/null 2>&1' || true
+	/tmp/e3-baseline-placeholder -c '/usr/bin/true; /usr/bin/true' || true
+	wait "${ctrl_pid}" || ok=false
+	cat /tmp/e3controller-ts1.log
+	wait_spool_empty 60 || ok=false
+	rep=$(collector_report "${TS_STORE}" --decode) || ok=false
+	echo "${rep}"
+	grep -q 'event .*ProcessExec.*binary="/usr/bin/cat"' <<<"${rep}" || { echo "canary exec not in telemetry" >&2; ok=false; }
+	grep -q 'ProcessKprobe' <<<"${rep}" || { echo "no security (kprobe) event in telemetry" >&2; ok=false; }
+	grep 'binary="/usr/bin/cat"' <<<"${rep}" | grep -q '\[REDACTED\]' || { echo "argv not redacted" >&2; ok=false; }
+	grep 'binary="/usr/bin/cat"' <<<"${rep}" | grep -q 'sha256:' || { echo "~/.ssh path not hashed" >&2; ok=false; }
+	if grep -E 'hunter2|e3tok|/home/e3canary/\.ssh|e3-env-secret' <<<"${rep}"; then
+		echo "a secret or ~/.ssh path reached the collector" >&2
+		ok=false
+	fi
+	if grep -E 'event .* env=[1-9]' <<<"${rep}"; then
+		echo "an event carries environment variables" >&2
+		ok=false
+	fi
+	grep -qE 'telemetry_last_seq=[1-9]' /tmp/e3controller-ts1.log || { echo "heartbeat telemetry_last_seq never set" >&2; ok=false; }
+	scenario_journal
+	record_result T-S1 "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
+}
+
+# T-S2: the collector is down for 30 s while events flow: the spool grows
+# and the heartbeat's telemetry_backlog rises; after it is back, everything
+# drains in order, the verifier reports no gap, and the spool empties.
+# relayd keeps running from T-S1.
+scenario_ts2() {
+	log "T-S2: collector outage of 30 s; spool grows, backlog rises, drains in order"
+	ok=true
+	start_controller ts2 --mode steady --min-heartbeats 4 --heartbeat-deadline 120s
+	stop_collector
+	before=$(spool_batches)
+	events_for 30
+	during=$(spool_batches)
+	echo "T-S2 spool batches: before outage=${before} after 30 s down=${during}"
+	[ "${during}" -gt "${before}" ] || { echo "spool did not grow during the outage" >&2; ok=false; }
+	start_collector ts "${TS_STORE}"
+	wait "${ctrl_pid}" || ok=false
+	cat /tmp/e3controller-ts2.log
+	grep -qE 'telemetry_backlog=([2-9]|[1-9][0-9]+)' /tmp/e3controller-ts2.log || { echo "telemetry_backlog never rose in a heartbeat" >&2; ok=false; }
+	wait_spool_empty 90 || ok=false
+	rep=$(collector_report "${TS_STORE}") || ok=false
+	grep -E 'REPORT (chain|CLEAN|chain_gap)' <<<"${rep}"
+	grep -q 'chain_reorder\|chain_gap' <<<"${rep}" && { echo "reorder or gap after the outage" >&2; ok=false; }
+	grep -q 'telemetry_stream_ended' <<<"$(scenario_journal)" || { echo "the outage was not visible in the journal" >&2; ok=false; }
+	sudo systemctl is-active --quiet "${UNIT}" || { echo "relayd stopped during the collector outage" >&2; ok=false; }
+	[ "$(systemctl show "${UNIT}" -p NRestarts --value)" = 0 ] || { echo "relayd restarted during the collector outage" >&2; ok=false; }
+	record_result T-S2 "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
+}
+
+# T-S3: restart relayd mid-stream: the chain continues (same chain_id,
+# seq + 1, prev_hash matches), which the verifier checks over the whole
+# store: one chain, contiguous, clean.
+scenario_ts3() {
+	log "T-S3: relayd restart mid-stream continues the chain"
+	ok=true
+	events_for 5 &
+	gen_pid=$!
+	sleep 2
+	SCENARIO_SINCE=$(date '+%Y-%m-%d %H:%M:%S')
+	sudo systemctl restart "${UNIT}" || ok=false
+	wait "${gen_pid}"
+	events_for 5
+	wait_spool_empty 60 || ok=false
+	stop_collector
+	rep=$(collector_report "${TS_STORE}") || ok=false
+	grep -E 'REPORT (chain|CLEAN|chain_)' <<<"${rep}"
+	[ "$(grep -c '^REPORT chain [0-9a-f]' <<<"${rep}")" = 1 ] || { echo "the restart started a new chain" >&2; ok=false; }
+	grep -q '"step":"telemetry_chain_continued"' <<<"$(scenario_journal)" || { echo "no telemetry_chain_continued record after the restart" >&2; ok=false; }
+	stop_unit
+	record_result T-S3 "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
+}
+
+# T-S4: a tiny spool cap. The only difference is collector.spool_max_bytes
+# = 524288 (512 KiB), in a copy of relay.yaml that a second drop-in line
+# points ExecStart at. With the collector down, non_security batches are
+# dropped first, a dropped record appears in the chain, and security
+# events survive.
+scenario_ts4() {
+	log "T-S4: tiny spool cap; non_security dropped first, declared, security survives"
+	ok=true
+	local small=/etc/tetragon-relay/relay-ts4.yaml store="${COLLECTOR_DIR}/ts4.jsonl"
+	sudo sed 's/^collector:$/collector:\n  spool_max_bytes: 524288/' "${RELAY_YAML}" | sudo tee "${small}" >/dev/null
+	sudo chown root:tetragon-relay "${small}"
+	sudo chmod 0640 "${small}"
+	diff "${RELAY_YAML}" "${small}" || true
+	write_dropins "e3.conf=$(e3_dropin)" "ts4.conf=$(printf '[Service]\nExecStart=\nExecStart=%s/relayd-e3 --config %s' "${RELAYD_DIR}" "${small}")"
+	sudo find "${SPOOL_DIR}" -mindepth 1 -delete
+	rm -f "${store}"
+	start_unit || ok=false
+	events_for 3 # a few security events first: they must survive
+	events_for 40
+	echo "T-S4 spool: $(spool_batches) batches, $(sudo du -sb "${SPOOL_DIR}" | cut -f1) bytes"
+	start_collector ts4 "${store}"
+	wait_spool_empty 90 || ok=false
+	stop_collector
+	rep=$(collector_report "${store}" --decode) || ok=false
+	grep -E 'REPORT (chain|CLEAN|chain_)|dropped' <<<"${rep}" | head -40
+	grep -q 'dropped(class=non_security' <<<"${rep}" || { echo "no non_security dropped record in the chain" >&2; ok=false; }
+	grep -q 'dropped(class=security' <<<"${rep}" && { echo "security batches were dropped" >&2; ok=false; }
+	grep -q 'ProcessKprobe' <<<"${rep}" || { echo "no security event survived" >&2; ok=false; }
+	grep -q '"step":"telemetry_batches_dropped"' <<<"$(scenario_journal)" || ok=false
+	stop_unit
+	write_dropins "e3.conf=$(e3_dropin)"
+	sudo rm -f "${small}"
+	record_result T-S4 "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
+}
+
+# T-S5: the collector acks a seq never sent. relayd audits the protocol
+# error, reconnects and resends; it deletes nothing early, which shows as
+# the hostilely acked batch arriving again (an identical duplicate).
+scenario_ts5() {
+	log "T-S5: hostile ack -> audited, reconnect, resend, nothing deleted early"
+	write_dropins "e3.conf=$(e3_dropin)"
+	ok=true
+	local store="${COLLECTOR_DIR}/ts5.jsonl"
+	rm -f "${store}"
+	sudo find "${SPOOL_DIR}" -mindepth 1 -delete
+	start_collector ts5 "${store}" --hostile-ack-once
+	start_unit || ok=false
+	events_for 10
+	wait_spool_empty 60 || ok=false
+	stop_collector
+	cat /tmp/e3collector-ts5.log | grep -E 'HOSTILE|stream #' || true
+	grep -q 'HOSTILE ack' /tmp/e3collector-ts5.log || ok=false
+	grep -q 'stream #2' /tmp/e3collector-ts5.log || { echo "relayd did not reconnect after the hostile ack" >&2; ok=false; }
+	grep -q '"step":"telemetry_protocol_error"' <<<"$(scenario_journal)" || { echo "hostile ack not audited" >&2; ok=false; }
+	rep=$(collector_report "${store}") || ok=false
+	grep -E 'REPORT (chain|CLEAN|chain_)' <<<"${rep}"
+	grep -q 'duplicate(identical resend)' <<<"${rep}" || { echo "nothing was resent: the hostile ack may have deleted batches" >&2; ok=false; }
+	stop_unit
+	record_result T-S5 "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
+}
+
+# ---------------------------------------------------------------------
 # S13 (step 7a A4, ADR 0038): tampered mode. With relayd stopped, one
 # hex digit of the store index's HMAC is changed in place (same file,
 # owner and mode), so store.Open reports HMAC mismatch -> TAMPERED.
@@ -921,7 +1149,7 @@ main() {
 
 	if ! start_swtpm_chardev; then
 		echo "no /dev/tpmrm0; every scenario needs it" >&2
-		for s in S1 S2 S3 S4 S5 S6 S7 S8 S9 S10 S11 S12 S13; do record_result "${s}" FAIL; done
+		for s in S1 S2 S3 S4 S5 S6 S7 S8 S9 S10 S11 S12 S13 T-S1 T-S2 T-S3 T-S4 T-S5; do record_result "${s}" FAIL; done
 	else
 		# C5: the two identity-free scenarios first, then testenroll,
 		# then the identity scenarios.
@@ -937,10 +1165,15 @@ main() {
 			scenario_s10
 			scenario_s11 # needs S10's relay-managed e3-s10
 			scenario_s12
+			scenario_ts1
+			scenario_ts2 # needs T-S1's relayd and collector store
+			scenario_ts3 # needs T-S2's
+			scenario_ts4
+			scenario_ts5
 			scenario_s13 # needs S10's root-v2.json and S12's bundle; restores the index
 			scenario_s4  # last: revocation is terminal for this store (ADR 0035)
 		else
-			for s in S3 S4 S5 S6 S7 S8 S9 S10 S11 S12 S13; do record_result "${s}" FAIL; done
+			for s in S3 S4 S5 S6 S7 S8 S9 S10 S11 S12 S13 T-S1 T-S2 T-S3 T-S4 T-S5; do record_result "${s}" FAIL; done
 		fi
 		write_dropins
 		no_sigsys_in_job
