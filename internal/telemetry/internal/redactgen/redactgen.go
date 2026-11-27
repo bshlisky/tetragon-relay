@@ -14,7 +14,7 @@
 //     version does not know cannot be redacted, so it is not kept).
 //
 // Reflection is used here, at generation time only. The generated code
-// uses the Go types directly. internal/telemetry's TestRedactGenUpToDate
+// uses the Go types directly. TestRedactGenUpToDate (this package)
 // regenerates and compares, so a change to the vendored API that is not
 // regenerated fails CI.
 package redactgen

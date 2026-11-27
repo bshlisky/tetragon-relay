@@ -1,6 +1,6 @@
 package telemetry
 
-//go:generate go run ./internal/redactgen/cmd redact_gen.go
+//go:generate go test ./internal/redactgen -run TestRedactGenUpToDate -count=1 -args -update
 
 import (
 	"bytes"

@@ -2,7 +2,6 @@ package telemetry
 
 import (
 	"math/rand/v2"
-	"os"
 	"strings"
 	"testing"
 
@@ -10,7 +9,6 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
-	"github.com/bshlisky/tetragon-relay/internal/telemetry/internal/redactgen"
 	tetragonpb "github.com/bshlisky/tetragon-relay/third_party/tetragon/v1.8.0/api/v1/tetragon"
 )
 
@@ -164,23 +162,6 @@ func fill(m protoreflect.Message, r *rand.Rand, depth int) {
 	if r.IntN(4) == 0 {
 		unk := protowire.AppendTag(nil, 9999, protowire.BytesType)
 		m.SetUnknown(protowire.AppendBytes(unk, []byte("SECRET_TOKEN=unknown-field")))
-	}
-}
-
-func TestRedactGenUpToDate(t *testing.T) {
-	want, err := redactgen.Generate()
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := os.ReadFile("redact_gen.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != string(want) {
-		t.Fatal("redact_gen.go is stale: run go generate ./internal/telemetry")
-	}
-	if n := len(redactgen.Messages()); n < 50 {
-		t.Fatalf("generated redactor covers %d messages; expected every message reachable from GetEventsResponse", n)
 	}
 }
 
