@@ -37,11 +37,17 @@ func Dial(_ context.Context, cfg Config) (*Client, error) {
 		return nil, fmt.Errorf("%w: resolve relay group %q: %w", ErrSocketVerification, cfg.RelayGroupName, err)
 	}
 
+	peer := &peerTracker{}
 	dialer := func(dialCtx context.Context, _ string) (net.Conn, error) {
 		if err := verifySocketFile(cfg, gid); err != nil {
 			return nil, err
 		}
-		return connectAndVerifyPeer(dialCtx, cfg)
+		conn, err := connectAndVerifyPeer(dialCtx, cfg)
+		if err != nil {
+			return nil, err
+		}
+		recordPeer(peer, conn)
+		return conn, nil
 	}
 
 	conn, err := grpc.NewClient("passthrough:///"+cfg.SocketPath,
@@ -52,7 +58,22 @@ func Dial(_ context.Context, cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
-	return NewUnverified(conn, cfg), nil
+	c := NewUnverified(conn, cfg)
+	c.peer = peer
+	return c, nil
+}
+
+// recordPeer records conn's SO_PEERCRED pid in peer (Client.Peer). conn
+// already passed connectAndVerifyPeer, which read the same credentials;
+// a failure to read them again here leaves peer unchanged.
+func recordPeer(peer *peerTracker, conn net.Conn) {
+	uc, ok := conn.(*net.UnixConn)
+	if !ok {
+		return
+	}
+	if _, pid, err := peerCredFunc(uc); err == nil {
+		peer.record(pid)
+	}
 }
 
 // connectAndVerifyPeer is the post-lstat half of Dial's dialer closure:

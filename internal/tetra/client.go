@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -24,6 +25,39 @@ type Client struct {
 	stub   tetragonpb.FineGuidanceSensorsClient
 	cfg    Config
 	closed bool
+	peer   *peerTracker
+}
+
+// peerTracker records the Tetragon process behind each verified
+// connection (SO_PEERCRED pid), so a caller can detect a Tetragon restart
+// (docs/prompts/step-06b.md D1): Tetragon's API reports no process start
+// time, and relayd cannot read another user's /proc entries under the
+// unit's ProtectProc=invisible. grpc re-runs Dial's dialer on every
+// reconnect, so a restarted Tetragon shows up as a new pid there.
+type peerTracker struct {
+	mu    sync.Mutex
+	pid   int32
+	dials uint64
+}
+
+func (p *peerTracker) record(pid int32) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.pid = pid
+	p.dials++
+}
+
+// Peer reports the pid of the Tetragon process behind the most recent
+// verified connection and how many verified connections have been made.
+// Both are 0 before the first connection (and always for a client made
+// with NewUnverified).
+func (c *Client) Peer() (pid int32, dials uint64) {
+	if c.peer == nil {
+		return 0, 0
+	}
+	c.peer.mu.Lock()
+	defer c.peer.mu.Unlock()
+	return c.peer.pid, c.peer.dials
 }
 
 // NewUnverified wraps an already-established *grpc.ClientConn as a Client,
