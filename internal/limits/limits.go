@@ -338,6 +338,17 @@ const (
 	// one Alert of each kind per this interval, except the first (docs/prompts/step-06b.md E1).
 	AlertRateLimitInterval = 5 * time.Minute
 
+	// MaxPendingTrustUpdates bounds TrustUpdate messages held for the
+	// apply worker while a bundle apply runs. Each carries a whole
+	// chain (N+1..M) and the controller resends trust metadata on every
+	// reconcile (architecture doc 6.3 step 4), so a handful suffices.
+	MaxPendingTrustUpdates = 4
+
+	// TrustExpiredAlertInterval is how often Alert TRUST_EXPIRED repeats
+	// while the trust root stays expired, besides once per connection
+	// (docs/prompts/step-06b.md C3: "daily").
+	TrustExpiredAlertInterval = 24 * time.Hour
+
 	// MaxApplyResultDetailBytes bounds ApplyResult.detail and
 	// Alert.detail (control.proto: "bounded 4 KiB, no secrets").
 	MaxApplyResultDetailBytes = 4096

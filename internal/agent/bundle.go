@@ -124,7 +124,9 @@ func (c *CommitOnPut) disarm() (committed bool, err error) {
 // BundleDeps are the bundle pipeline's real dependencies
 // (docs/prompts/step-06b.md B1). None may be nil.
 type BundleDeps struct {
-	Store   BundleStore
+	Store BundleStore
+	// Roots persists adopted trust roots (TrustUpdate, C1).
+	Roots   TrustRootStore
 	Commit  *CommitOnPut
 	Trust   *TrustState
 	Engine  Applier
@@ -152,7 +154,7 @@ type BundleDeps struct {
 
 func (d BundleDeps) validate() error {
 	switch {
-	case d.Store == nil, d.Commit == nil, d.Trust == nil, d.Engine == nil, d.Version == nil, d.HostCaps == nil, d.Digest == nil:
+	case d.Store == nil, d.Roots == nil, d.Commit == nil, d.Trust == nil, d.Engine == nil, d.Version == nil, d.HostCaps == nil, d.Digest == nil:
 		return fmt.Errorf("agent: BundleDeps: every dependency must be set")
 	case d.HostUUID == "":
 		return fmt.Errorf("agent: BundleDeps: HostUUID must be set")

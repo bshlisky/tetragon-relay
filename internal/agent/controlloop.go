@@ -137,6 +137,7 @@ func (cl *ControlLoop) RevokedReason() string {
 // return without blocking.
 type JobSink interface {
 	SubmitBundle(envelope []byte)
+	SubmitTrustUpdate(signedRoots [][]byte)
 }
 
 // NewControlLoop constructs a ControlLoop, rejecting any nil dependency.
@@ -232,11 +233,16 @@ func (cl *ControlLoop) HandleControllerMessage(ctx context.Context, seqTracker *
 		return Outcome{}, nil
 
 	case *controlv1.ControllerMessage_TrustUpdate:
-		// Same rule, via Alert (no ApplyResult shape fits a trust
-		// update): "without touching state."
+		// docs/prompts/step-06b.md C1/C2: processed on the apply
+		// worker, between bundle applies; no reply (failures are
+		// audited and alerted by the worker).
+		if cl.Jobs != nil {
+			cl.Jobs.SubmitTrustUpdate(body.TrustUpdate.GetSignedRoots())
+			return Outcome{}, nil
+		}
 		alert := &controlv1.Alert{
 			Kind:     controlv1.Alert_KIND_UNSPECIFIED,
-			Detail:   "relayd does not process TrustUpdate yet (step 6a); see step 6b",
+			Detail:   "relayd has no apply worker configured; TrustUpdate not processed",
 			UnixTime: cl.Clock().Unix(),
 		}
 		return Outcome{Reply: cl.wrap(out, &controlv1.AgentMessage{Body: &controlv1.AgentMessage_Alert{Alert: alert}})}, nil

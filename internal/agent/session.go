@@ -73,6 +73,12 @@ type SessionConfig struct {
 	// with the apply worker's (see Link). Optional: nil means RunSession
 	// fires those transitions without coordination (no apply worker).
 	Link *Link
+	// OnConnected, if set, runs after every completed Hello/HelloAck
+	// (the trust-expiry monitor: TRUST_EXPIRED once per connection, C3).
+	OnConnected func()
+	// OnHeartbeat, if set, runs on every heartbeat tick (the trust-expiry
+	// monitor's daily repeat, C3).
+	OnHeartbeat func()
 
 	// touchInterval overrides sessionLivenessTouchInterval for the park
 	// loop if positive, and parkTick, if non-nil, runs on every park-loop
@@ -171,6 +177,9 @@ func RunSession(ctx context.Context, cfg SessionConfig) error {
 		}
 
 		linkUp(cfg, func() { fireConnected(cfg) })
+		if cfg.OnConnected != nil {
+			cfg.OnConnected()
+		}
 		cfg.Auditor.Record(AuditEvent{Step: "session_connected", Detail: "Hello/HelloAck complete"})
 
 		reconnect, runErr := runStreamLoop(ctx, cfg, stream, touch)
@@ -434,6 +443,9 @@ func runStreamLoop(ctx context.Context, cfg SessionConfig, stream ControlStream,
 				cfg.Link.Acked()
 			}
 			cfg.ControlLoop.CheckCertExpiry(cfg.Clock())
+			if cfg.OnHeartbeat != nil {
+				cfg.OnHeartbeat()
+			}
 
 		case <-outboxNotify:
 			touch()

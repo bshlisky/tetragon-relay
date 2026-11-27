@@ -54,10 +54,11 @@ type ApplyWorkerConfig struct {
 type ApplyWorker struct {
 	cfg ApplyWorkerConfig
 
-	mu      sync.Mutex
-	pending []byte
-	has     bool
-	wake    chan struct{}
+	mu         sync.Mutex
+	pending    []byte
+	has        bool
+	trustQueue [][][]byte
+	wake       chan struct{}
 }
 
 // NewApplyWorker validates cfg and returns a worker. Call Run to start it.
@@ -134,15 +135,27 @@ func (w *ApplyWorker) Run(ctx context.Context) {
 		case <-ticker.C:
 			w.cfg.Liveness.Touch(applyWorkerComponent)
 		case <-w.wake:
-			for {
-				env, ok := w.takePending()
-				if !ok {
-					break
-				}
-				w.runJob(ctx, func(jctx context.Context) { w.processBundle(jctx, env) })
-			}
+			w.drainJobs(ctx)
 			w.cfg.Liveness.Touch(applyWorkerComponent)
 		}
+	}
+}
+
+// drainJobs runs queued jobs until none are left: every queued trust
+// update first (in arrival order), then the pending bundle, so a bundle
+// is always verified against the newest adopted root and a root never
+// changes during a bundle's verification or apply (C2).
+func (w *ApplyWorker) drainJobs(ctx context.Context) {
+	for {
+		if roots, ok := w.takeTrustUpdate(); ok {
+			w.runJob(ctx, func(context.Context) { w.processTrustUpdate(roots) })
+			continue
+		}
+		env, ok := w.takePending()
+		if !ok {
+			return
+		}
+		w.runJob(ctx, func(jctx context.Context) { w.processBundle(jctx, env) })
 	}
 }
 
