@@ -14,6 +14,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	telemetryv1 "github.com/bshlisky/tetragon-relay/api/relay/telemetry/v1"
+	"github.com/bshlisky/tetragon-relay/internal/limits"
 	"github.com/bshlisky/tetragon-relay/internal/telemetry/batch"
 	"github.com/bshlisky/tetragon-relay/internal/telemetry/chainverify"
 	tetragonpb "github.com/bshlisky/tetragon-relay/third_party/tetragon/v1.8.0/api/v1/tetragon"
@@ -43,7 +44,7 @@ type chanSource struct {
 	types []tetragonpb.EventType
 }
 
-func (s *chanSource) StreamEvents(ctx context.Context, types []tetragonpb.EventType, deliver func(*tetragonpb.GetEventsResponse) bool) error {
+func (s *chanSource) StreamEvents(ctx context.Context, types []tetragonpb.EventType, deliver func([]byte) bool) error {
 	s.mu.Lock()
 	s.calls++
 	s.types = types
@@ -56,7 +57,11 @@ func (s *chanSource) StreamEvents(ctx context.Context, types []tetragonpb.EventT
 			if !ok {
 				return errors.New("source closed")
 			}
-			if !deliver(ev) {
+			raw, err := proto.Marshal(ev)
+			if err != nil {
+				return err
+			}
+			if !deliver(raw) {
 				return nil
 			}
 		}
@@ -179,7 +184,7 @@ func newRig(t *testing.T, col *memCollector, maxEvents int, maxAge time.Duration
 	live := &fakeLiveness{}
 	p, err := New(Config{
 		Source: src, EventTypes: []tetragonpb.EventType{tetragonpb.EventType_PROCESS_EXEC}, Redactor: red, Spool: s,
-		Dialer: col, BatchMaxEvents: maxEvents, BatchMaxAge: maxAge, Clock: time.Now, Auditor: aud,
+		Dialer: col, BatchMaxEvents: maxEvents, BatchMaxAge: maxAge, MaxEventRate: limits.MaxCollectorEventRate, Clock: time.Now, Auditor: aud,
 		Liveness: live, BackoffMin: 10 * time.Millisecond, BackoffMax: 50 * time.Millisecond,
 	})
 	if err != nil {

@@ -50,7 +50,7 @@ func (t telemetryAuditor) Record(step, detail string, err error) {
 // section 8).
 type tetraEventSource struct{ c *tetra.Client }
 
-func (s tetraEventSource) StreamEvents(ctx context.Context, types []tetragonpb.EventType, deliver func(*tetragonpb.GetEventsResponse) bool) error {
+func (s tetraEventSource) StreamEvents(ctx context.Context, types []tetragonpb.EventType, deliver func([]byte) bool) error {
 	return s.c.StreamEvents(ctx, types, deliver)
 }
 
@@ -100,13 +100,13 @@ func startTelemetry(ctx context.Context, d telemetryDeps) (*telemetry.Pipeline, 
 	p, err := telemetry.New(telemetry.Config{
 		Source: tetraEventSource{d.tetraClient}, EventTypes: types, Redactor: redactor, Spool: spool,
 		Dialer: dialer, BatchMaxEvents: d.cfg.BatchMaxEvents, BatchMaxAge: d.cfg.BatchMaxAge,
-		Clock: time.Now, Auditor: aud, Liveness: d.liveness,
+		MaxEventRate: d.cfg.MaxEventRate, Clock: time.Now, Auditor: aud, Liveness: d.liveness,
 	})
 	if err != nil {
 		return nil, err
 	}
 	go p.Run(ctx)
-	d.auditor.Record(agent.AuditEvent{Step: "telemetry_started", Detail: fmt.Sprintf("event types %v, %d collector endpoint(s), spool cap %d bytes", d.cfg.EventTypes, len(d.cfg.CollectorEndpoints), d.cfg.SpoolMaxBytes)})
+	d.auditor.Record(agent.AuditEvent{Step: "telemetry_started", Detail: fmt.Sprintf("event types %v, %d collector endpoint(s), spool cap %d bytes, non_security budget %d events/s", d.cfg.EventTypes, len(d.cfg.CollectorEndpoints), d.cfg.SpoolMaxBytes, d.cfg.MaxEventRate)})
 	return p, nil
 }
 

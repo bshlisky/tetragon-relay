@@ -95,6 +95,7 @@ fuzz-short:
 	$(GO) test -run=NONE -fuzz=FuzzChainVerify -fuzztime=60s ./internal/telemetry/chainverify
 	$(GO) test -run=NONE -fuzz=FuzzRedactEquivalence -fuzztime=60s ./internal/telemetry
 	$(GO) test -run=NONE -fuzz=FuzzArgvPrefilter -fuzztime=60s ./internal/telemetry
+	$(GO) test -run=NONE -fuzz=FuzzPeekAdmit -fuzztime=60s ./internal/telemetry
 	$(GO) test -run=NONE -fuzz=FuzzPayloadDecode -fuzztime=60s ./internal/telemetry/batch
 
 .PHONY: lint

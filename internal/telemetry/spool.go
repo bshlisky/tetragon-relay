@@ -522,6 +522,24 @@ func (s *Spool) AppendEventsPayload(class string, payload []byte, count uint64, 
 	return s.appendLocked(batch.KindEvents, class, count, first, last, payload, enc)
 }
 
+// AppendRateLimited spools a dropped record declaring events non_security
+// events that ingest dropped over the event-rate budget between first
+// and last (step 7b D0). It is a control batch: never compressed, and
+// never itself dropped to make room.
+func (s *Spool) AppendRateLimited(events uint64, first, last int64) (Entry, error) {
+	d := batch.Dropped{Class: batch.ClassNonSecurity, Reason: batch.DropRateLimited, Events: events}
+	p, err := d.Marshal()
+	if err != nil {
+		return Entry{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.makeRoomLocked(int64(len(p)) + int64(len(fileMagic)+4+macSize+limits.MaxTelemetryHeaderBytes/4)); err != nil {
+		return Entry{}, err
+	}
+	return s.appendLocked(batch.KindDropped, batch.ClassControl, 0, first, last, p, batch.EncNone)
+}
+
 // countRecords counts payload's length-prefixed records without copying.
 func countRecords(payload []byte) (uint64, bool) {
 	var n uint64

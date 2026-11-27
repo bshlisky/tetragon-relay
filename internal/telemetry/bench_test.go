@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"fmt"
+	"math"
 	"runtime"
 	"runtime/pprof"
 	"sync"
@@ -14,6 +15,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/bshlisky/tetragon-relay/internal/limits"
 	"github.com/bshlisky/tetragon-relay/internal/telemetry/batch"
 	tetragonpb "github.com/bshlisky/tetragon-relay/third_party/tetragon/v1.8.0/api/v1/tetragon"
 )
@@ -38,21 +40,17 @@ const corpusSize = 8192
 
 var benchInput = sync.OnceValue(func() [][]byte { return benchCorpus(corpusSize) })
 
-// bytesSource decodes pre-built events, the way the GetEvents stream does,
-// and delivers n of them.
+// bytesSource delivers n pre-built events as wire bytes, the way the
+// GetEvents stream does since step 7b D0 (the pipeline decodes them).
 type bytesSource struct {
 	corpus    [][]byte
 	n         int
 	delivered atomic.Int64
 }
 
-func (s *bytesSource) StreamEvents(ctx context.Context, _ []tetragonpb.EventType, deliver func(*tetragonpb.GetEventsResponse) bool) error {
+func (s *bytesSource) StreamEvents(ctx context.Context, _ []tetragonpb.EventType, deliver func([]byte) bool) error {
 	for i := int(s.delivered.Load()); i < s.n; i++ {
-		ev := new(tetragonpb.GetEventsResponse)
-		if err := proto.Unmarshal(s.corpus[i%len(s.corpus)], ev); err != nil {
-			return err
-		}
-		if !deliver(ev) {
+		if !deliver(s.corpus[i%len(s.corpus)]) {
 			return nil
 		}
 		s.delivered.Add(1)
@@ -82,8 +80,10 @@ func BenchmarkPipeline5k(b *testing.B) {
 	col := &memCollector{discard: true}
 	p, _ := New(Config{
 		Source: src, EventTypes: []tetragonpb.EventType{1}, Redactor: red, Spool: s, Dialer: col,
-		BatchMaxEvents: 2000, BatchMaxAge: 2 * time.Second, Clock: time.Now, Auditor: cfg.Auditor, Liveness: &fakeLiveness{},
+		BatchMaxEvents: 2000, BatchMaxAge: 2 * time.Second, MaxEventRate: limits.MaxCollectorEventRate, Clock: time.Now, Auditor: cfg.Auditor, Liveness: &fakeLiveness{},
 	})
+	// The benchmark measures the cost of admitted events: no budget.
+	p.admitRate = math.Inf(1)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	runtime.GC()

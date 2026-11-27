@@ -139,6 +139,13 @@ func validateCollector(cl rawCollector, c *Config) error {
 		}
 		batchMaxAge = d
 	}
+	maxEventRate := limits.DefaultCollectorMaxEventRate
+	if cl.MaxEventRate != 0 {
+		if cl.MaxEventRate < 0 || cl.MaxEventRate > limits.MaxCollectorEventRate {
+			return fmt.Errorf("%w: %d", ErrInvalidMaxEventRate, cl.MaxEventRate)
+		}
+		maxEventRate = cl.MaxEventRate
+	}
 	eventTypes := validEventTypes
 	if cl.EventTypes != nil {
 		if len(cl.EventTypes) == 0 {
@@ -159,6 +166,7 @@ func validateCollector(cl rawCollector, c *Config) error {
 	c.SpoolMaxBytes = spoolMaxBytes
 	c.BatchMaxEvents = batchMaxEvents
 	c.BatchMaxAge = batchMaxAge
+	c.MaxEventRate = maxEventRate
 	return nil
 }
 

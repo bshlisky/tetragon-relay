@@ -9,6 +9,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	tetragonpb "github.com/bshlisky/tetragon-relay/third_party/tetragon/v1.8.0/api/v1/tetragon"
 
@@ -293,27 +294,48 @@ func TestClient_StreamEvents(t *testing.T) {
 	defer cleanup()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	var got []*tetragonpb.GetEventsResponse
-	err := c.StreamEvents(ctx, []tetragonpb.EventType{tetragonpb.EventType_PROCESS_EXEC}, func(r *tetragonpb.GetEventsResponse) bool {
-		got = append(got, r)
+	var got [][]byte
+	err := c.StreamEvents(ctx, []tetragonpb.EventType{tetragonpb.EventType_PROCESS_EXEC}, func(raw []byte) bool {
+		got = append(got, raw)
 		return len(got) < 2
 	})
-	if err != nil || len(got) != 2 || got[0].GetProcessExec() == nil {
+	if err != nil || len(got) != 2 {
 		t.Fatalf("StreamEvents = %v, %d events", err, len(got))
 	}
-	if err := c.StreamEvents(ctx, nil, func(*tetragonpb.GetEventsResponse) bool { return true }); !errors.Is(err, ErrProtocol) {
+	// The bytes are the responses' wire form, undecoded, each its own copy.
+	for i, raw := range got {
+		var r tetragonpb.GetEventsResponse
+		if err := proto.Unmarshal(raw, &r); err != nil || !proto.Equal(&r, f.events[i]) {
+			t.Fatalf("event %d: %v, %v", i, err, &r)
+		}
+	}
+	if err := c.StreamEvents(ctx, nil, func([]byte) bool { return true }); !errors.Is(err, ErrProtocol) {
 		t.Fatalf("empty event types: %v", err)
 	}
 	f.mu.Lock()
 	f.events = nil
 	f.getEventsErr = status.Error(codes.Unavailable, "gone")
 	f.mu.Unlock()
-	if err := c.StreamEvents(ctx, []tetragonpb.EventType{tetragonpb.EventType_PROCESS_EXEC}, func(*tetragonpb.GetEventsResponse) bool { return true }); !errors.Is(err, ErrUnavailable) {
+	if err := c.StreamEvents(ctx, []tetragonpb.EventType{tetragonpb.EventType_PROCESS_EXEC}, func([]byte) bool { return true }); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("stream error: %v", err)
 	}
 	cctx, ccancel := context.WithCancel(context.Background())
 	ccancel()
-	if err := c.StreamEvents(cctx, []tetragonpb.EventType{tetragonpb.EventType_PROCESS_EXEC}, func(*tetragonpb.GetEventsResponse) bool { return true }); err != nil {
+	if err := c.StreamEvents(cctx, []tetragonpb.EventType{tetragonpb.EventType_PROCESS_EXEC}, func([]byte) bool { return true }); err != nil {
 		t.Fatalf("canceled ctx: %v", err)
+	}
+}
+
+func TestRawResponseCodec_RejectsWrongTypes(t *testing.T) {
+	var c rawResponseCodec
+	if _, err := c.Marshal("not a message"); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("Marshal(string) = %v", err)
+	}
+	var r tetragonpb.GetEventsResponse
+	if err := c.Unmarshal(nil, &r); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("Unmarshal into a message = %v", err)
+	}
+	if c.Name() != "proto" {
+		t.Fatalf("Name = %q", c.Name())
 	}
 }

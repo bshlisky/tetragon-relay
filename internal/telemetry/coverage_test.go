@@ -137,7 +137,7 @@ func TestGRPCDialer_MTLSPinnedEndToEnd(t *testing.T) {
 	src := &chanSource{ch: make(chan *tetragonpb.GetEventsResponse, 4)}
 	p, err := New(Config{
 		Source: src, EventTypes: []tetragonpb.EventType{tetragonpb.EventType_PROCESS_EXEC}, Redactor: red, Spool: s,
-		Dialer: &GRPCDialer{Endpoints: []string{addr}, TLS: tlsFn}, BatchMaxEvents: 1, BatchMaxAge: time.Hour,
+		Dialer: &GRPCDialer{Endpoints: []string{addr}, TLS: tlsFn}, BatchMaxEvents: 1, BatchMaxAge: time.Hour, MaxEventRate: 100,
 		Clock: time.Now, Auditor: cfg.Auditor, Liveness: &fakeLiveness{}, BackoffMin: 10 * time.Millisecond, BackoffMax: 20 * time.Millisecond,
 	})
 	if err != nil {
@@ -197,7 +197,7 @@ func TestExporter_StalledCollectorIsBounded(t *testing.T) {
 		live := &fakeLiveness{}
 		p, _ := New(Config{
 			Source: &chanSource{ch: make(chan *tetragonpb.GetEventsResponse)}, EventTypes: []tetragonpb.EventType{1}, Redactor: red, Spool: s,
-			Dialer: d, BatchMaxEvents: 1, BatchMaxAge: time.Hour, Clock: time.Now, Auditor: cfg.Auditor, Liveness: live,
+			Dialer: d, BatchMaxEvents: 1, BatchMaxAge: time.Hour, MaxEventRate: 100, Clock: time.Now, Auditor: cfg.Auditor, Liveness: live,
 			BackoffMin: 5 * time.Millisecond, BackoffMax: 10 * time.Millisecond, SendTimeout: 30 * time.Millisecond, DialTimeout: 30 * time.Millisecond,
 		})
 		ctx, cancel := context.WithCancel(context.Background())
@@ -217,7 +217,7 @@ func TestNew_Validation(t *testing.T) {
 	s := mustOpen(t, cfg)
 	red, _ := NewRedactor(nil)
 	good := Config{Source: &chanSource{}, EventTypes: []tetragonpb.EventType{1}, Redactor: red, Spool: s, Dialer: &memCollector{},
-		BatchMaxEvents: 1, BatchMaxAge: time.Second, Clock: time.Now, Auditor: cfg.Auditor, Liveness: &fakeLiveness{}}
+		BatchMaxEvents: 1, BatchMaxAge: time.Second, MaxEventRate: 100, Clock: time.Now, Auditor: cfg.Auditor, Liveness: &fakeLiveness{}}
 	if _, err := New(good); err != nil {
 		t.Fatal(err)
 	}

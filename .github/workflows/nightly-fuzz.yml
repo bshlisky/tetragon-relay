@@ -45,6 +45,8 @@ jobs:
             package: ./internal/telemetry
           - target: FuzzArgvPrefilter
             package: ./internal/telemetry
+          - target: FuzzPeekAdmit
+            package: ./internal/telemetry
           - target: FuzzPayloadDecode
             package: ./internal/telemetry/batch
     steps:

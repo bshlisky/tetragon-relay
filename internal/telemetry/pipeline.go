@@ -22,9 +22,10 @@ import (
 )
 
 // EventSource is Tetragon's GetEvents with an allow-list (cmd/relayd adapts
-// tetra.Client.StreamEvents to it). deliver may block.
+// tetra.Client.StreamEvents to it). Each response is delivered as its
+// undecoded wire bytes, which the pipeline then owns. deliver may block.
 type EventSource interface {
-	StreamEvents(ctx context.Context, eventTypes []tetragonpb.EventType, deliver func(*tetragonpb.GetEventsResponse) bool) error
+	StreamEvents(ctx context.Context, eventTypes []tetragonpb.EventType, deliver func(raw []byte) bool) error
 }
 
 // Liveness is the agent's liveness registry (agent.LivenessRegistry).
@@ -42,6 +43,10 @@ const (
 	livenessMax      = 60 * time.Second
 	touchEvery       = 5 * time.Second
 )
+
+// rateLimitAuditEvery bounds how often admission drops are audited (each
+// is declared in the chain regardless).
+const rateLimitAuditEvery = time.Minute
 
 // eventQueueDepth bounds the ingest -> builder channel. When it is full,
 // ingest blocks inside GetEvents' deliver, so Tetragon is read no faster
@@ -81,9 +86,13 @@ type Config struct {
 	Dialer         Dialer
 	BatchMaxEvents int
 	BatchMaxAge    time.Duration
-	Clock          func() time.Time
-	Auditor        Auditor
-	Liveness       Liveness
+	// MaxEventRate is collector.max_event_rate: the admission budget for
+	// non_security events, per second (step 7b D0), in
+	// 1..limits.MaxCollectorEventRate.
+	MaxEventRate int
+	Clock        func() time.Time
+	Auditor      Auditor
+	Liveness     Liveness
 	// Backoff bounds the exporter's and ingest's reconnect backoff.
 	// Zero values mean 1 s and 30 s.
 	BackoffMin, BackoffMax time.Duration
@@ -96,8 +105,13 @@ type Config struct {
 // Pipeline runs the telemetry goroutines.
 type Pipeline struct {
 	cfg    Config
-	events chan *tetragonpb.GetEventsResponse
+	events chan []byte
+	drops  rateDrops
+	// admitRate is cfg.MaxEventRate; the benchmark sets it to +Inf.
+	admitRate float64
 	// counters
+	rateLimited     atomic.Uint64
+	malformed       atomic.Uint64
 	tetragonDropped atomic.Uint64
 	oversized       atomic.Uint64
 	unclassified    atomic.Uint64
@@ -115,6 +129,8 @@ func New(cfg Config) (*Pipeline, error) {
 		return nil, fmt.Errorf("telemetry: EventTypes is required")
 	case cfg.BatchMaxEvents <= 0 || cfg.BatchMaxAge <= 0:
 		return nil, fmt.Errorf("telemetry: BatchMaxEvents and BatchMaxAge must be positive")
+	case cfg.MaxEventRate <= 0 || cfg.MaxEventRate > limits.MaxCollectorEventRate:
+		return nil, fmt.Errorf("telemetry: MaxEventRate %d outside 1..%d", cfg.MaxEventRate, limits.MaxCollectorEventRate)
 	case cfg.Clock == nil || cfg.Auditor == nil || cfg.Liveness == nil:
 		return nil, fmt.Errorf("telemetry: Clock, Auditor and Liveness are required")
 	}
@@ -130,7 +146,7 @@ func New(cfg Config) (*Pipeline, error) {
 	if cfg.DialTimeout <= 0 {
 		cfg.DialTimeout = defaultDialTimeout
 	}
-	return &Pipeline{cfg: cfg, events: make(chan *tetragonpb.GetEventsResponse, eventQueueDepth)}, nil
+	return &Pipeline{cfg: cfg, events: make(chan []byte, eventQueueDepth), admitRate: float64(cfg.MaxEventRate)}, nil
 }
 
 // HeartbeatStats is the heartbeat's view (Heartbeat.telemetry_last_seq and
@@ -147,6 +163,11 @@ func (p *Pipeline) HeartbeatStats() (lastSeq uint64, backlog uint32) {
 // Counters returns the pipeline's own loss and error counters.
 func (p *Pipeline) Counters() map[string]uint64 {
 	return map[string]uint64{
+		// Non-security events dropped over collector.max_event_rate,
+		// before decode (declared in rate_limited dropped records).
+		"rate_limited_events": p.rateLimited.Load(),
+		// Responses admission let through that did not decode.
+		"malformed_events":      p.malformed.Load(),
 		"tetragon_rate_limited": p.tetragonDropped.Load(),
 		"oversized_events":      p.oversized.Load(),
 		"unclassified_events":   p.unclassified.Load(),
@@ -195,14 +216,22 @@ func (p *Pipeline) sleep(ctx context.Context, d time.Duration, name string) bool
 // loop touches liveness whether or not Tetragon has anything to send.
 func (p *Pipeline) ingest(ctx context.Context) {
 	backoff := p.cfg.BackoffMin
+	bucket := newTokenBucket(p.admitRate, p.cfg.Clock())
 	for ctx.Err() == nil {
 		p.cfg.Liveness.Touch(LivenessIngest)
 		started := p.cfg.Clock()
 		res := make(chan error, 1)
 		go func() {
-			res <- p.cfg.Source.StreamEvents(ctx, p.cfg.EventTypes, func(ev *tetragonpb.GetEventsResponse) bool {
+			res <- p.cfg.Source.StreamEvents(ctx, p.cfg.EventTypes, func(raw []byte) bool {
+				if peekAdmit(raw) == admitOther {
+					if now := p.cfg.Clock(); !bucket.allow(now) {
+						p.rateLimited.Add(1)
+						p.drops.add(now.UnixNano())
+						return true
+					}
+				}
 				select {
-				case p.events <- ev:
+				case p.events <- raw:
 					return true
 				case <-ctx.Done():
 					return false
@@ -265,13 +294,37 @@ func (p *Pipeline) build(ctx context.Context) {
 	defer tick.Stop()
 	marshal := proto.MarshalOptions{Deterministic: true}
 	var scratch []byte
+	var lastDecl, lastAudit time.Time
+	declare := func(now time.Time) {
+		n, first, last := p.drops.take()
+		if n == 0 {
+			return
+		}
+		if _, err := p.cfg.Spool.AppendRateLimited(n, first, last); err != nil {
+			p.drops.putBack(n, first, last)
+			p.cfg.Auditor.Record("telemetry_spool_write_failed", fmt.Sprintf("rate_limited record for %d events not spooled; retried", n), err)
+			return
+		}
+		lastDecl = now
+		if now.Sub(lastAudit) >= rateLimitAuditEvery {
+			lastAudit = now
+			p.cfg.Auditor.Record("telemetry_rate_limited", fmt.Sprintf("%d non_security events over collector.max_event_rate (%d/s) dropped before decode; declared in the chain", n, p.cfg.MaxEventRate), nil)
+		}
+	}
+	ev := new(tetragonpb.GetEventsResponse)
 	for {
 		select {
 		case <-ctx.Done():
 			flush(&cur[0])
 			flush(&cur[1])
+			declare(p.cfg.Clock())
 			return
-		case ev := <-p.events:
+		case raw := <-p.events:
+			proto.Reset(ev)
+			if err := proto.Unmarshal(raw, ev); err != nil {
+				p.malformed.Add(1)
+				continue
+			}
 			if rl := ev.GetRateLimitInfo(); rl != nil {
 				p.tetragonDropped.Add(rl.GetNumberOfDroppedProcessEvents())
 				p.cfg.Auditor.Record("telemetry_tetragon_rate_limited", fmt.Sprintf("Tetragon reports %d process events dropped by its rate limit", rl.GetNumberOfDroppedProcessEvents()), nil)
@@ -314,6 +367,9 @@ func (p *Pipeline) build(ctx context.Context) {
 		case <-tick.C:
 			p.cfg.Liveness.Touch(LivenessBuilder)
 			now := p.cfg.Clock()
+			if now.Sub(lastDecl) >= p.cfg.BatchMaxAge {
+				declare(now)
+			}
 			for i := range cur {
 				if cur[i].count > 0 && now.Sub(cur[i].started) >= p.cfg.BatchMaxAge {
 					flush(&cur[i])

@@ -9,7 +9,9 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/mem"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	tetragonpb "github.com/bshlisky/tetragon-relay/third_party/tetragon/v1.8.0/api/v1/tetragon"
 
@@ -327,19 +329,21 @@ func (c *Client) GetEvents(ctx context.Context, policyNames []string) (<-chan Ev
 
 // StreamEvents is the telemetry pipeline's GetEvents (ADR 0039 section 7):
 // an allow-list of eventTypes and nothing else, every response handed to
-// deliver in order. deliver may block; while it does, this goroutine
+// deliver in order as its undecoded wire bytes (step 7b D0: telemetry
+// admits or drops an event before paying to decode it). The bytes are
+// the caller's to keep. deliver may block; while it does, this goroutine
 // reads nothing more from the socket, so a slow pipeline pushes back on
 // Tetragon instead of buffering without limit. deliver returns false to
 // stop. StreamEvents returns nil when ctx ends or deliver stops it, and
 // a typed error (ErrUnavailable, ...) when the stream fails. An empty
 // eventTypes is refused: it would ask Tetragon for every event type.
-func (c *Client) StreamEvents(ctx context.Context, eventTypes []tetragonpb.EventType, deliver func(*tetragonpb.GetEventsResponse) bool) error {
+func (c *Client) StreamEvents(ctx context.Context, eventTypes []tetragonpb.EventType, deliver func(raw []byte) bool) error {
 	if len(eventTypes) == 0 {
 		return fmt.Errorf("%w: StreamEvents: no event types", ErrProtocol)
 	}
 	stream, err := c.stub.GetEvents(ctx, &tetragonpb.GetEventsRequest{
 		AllowList: []*tetragonpb.Filter{{EventSet: append([]tetragonpb.EventType(nil), eventTypes...)}},
-	})
+	}, grpc.ForceCodecV2(rawResponseCodec{}))
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil //nolint:nilerr // ctx ending is StreamEvents' clean stop, not a stream failure
@@ -347,8 +351,9 @@ func (c *Client) StreamEvents(ctx context.Context, eventTypes []tetragonpb.Event
 		return classifyErr(ctx, "GetEvents", err)
 	}
 	for {
-		resp, err := stream.Recv()
-		if err != nil {
+		var raw []byte
+		// RecvMsg, not Recv: Recv would decode into a GetEventsResponse.
+		if err := stream.RecvMsg(&raw); err != nil {
 			if ctx.Err() != nil {
 				return nil //nolint:nilerr // ctx ending is StreamEvents' clean stop, not a stream failure
 			}
@@ -357,8 +362,37 @@ func (c *Client) StreamEvents(ctx context.Context, eventTypes []tetragonpb.Event
 			}
 			return classifyErr(ctx, "GetEvents", err)
 		}
-		if !deliver(resp) {
+		if !deliver(raw) {
 			return nil
 		}
 	}
+}
+
+// rawResponseCodec is StreamEvents' codec: the request is marshaled as
+// protobuf, as grpc's own codec would, and each response is handed over
+// as a copy of its wire bytes, undecoded. Its name is "proto", so the
+// content-subtype on the wire is unchanged.
+type rawResponseCodec struct{}
+
+func (rawResponseCodec) Name() string { return "proto" }
+
+func (rawResponseCodec) Marshal(v any) (mem.BufferSlice, error) {
+	m, ok := v.(proto.Message)
+	if !ok {
+		return nil, fmt.Errorf("%w: StreamEvents codec: marshal %T", ErrProtocol, v)
+	}
+	b, err := proto.Marshal(m)
+	if err != nil {
+		return nil, err
+	}
+	return mem.BufferSlice{mem.SliceBuffer(b)}, nil
+}
+
+func (rawResponseCodec) Unmarshal(data mem.BufferSlice, v any) error {
+	p, ok := v.(*[]byte)
+	if !ok {
+		return fmt.Errorf("%w: StreamEvents codec: unmarshal into %T", ErrProtocol, v)
+	}
+	*p = data.Materialize()
+	return nil
 }

@@ -34,6 +34,7 @@ type rawCollector struct {
 	SpoolMaxBytes  int64    `yaml:"spool_max_bytes"`
 	BatchMaxEvents int      `yaml:"batch_max_events"`
 	BatchMaxAge    string   `yaml:"batch_max_age"`
+	MaxEventRate   int      `yaml:"max_event_rate"`
 	EventTypes     []string `yaml:"event_types"`
 }
 
@@ -104,6 +105,11 @@ type Config struct {
 	SpoolMaxBytes      int64
 	BatchMaxEvents     int
 	BatchMaxAge        time.Duration
+	// MaxEventRate is collector.max_event_rate: non_security events
+	// admitted per second (step 7b D0); default
+	// limits.DefaultCollectorMaxEventRate, at most
+	// limits.MaxCollectorEventRate.
+	MaxEventRate int
 	// EventTypes is collector.event_types: the GetEvents allow-list.
 	EventTypes []string
 

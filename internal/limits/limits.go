@@ -302,6 +302,15 @@ const (
 	// DefaultCollectorBatchMaxAge is collector.batch_max_age's default
 	// (architecture doc 8.6's example).
 	DefaultCollectorBatchMaxAge = 2 * time.Second
+	// DefaultCollectorMaxEventRate is collector.max_event_rate's default:
+	// the admission budget for non_security events per second (step 7b
+	// D0, docs/reviews/step-07b-decisions.md). Security events are not
+	// counted against it.
+	DefaultCollectorMaxEventRate = 2000
+	// MaxCollectorEventRate is the hard maximum of collector.max_event_rate:
+	// architecture 8.13's design rate (5k events/s, ADR 0041). Config can
+	// lower the budget but never raise it past this.
+	MaxCollectorEventRate = 5000
 
 	// ControlConnectDegradedTimeout is architecture doc 8.4's DEGRADED
 	// row, first entry condition: "No controller for > 5 min" --

@@ -51,6 +51,9 @@ func TestParse_ValidConfig_DefaultsApplied(t *testing.T) {
 	if cfg.BatchMaxAge != 2*time.Second {
 		t.Errorf("BatchMaxAge default = %v", cfg.BatchMaxAge)
 	}
+	if cfg.MaxEventRate != 2000 {
+		t.Errorf("MaxEventRate default = %d", cfg.MaxEventRate)
+	}
 	if cfg.IdentityProvider != "spire" {
 		t.Errorf("IdentityProvider default = %q, want spire", cfg.IdentityProvider)
 	}
@@ -258,6 +261,8 @@ func TestValidateAndBuild_EveryRule(t *testing.T) {
 		{"invalid spool max bytes", mutateYAML("collector:\n  endpoints:", "collector:\n  spool_max_bytes: -1\n  endpoints:"), ErrInvalidSpoolMaxBytes},
 		{"invalid batch max events", mutateYAML("collector:\n  endpoints:", "collector:\n  batch_max_events: -1\n  endpoints:"), ErrInvalidBatchMaxEvents},
 		{"invalid batch max age", mutateYAML("collector:\n  endpoints:", "collector:\n  batch_max_age: \"nope\"\n  endpoints:"), ErrInvalidBatchMaxAge},
+		{"negative max event rate", mutateYAML("collector:\n  endpoints:", "collector:\n  max_event_rate: -1\n  endpoints:"), ErrInvalidMaxEventRate},
+		{"max event rate over the hard maximum", mutateYAML("collector:\n  endpoints:", "collector:\n  max_event_rate: 5001\n  endpoints:"), ErrInvalidMaxEventRate},
 		{"missing identity trust domain", mutateYAML(`trust_domain: "mgmt.example.internal"`, `trust_domain: ""`), ErrMissingIdentityTrustDomain},
 		{"missing enrollment trust bundle", mutateYAML(`trust_bundle: "/etc/tetragon-relay/trust/spire-bundle.pem"`, `trust_bundle: ""`), ErrMissingEnrollmentTrustBundle},
 		{"invalid identity provider", mutateYAML("identity:\n  trust_domain:", "identity:\n  provider: \"neither\"\n  trust_domain:"), ErrInvalidIdentityProvider},
@@ -296,6 +301,7 @@ collector:
   spool_max_bytes: 1000
   batch_max_events: 10
   batch_max_age: "5s"
+  max_event_rate: 5000
 identity:
   provider: "idm"
   trust_domain: "mgmt.example.internal"
@@ -325,6 +331,9 @@ redaction:
 	}
 	if cfg.BatchMaxAge != 5*time.Second {
 		t.Errorf("BatchMaxAge = %v", cfg.BatchMaxAge)
+	}
+	if cfg.MaxEventRate != 5000 {
+		t.Errorf("MaxEventRate = %d", cfg.MaxEventRate)
 	}
 	if cfg.IdentityProvider != "idm" {
 		t.Errorf("IdentityProvider = %q", cfg.IdentityProvider)
