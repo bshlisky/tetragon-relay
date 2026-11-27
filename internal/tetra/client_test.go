@@ -282,3 +282,38 @@ func TestClient_CloseIsIdempotent(t *testing.T) {
 		t.Fatalf("second Close: %v", err)
 	}
 }
+
+func TestClient_StreamEvents(t *testing.T) {
+	f := newFakeServer()
+	f.events = []*tetragonpb.GetEventsResponse{
+		{Event: &tetragonpb.GetEventsResponse_ProcessExec{ProcessExec: &tetragonpb.ProcessExec{}}},
+		{Event: &tetragonpb.GetEventsResponse_ProcessKprobe{ProcessKprobe: &tetragonpb.ProcessKprobe{PolicyName: "p1"}}},
+	}
+	c, cleanup := startFakeServer(t, f)
+	defer cleanup()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var got []*tetragonpb.GetEventsResponse
+	err := c.StreamEvents(ctx, []tetragonpb.EventType{tetragonpb.EventType_PROCESS_EXEC}, func(r *tetragonpb.GetEventsResponse) bool {
+		got = append(got, r)
+		return len(got) < 2
+	})
+	if err != nil || len(got) != 2 || got[0].GetProcessExec() == nil {
+		t.Fatalf("StreamEvents = %v, %d events", err, len(got))
+	}
+	if err := c.StreamEvents(ctx, nil, func(*tetragonpb.GetEventsResponse) bool { return true }); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("empty event types: %v", err)
+	}
+	f.mu.Lock()
+	f.events = nil
+	f.getEventsErr = status.Error(codes.Unavailable, "gone")
+	f.mu.Unlock()
+	if err := c.StreamEvents(ctx, []tetragonpb.EventType{tetragonpb.EventType_PROCESS_EXEC}, func(*tetragonpb.GetEventsResponse) bool { return true }); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("stream error: %v", err)
+	}
+	cctx, ccancel := context.WithCancel(context.Background())
+	ccancel()
+	if err := c.StreamEvents(cctx, []tetragonpb.EventType{tetragonpb.EventType_PROCESS_EXEC}, func(*tetragonpb.GetEventsResponse) bool { return true }); err != nil {
+		t.Fatalf("canceled ctx: %v", err)
+	}
+}

@@ -2,27 +2,9 @@ package controlclient
 
 import (
 	"crypto/tls"
-	"crypto/x509"
-	"fmt"
-)
 
-// allowedCipherSuites is architecture doc 6.1's cipher suite list:
-// TLS_AES_256_GCM_SHA384 and TLS_AES_128_GCM_SHA256 (not
-// TLS_CHACHA20_POLY1305_SHA256). Go's crypto/tls does NOT allow
-// restricting which TLS 1.3 cipher suites are offered or negotiated via
-// Config.CipherSuites ("Note that TLS 1.3 ciphersuites are not
-// configurable" -- crypto/tls.Config's own doc comment, confirmed against
-// this project's go1.27.4 toolchain): the standard library always offers
-// all three. buildTLSConfig therefore enforces this as a POST-handshake
-// policy check inside VerifyConnection instead of a pre-handshake
-// restriction -- the connection is refused if a forbidden suite was
-// negotiated, even though this project cannot prevent it being offered
-// in the ClientHello. This is a documented deviation from "configure the
-// suite list", not a silent gap; see docs/reports/step-05b.md section 6.
-var allowedCipherSuites = map[uint16]bool{
-	tls.TLS_AES_256_GCM_SHA384: true,
-	tls.TLS_AES_128_GCM_SHA256: true,
-}
+	"github.com/bshlisky/tetragon-relay/internal/spiffetls"
+)
 
 // BuildTLSConfig builds the *tls.Config for the control channel
 // (architecture doc 6.1):
@@ -62,56 +44,13 @@ func BuildTLSConfig(cfg Config) (*tls.Config, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	rootPool := x509.NewCertPool()
-	for _, c := range cfg.ControllerCABundle {
-		rootPool.AddCert(c)
-	}
-
-	tlsCfg := &tls.Config{
-		MinVersion:             tls.VersionTLS13,
-		MaxVersion:             tls.VersionTLS13,
-		CurvePreferences:       cfg.groups(),
-		Certificates:           []tls.Certificate{cfg.ClientCertificate},
-		RootCAs:                rootPool,
-		InsecureSkipVerify:     true, //nolint:gosec // G402: VerifyConnection below performs full chain + SPIFFE ID verification itself; see BuildTLSConfig's doc comment for why Go's default (hostname-based) verification cannot be used here
-		SessionTicketsDisabled: true,
-		ClientSessionCache:     nil,
-	}
-	tlsCfg.VerifyConnection = func(cs tls.ConnectionState) error {
-		if !allowedCipherSuites[cs.CipherSuite] {
-			return fmt.Errorf("controlclient: negotiated cipher suite %#04x is not in the allowed set (TLS_AES_256_GCM_SHA384, TLS_AES_128_GCM_SHA256)", cs.CipherSuite)
-		}
-		if cs.Version != tls.VersionTLS13 {
-			return fmt.Errorf("controlclient: negotiated TLS version %#04x, want TLS 1.3", cs.Version)
-		}
-		if len(cs.PeerCertificates) == 0 {
-			return fmt.Errorf("controlclient: no peer certificates presented")
-		}
-		leaf := cs.PeerCertificates[0]
-		intermediates := x509.NewCertPool()
-		for _, c := range cs.PeerCertificates[1:] {
-			intermediates.AddCert(c)
-		}
-		if _, err := leaf.Verify(x509.VerifyOptions{
-			Roots:         rootPool,
-			Intermediates: intermediates,
-			KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-			// step-05b-review.md R5B-1: use the injected clock, not
-			// the zero value (which leaf.Verify treats as time.Now()
-			// internally), so certificate-validity edges are
-			// deterministic and testable.
-			CurrentTime: cfg.Clock(),
-		}); err != nil {
-			return fmt.Errorf("controlclient: server certificate chain does not verify against the controller CA bundle: %w", err)
-		}
-		if !hasExactURISAN(leaf, cfg.ControllerSPIFFEID) {
-			return fmt.Errorf("%w: got %v, want [%s]", ErrControllerSPIFFEIDMismatch, leaf.URIs, cfg.ControllerSPIFFEID)
-		}
-		return nil
-	}
-	return tlsCfg, nil
-}
-
-func hasExactURISAN(cert *x509.Certificate, want string) bool {
-	return len(cert.URIs) == 1 && cert.URIs[0].String() == want
+	// ADR 0031's verification, shared with the telemetry channel
+	// (internal/spiffetls, ADR 0039 section 8).
+	return spiffetls.ClientTLSConfig(spiffetls.ClientConfig{
+		ServerSPIFFEID:    cfg.ControllerSPIFFEID,
+		ServerCABundle:    cfg.ControllerCABundle,
+		ClientCertificate: cfg.ClientCertificate,
+		Groups:            cfg.groups(),
+		Clock:             cfg.Clock,
+	})
 }

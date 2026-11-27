@@ -324,3 +324,41 @@ func (c *Client) GetEvents(ctx context.Context, policyNames []string) (<-chan Ev
 	}()
 	return events, errc
 }
+
+// StreamEvents is the telemetry pipeline's GetEvents (ADR 0039 section 7):
+// an allow-list of eventTypes and nothing else, every response handed to
+// deliver in order. deliver may block; while it does, this goroutine
+// reads nothing more from the socket, so a slow pipeline pushes back on
+// Tetragon instead of buffering without limit. deliver returns false to
+// stop. StreamEvents returns nil when ctx ends or deliver stops it, and
+// a typed error (ErrUnavailable, ...) when the stream fails. An empty
+// eventTypes is refused: it would ask Tetragon for every event type.
+func (c *Client) StreamEvents(ctx context.Context, eventTypes []tetragonpb.EventType, deliver func(*tetragonpb.GetEventsResponse) bool) error {
+	if len(eventTypes) == 0 {
+		return fmt.Errorf("%w: StreamEvents: no event types", ErrProtocol)
+	}
+	stream, err := c.stub.GetEvents(ctx, &tetragonpb.GetEventsRequest{
+		AllowList: []*tetragonpb.Filter{{EventSet: append([]tetragonpb.EventType(nil), eventTypes...)}},
+	})
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil //nolint:nilerr // ctx ending is StreamEvents' clean stop, not a stream failure
+		}
+		return classifyErr(ctx, "GetEvents", err)
+	}
+	for {
+		resp, err := stream.Recv()
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil //nolint:nilerr // ctx ending is StreamEvents' clean stop, not a stream failure
+			}
+			if errors.Is(err, io.EOF) {
+				return fmt.Errorf("%w: GetEvents stream ended", ErrUnavailable)
+			}
+			return classifyErr(ctx, "GetEvents", err)
+		}
+		if !deliver(resp) {
+			return nil
+		}
+	}
+}
