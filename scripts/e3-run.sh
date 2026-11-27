@@ -710,6 +710,128 @@ scenario_s10() {
 	stop_unit
 	record_result S10 "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
 }
+# ---------------------------------------------------------------------
+# S11: an out-of-band delete of a relay-managed policy (S10's e3-s10,
+# domain "relay-managed") through Tetragon's own socket. The next
+# reconcile cycle (at most 60 s) finds the drift: Alert DRIFT, LKG
+# re-asserted once, and the policy is loaded again.
+# ---------------------------------------------------------------------
+scenario_s11() {
+	log "S11: out-of-band delete of a relay-managed policy -> Alert DRIFT, re-assert"
+	write_dropins "e3.conf=$(e3_dropin)"
+	ok=true
+	start_controller s11 --mode bundles --overall-timeout 240s --expect-alert DRIFT --alert-timeout 180s
+	start_unit || ok=false
+	# relayd's startup reconcile runs first and finds Tetragon in sync.
+	wait_journal_step session_connected 30 || ok=false
+	sleep 10
+	victim=$(loaded_names | tr ',' '\n' | grep '^e3-s10-v' | head -1)
+	echo "loaded before the delete: $(loaded_names); victim: ${victim}"
+	if [ -z "${victim}" ]; then
+		echo "no relay-managed e3-s10 policy is loaded" >&2
+		ok=false
+	else
+		"${BIN_DIR}/e3tetra" --mode=delete --tetragon-binary "${TETRAGON_BIN}" --policy-name "${victim}" --domain relay-managed || ok=false
+		echo "loaded after the delete: $(loaded_names)"
+	fi
+	wait "${ctrl_pid}" || ok=false
+	cat /tmp/e3controller-s11.log
+	reloaded=false
+	for _ in $(seq 1 30); do
+		if [ -n "${victim}" ] && loaded_names | tr ',' '\n' | grep -qx "${victim}"; then
+			reloaded=true
+			break
+		fi
+		sleep 1
+	done
+	echo "loaded after the re-assert: $(loaded_names)"
+	[ "${reloaded}" = true ] || { echo "${victim} was not loaded again" >&2; ok=false; }
+	journal=$(scenario_journal)
+	echo "${journal}"
+	grep -q '"step":"drift_detected"' <<<"${journal}" || ok=false
+	grep -q '"step":"drift_reasserted"' <<<"${journal}" || ok=false
+	stop_unit
+	record_result S11 "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
+}
+
+# ---------------------------------------------------------------------
+# S12: an enforce bundle that SIGKILLs an admin-path process (the real
+# /usr/bin/bash, apply's compiled-in admin-path list) inside this
+# scenario's own process tree (matchPIDs, followForks; never any other
+# bash on the runner) fails the health window and rolls back:
+# ApplyResult ROLLED_BACK. G5 needs the same policy name in monitor mode
+# first (APPLIED). The trigger shell only uses builtins until told to go,
+# 35 s after the enforce bundle was sent, so heartbeats are seen during
+# the health window before the kill.
+# ---------------------------------------------------------------------
+admin_kill_policy() {
+	cat <<POLICY
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: "e3-admin-kill"
+spec:
+  kprobes:
+  - call: "security_bprm_check"
+    syscall: false
+    selectors:
+      - matchBinaries:
+        - operator: "In"
+          values:
+          - "/usr/bin/bash"
+        matchPIDs:
+        - operator: "In"
+          followForks: true
+          isNamespacePID: false
+          values:
+          - $1
+        matchActions:
+        - action: "Sigkill"
+POLICY
+}
+
+scenario_s12() {
+	log "S12: enforce bundle kills an admin-path process -> ROLLED_BACK, heartbeats continue"
+	write_dropins "e3.conf=$(e3_dropin)"
+	ok=true
+	go_file=/tmp/e3-s12-go
+	fifo=/tmp/e3-s12-fifo
+	rm -f "${go_file}" "${fifo}"
+	mkfifo "${fifo}"
+	# Builtins only (read -t on a FIFO nobody writes; [ -e ]) until the go
+	# file exists, then two external commands: this /usr/bin/bash becomes
+	# the caller of an exec (ADR 0020) and is killed by the enforce policy.
+	/usr/bin/bash -c "exec 9<>'${fifo}'; until [ -e '${go_file}' ]; do read -r -t 1 -u 9 _ || :; done; /usr/bin/true; /usr/bin/true" &
+	trigger_pid=$!
+	echo "S12 trigger shell pid: ${trigger_pid}"
+	admin_kill_policy "${trigger_pid}" >"${BUNDLE_DIR}/e3-admin-kill.yaml"
+	sign_bundle "${BUNDLE_DIR}/s12-monitor.json" "${E3_KEYS}/v3/targets.key" 5 monitor "e3-admin-kill=${BUNDLE_DIR}/e3-admin-kill.yaml" || ok=false
+	sign_bundle "${BUNDLE_DIR}/s12-enforce.json" "${E3_KEYS}/v3/targets.key" 6 enforce "e3-admin-kill=${BUNDLE_DIR}/e3-admin-kill.yaml" || ok=false
+	start_controller s12 --mode bundles --overall-timeout 420s --apply-timeout 180s \
+		--min-heartbeats-during-apply 2 \
+		--bundle "${BUNDLE_DIR}/s12-monitor.json" --expect APPLIED \
+		--bundle "${BUNDLE_DIR}/s12-enforce.json" --expect ROLLED_BACK
+	start_unit || ok=false
+	for _ in $(seq 1 200); do
+		grep -q 'sent bundle 2' /tmp/e3controller-s12.log && break
+		sleep 1
+	done
+	sleep 35
+	touch "${go_file}"
+	trigger_rc=0
+	wait "${trigger_pid}" || trigger_rc=$?
+	echo "S12 trigger shell exit status: ${trigger_rc} (137 = SIGKILL)"
+	[ "${trigger_rc}" = 137 ] || { echo "the admin-path shell was not killed" >&2; ok=false; }
+	wait "${ctrl_pid}" || ok=false
+	cat /tmp/e3controller-s12.log
+	journal=$(scenario_journal)
+	echo "${journal}"
+	grep '"step":"health_window_failed"' <<<"${journal}" | grep -q 'admin_path_enforcement_event' || { echo "no admin-path health-window failure in the journal" >&2; ok=false; }
+	grep -q '"step":"rolled_back"' <<<"${journal}" || ok=false
+	stop_unit
+	rm -f "${fifo}"
+	record_result S12 "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
+}
 
 main() {
 	setup_users_and_dirs
@@ -721,7 +843,7 @@ main() {
 
 	if ! start_swtpm_chardev; then
 		echo "no /dev/tpmrm0; every scenario needs it" >&2
-		for s in S1 S2 S3 S4 S5 S6 S7 S8 S9 S10; do record_result "${s}" FAIL; done
+		for s in S1 S2 S3 S4 S5 S6 S7 S8 S9 S10 S11 S12; do record_result "${s}" FAIL; done
 	else
 		# C5: the two identity-free scenarios first, then testenroll,
 		# then the identity scenarios.
@@ -735,9 +857,11 @@ main() {
 			scenario_s8
 			scenario_s9 # needs S7's bundle and persisted epoch
 			scenario_s10
+			scenario_s11 # needs S10's relay-managed e3-s10
+			scenario_s12
 			scenario_s4 # last: revocation is terminal for this store (ADR 0035)
 		else
-			for s in S3 S4 S5 S6 S7 S8 S9 S10; do record_result "${s}" FAIL; done
+			for s in S3 S4 S5 S6 S7 S8 S9 S10 S11 S12; do record_result "${s}" FAIL; done
 		fi
 		write_dropins
 	fi

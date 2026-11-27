@@ -39,7 +39,8 @@ func run(args []string) error {
 	socket := fs.String("socket", "/var/run/tetragon/tetragon.sock", "Tetragon gRPC unix socket")
 	tetragonBinary := fs.String("tetragon-binary", "", "path to the Tetragon daemon binary (for internal/tetra's own socket-peer verification)")
 	relayGroup := fs.String("relay-group", "tetragon-relay", "POSIX group the socket must be owned by")
-	mode := fs.String("mode", "", "preload | list | check")
+	mode := fs.String("mode", "", "preload | list | check | delete")
+	domain := fs.String("domain", "", "delete mode: the policy's domain (relayd loads its policies in domain \"relay-managed\")")
 	policyName := fs.String("policy-name", "e3-baseline", "preload mode: the TracingPolicy's metadata.name")
 	expectNames := fs.String("expect-names", "", "check mode: comma-separated list of policy names that must be exactly what is loaded (order-independent)")
 	if err := fs.Parse(args); err != nil {
@@ -69,8 +70,17 @@ func run(args []string) error {
 		return list(ctx, client)
 	case "check":
 		return check(ctx, client, *expectNames)
+	case "delete":
+		// Step 6b S11: an out-of-band delete through Tetragon's own
+		// socket, the same DeleteTracingPolicy RPC `tetra tracingpolicy
+		// delete` issues, of a policy relayd manages.
+		if err := client.DeleteTracingPolicy(ctx, *policyName, *domain); err != nil {
+			return fmt.Errorf("DeleteTracingPolicy(%q, domain %q): %w", *policyName, *domain, err)
+		}
+		fmt.Printf("e3tetra: deleted policy %q (domain %q) out of band\n", *policyName, *domain)
+		return nil
 	default:
-		return fmt.Errorf("--mode must be preload, list or check, got %q", *mode)
+		return fmt.Errorf("--mode must be preload, list, check or delete, got %q", *mode)
 	}
 }
 
