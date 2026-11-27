@@ -59,6 +59,16 @@ type config struct {
 	heartbeatDeadline  time.Duration
 	reconnectAssertFor time.Duration
 	overallTimeout     time.Duration
+
+	// step 6b (bundles and state modes)
+	bundles                  listFlag
+	expects                  listFlag
+	trustUpdates             listFlag
+	applyTimeout             time.Duration
+	minHeartbeatsDuringApply int
+	expectAlert              string
+	alertTimeout             time.Duration
+	expectEpochs             listFlag
 }
 
 func parseFlags(args []string) (config, error) {
@@ -74,6 +84,14 @@ func parseFlags(args []string) (config, error) {
 	fs.DurationVar(&c.heartbeatDeadline, "heartbeat-deadline", 90*time.Second, "steady mode: overall deadline to observe --min-heartbeats")
 	fs.DurationVar(&c.reconnectAssertFor, "reconnect-assert-for", 65*time.Second, "revoke mode: how long to watch for a second connection after sending Terminate{REVOKED} before declaring PASS")
 	fs.DurationVar(&c.overallTimeout, "overall-timeout", 150*time.Second, "hard upper bound on this process's own lifetime: if nothing else has reported a result by then (e.g. no connection ever arrived at all, in either mode), FAIL rather than hang forever")
+	fs.Var(&c.bundles, "bundle", "bundles mode: signed bundle envelope file to deliver (repeatable, in order)")
+	fs.Var(&c.expects, "expect", "bundles mode: expected ApplyResult status for the matching --bundle (repeatable)")
+	fs.Var(&c.trustUpdates, "trust-update", "bundles mode: signed root metadata file, sent in one TrustUpdate before the bundles (repeatable, in order)")
+	fs.DurationVar(&c.applyTimeout, "apply-timeout", 240*time.Second, "bundles mode: how long to wait for each ApplyResult")
+	fs.IntVar(&c.minHeartbeatsDuringApply, "min-heartbeats-during-apply", 0, "bundles mode: heartbeats required while waiting for each ApplyResult")
+	fs.StringVar(&c.expectAlert, "expect-alert", "", "bundles mode: after the bundles, wait for an Alert of this kind (e.g. DRIFT)")
+	fs.DurationVar(&c.alertTimeout, "alert-timeout", 150*time.Second, "bundles mode: how long to wait for --expect-alert")
+	fs.Var(&c.expectEpochs, "expect-epoch", "state mode: scope=N the StateReport must carry (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
@@ -82,8 +100,14 @@ func parseFlags(args []string) (config, error) {
 			return config{}, fmt.Errorf("--%s is required", name)
 		}
 	}
-	if c.mode != "steady" && c.mode != "revoke" {
-		return config{}, fmt.Errorf("--mode must be \"steady\" or \"revoke\", got %q", c.mode)
+	switch c.mode {
+	case "steady", "revoke", "state":
+	case "bundles":
+		if len(c.bundles) != len(c.expects) {
+			return config{}, fmt.Errorf("bundles mode: %d --bundle but %d --expect", len(c.bundles), len(c.expects))
+		}
+	default:
+		return config{}, fmt.Errorf("--mode must be steady, revoke, bundles or state, got %q", c.mode)
 	}
 	return c, nil
 }
@@ -110,6 +134,10 @@ func run(args []string) error {
 		script = steadyScript(cfg, resultCh)
 	case "revoke":
 		script = revokeScript(cfg, resultCh)
+	case "bundles":
+		script = bundlesScript(cfg, resultCh)
+	case "state":
+		script = stateScript(cfg, resultCh)
 	}
 
 	srv := testcontroller.NewServer(testcontroller.Config{
