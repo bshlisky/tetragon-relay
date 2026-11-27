@@ -245,3 +245,34 @@ func TestCrashMatrix_FirstBoot(t *testing.T) {
 		})
 	}
 }
+
+// TestCrashMatrix_CommitApplied: the epoch, the LKG entry and the monitor
+// history move together; a crash at any point leaves all three old or
+// all three new (docs/prompts/step-06b.md B1).
+func TestCrashMatrix_CommitApplied(t *testing.T) {
+	set := apply.LKGSet{Mode: "monitor", RawEnvelope: []byte("env"), RootVersion: 1, Policies: []apply.LKGPolicy{
+		{Name: "block-shadow-read", Version: 1, CanonicalJSON: []byte(`{"name":"block-shadow-read"}`)},
+	}}
+	crashMatrix(t,
+		func(s *Store) error {
+			return s.CommitApplied(AppliedCommit{Domain: "relay", Set: set, Scope: "prod-db", Epoch: 4, MonitorNames: []string{"block-shadow-read"}})
+		},
+		func(t *testing.T, s *Store) {
+			defer func() { _ = s.Close() }()
+			epoch, err := s.Current("prod-db")
+			if err != nil {
+				t.Fatalf("Current: %v", err)
+			}
+			seen, err := s.SeenInMonitor("prod-db", "block-shadow-read")
+			if err != nil {
+				t.Fatalf("SeenInMonitor: %v", err)
+			}
+			_, hasLKG := s.Get("relay")
+			old := epoch == 0 && !seen && !hasLKG
+			updated := epoch == 4 && seen && hasLKG
+			if !old && !updated {
+				t.Fatalf("mixed state: epoch=%d seen=%v lkg=%v", epoch, seen, hasLKG)
+			}
+		},
+	)
+}
