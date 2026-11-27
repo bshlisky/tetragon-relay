@@ -63,6 +63,16 @@ type SessionConfig struct {
 	// if positive; tests use a short interval so they do not block for
 	// 15 real seconds.
 	HeartbeatInterval time.Duration
+	// Outbox holds ApplyResults and Alerts produced off the stream loop
+	// (docs/prompts/step-06b.md B2/E1); the stream loop drains it after
+	// every HelloAck and whenever it is notified. Optional: nil means
+	// this session has no apply worker or alerter.
+	Outbox *Outbox
+	// Link records connection state for the health window's
+	// reachability check (B4) and serializes connect/loss transitions
+	// with the apply worker's (see Link). Optional: nil means RunSession
+	// fires those transitions without coordination (no apply worker).
+	Link *Link
 
 	// touchInterval overrides sessionLivenessTouchInterval for the park
 	// loop if positive, and parkTick, if non-nil, runs on every park-loop
@@ -160,17 +170,7 @@ func RunSession(ctx context.Context, cfg SessionConfig) error {
 			return nil //nolint:nilerr
 		}
 
-		if cfg.ControlLoop.SM.Current() == StateDegraded {
-			if ferr := cfg.ControlLoop.SM.Fire(EventConditionsClear); ferr != nil {
-				cfg.Auditor.Record(AuditEvent{Step: "session_state_transition_failed", Detail: "DEGRADED -> CONNECTING", Err: ferr})
-			}
-		}
-		if ferr := cfg.ControlLoop.SM.Fire(EventHelloAck); ferr != nil {
-			cfg.Auditor.Record(AuditEvent{Step: "session_state_transition_failed", Detail: "CONNECTING -> SYNCING", Err: ferr})
-		}
-		if ferr := cfg.ControlLoop.SM.Fire(EventInSync); ferr != nil {
-			cfg.Auditor.Record(AuditEvent{Step: "session_state_transition_failed", Detail: "SYNCING -> STEADY", Err: ferr})
-		}
+		linkUp(cfg, func() { fireConnected(cfg) })
 		cfg.Auditor.Record(AuditEvent{Step: "session_connected", Detail: "Hello/HelloAck complete"})
 
 		reconnect, runErr := runStreamLoop(ctx, cfg, stream, touch)
@@ -179,11 +179,7 @@ func RunSession(ctx context.Context, cfg SessionConfig) error {
 			cfg.Auditor.Record(AuditEvent{Step: "session_stream_closed", Err: runErr})
 		}
 
-		if cfg.ControlLoop.SM.Current() != StateRevoked {
-			if ferr := cfg.ControlLoop.SM.Fire(EventStreamLost); ferr != nil {
-				cfg.Auditor.Record(AuditEvent{Step: "session_state_transition_failed", Detail: "-> CONNECTING (stream lost)", Err: ferr})
-			}
-		}
+		linkDown(cfg, func() { fireStreamLost(cfg) })
 		if cfg.ControlLoop.SM.Current() == StateRevoked {
 			persistRevocation(cfg)
 			continue // the next iteration's check parks
@@ -191,6 +187,64 @@ func RunSession(ctx context.Context, cfg SessionConfig) error {
 		if !reconnect {
 			return nil
 		}
+	}
+}
+
+// applyOwnsState reports whether the apply worker currently owns the
+// state machine (APPLYING or ROLLBACK). Connection transitions are left
+// to the worker in those states; it settles them when the apply ends
+// (see Link).
+func applyOwnsState(s State) bool { return s == StateApplying || s == StateRollback }
+
+func linkUp(cfg SessionConfig, fire func()) {
+	if cfg.Link != nil {
+		cfg.Link.Up(fire)
+		return
+	}
+	fire()
+}
+
+func linkDown(cfg SessionConfig, fire func()) {
+	if cfg.Link != nil {
+		cfg.Link.Down(fire)
+		return
+	}
+	fire()
+}
+
+// fireConnected fires the connect-time transitions: DEGRADED ->
+// CONNECTING if needed, then HelloAck and InSync (see RunSession's doc
+// comment for why InSync follows at once). If an apply is in progress
+// (the stream dropped and came back while APPLYING), nothing is fired:
+// the worker returns the agent to STEADY when it settles.
+func fireConnected(cfg SessionConfig) {
+	sm := cfg.ControlLoop.SM
+	if applyOwnsState(sm.Current()) {
+		cfg.Auditor.Record(AuditEvent{Step: "session_connected_during_apply", Detail: "state left to the apply worker"})
+		return
+	}
+	if sm.Current() == StateDegraded {
+		if ferr := sm.Fire(EventConditionsClear); ferr != nil {
+			cfg.Auditor.Record(AuditEvent{Step: "session_state_transition_failed", Detail: "DEGRADED -> CONNECTING", Err: ferr})
+		}
+	}
+	if ferr := sm.Fire(EventHelloAck); ferr != nil {
+		cfg.Auditor.Record(AuditEvent{Step: "session_state_transition_failed", Detail: "CONNECTING -> SYNCING", Err: ferr})
+	}
+	if ferr := sm.Fire(EventInSync); ferr != nil {
+		cfg.Auditor.Record(AuditEvent{Step: "session_state_transition_failed", Detail: "SYNCING -> STEADY", Err: ferr})
+	}
+}
+
+// fireStreamLost fires StreamLost unless the agent is REVOKED or an
+// apply owns the state machine.
+func fireStreamLost(cfg SessionConfig) {
+	sm := cfg.ControlLoop.SM
+	if cur := sm.Current(); cur == StateRevoked || applyOwnsState(cur) {
+		return
+	}
+	if ferr := sm.Fire(EventStreamLost); ferr != nil {
+		cfg.Auditor.Record(AuditEvent{Step: "session_state_transition_failed", Detail: "-> CONNECTING (stream lost)", Err: ferr})
 	}
 }
 
@@ -334,6 +388,16 @@ func runStreamLoop(ctx context.Context, cfg SessionConfig, stream ControlStream,
 	touchTicker := time.NewTicker(sessionLivenessTouchInterval)
 	defer touchTicker.Stop()
 
+	var outboxNotify <-chan struct{}
+	if cfg.Outbox != nil {
+		outboxNotify = cfg.Outbox.Notify()
+		// Anything queued while disconnected goes out right after
+		// HelloAck (E1).
+		if serr := drainOutbox(cfg, stream, out); serr != nil {
+			return true, serr
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -366,10 +430,39 @@ func runStreamLoop(ctx context.Context, cfg SessionConfig, stream ControlStream,
 			if serr := stream.Send(hb); serr != nil {
 				return true, serr
 			}
+			if cfg.Link != nil {
+				cfg.Link.Acked()
+			}
 			cfg.ControlLoop.CheckCertExpiry(cfg.Clock())
+
+		case <-outboxNotify:
+			touch()
+			if serr := drainOutbox(cfg, stream, out); serr != nil {
+				return true, serr
+			}
 
 		case <-touchTicker.C:
 			touch()
+		}
+	}
+}
+
+// drainOutbox sends every queued Outbox message on stream, assigning each
+// the next outbound seq. A message is removed only after the transport
+// accepted it, so one whose Send failed is retried on the next stream.
+func drainOutbox(cfg SessionConfig, stream ControlStream, out *OutboundSeq) error {
+	for {
+		msg := cfg.Outbox.Peek()
+		if msg == nil {
+			return nil
+		}
+		msg.Seq = out.Next()
+		if err := stream.Send(msg); err != nil {
+			return err
+		}
+		cfg.Outbox.Pop(msg)
+		if cfg.Link != nil {
+			cfg.Link.Acked()
 		}
 	}
 }

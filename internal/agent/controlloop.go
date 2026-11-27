@@ -113,6 +113,11 @@ type ControlLoop struct {
 	Clock    func() time.Time
 	Snapshot SnapshotProvider
 	Rotator  IdentityRotator
+	// Jobs receives PolicyBundle envelopes for the apply worker
+	// (docs/prompts/step-06b.md B2). Optional: when nil (a control loop
+	// built without bundle processing, e.g. in tests), a PolicyBundle is
+	// answered with APPLY_FAILED and nothing else happens.
+	Jobs JobSink
 
 	mu            sync.Mutex
 	revokedReason string
@@ -125,6 +130,13 @@ func (cl *ControlLoop) RevokedReason() string {
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
 	return cl.revokedReason
+}
+
+// JobSink is where the control loop hands work it must not do on the
+// stream loop's goroutine (*ApplyWorker implements it). SubmitBundle must
+// return without blocking.
+type JobSink interface {
+	SubmitBundle(envelope []byte)
 }
 
 // NewControlLoop constructs a ControlLoop, rejecting any nil dependency.
@@ -204,14 +216,20 @@ func (cl *ControlLoop) HandleControllerMessage(ctx context.Context, seqTracker *
 		return Outcome{Close: true, Reconnect: true}, nil
 
 	case *controlv1.ControllerMessage_Bundle:
-		// docs/prompts/step-06a.md D2: "respond with an ApplyResult...
-		// that says the agent does not yet process them, without
-		// touching state." 6b implements real PolicyBundle handling.
-		result := &controlv1.ApplyResult{
-			Status: controlv1.ApplyResult_APPLY_FAILED,
-			Detail: "relayd does not process PolicyBundle yet (step 6a); see step 6b",
+		// docs/prompts/step-06b.md B2: never block the stream loop.
+		// The raw envelope bytes go to the apply worker's pending slot
+		// unmodified (never re-encoded); the worker sends the
+		// ApplyResult through the Outbox when it is done.
+		if cl.Jobs == nil {
+			result := &controlv1.ApplyResult{
+				BundleDigest: bundleDigest(body.Bundle.GetEnvelope()),
+				Status:       controlv1.ApplyResult_APPLY_FAILED,
+				Detail:       "relayd has no apply worker configured",
+			}
+			return Outcome{Reply: cl.wrap(out, applyResultMessage(result))}, nil
 		}
-		return Outcome{Reply: cl.wrap(out, &controlv1.AgentMessage{Body: &controlv1.AgentMessage_ApplyResult{ApplyResult: result}})}, nil
+		cl.Jobs.SubmitBundle(body.Bundle.GetEnvelope())
+		return Outcome{}, nil
 
 	case *controlv1.ControllerMessage_TrustUpdate:
 		// Same rule, via Alert (no ApplyResult shape fits a trust
