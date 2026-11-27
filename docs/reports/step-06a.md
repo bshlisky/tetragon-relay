@@ -306,115 +306,120 @@ package itself appears in `internal/agent`), and this repository's own packages.
 - Every known limitation from the first partial report's section 8 not specifically
   closed above remains (no production Enroller, in particular -- by design, C2).
 
-## 9. What remains: E3
+## 9. E3: relayd under the production unit, end to end (done)
 
-**Not started.** docs/prompts/step-06a.md Part E3: integration (CI) running `relayd` as a
-real process under the production systemd unit's sandbox settings (`User=`, empty
-capabilities, `ProtectSystem=strict`, `ReadWritePaths`, `ProtectProc=invisible`), with
-swtpm via the `testtpm` build tag, against real Tetragon and the test controller, plus the
-step-06a-resume.md R6A-1 addition (a sixth scenario: a stalled session runner, via an
-injected test hook, causes the watchdog ping to be withheld and systemd restarts `relayd`).
+**Final green run: 45927274396 on `6853583`.** ci ✓ (includes the swtpm-backed internal/tpm steps, which are the "TPM job", see step-05a §C1/D1), integration ✓, e3 ✓. The full history of attempts is in the Progress log at the end of this report. Binding decisions: docs/prompts/step-06a-e3.md, docs/reviews/step-06a-e3-decisions.md (D1–D4).
 
-This was deliberately not attempted in this session (the user's own choice, offered three
-options: attempt E3 now, a partial E3 covering only the non-enrollment scenarios, or stop
-and report -- "stop and report" was chosen) given the realistic cost: a brand-new CI job
-combining systemd, a real TPM (swtpm), real Tetragon and a from-scratch identity-
-provisioning step has meaningful open-ended debugging risk, at ~15-20 minutes per GitHub
-Actions round trip, with no way to iterate faster from this environment.
+### 9.1 How E3 runs relayd
 
-### The concrete blocker and its resolution, worked out in this session
+`scripts/e3-run.sh` installs `packaging/systemd/tetragon-relay.service` byte for byte into `/etc/systemd/system/` (checked with `cmp`) and drives it with `systemctl start/stop/restart`. Every directive applies as in production, including both `ExecStartPre=+relay-probe` lines (TPM provisioning, then host facts on every start), `Type=notify`, `WatchdogSec=30s`, `Restart=always` and `RestartSec=2s`. The e3 job also runs `systemd-analyze verify` on the unit and fails on any output (D4). On the green run it printed nothing.
 
-Three of E3's scenarios (controller-unavailable -> DEGRADED, clean-start-to-STEADY,
-Terminate{REVOKED}) need `relayd` to actually hold an enrolled identity, which production
-builds never do (C2: no production Enroller exists). `internal/identity.TestCA`/
-`NewTestEnroller` (build tag `testca`) already provide exactly the in-process enrollment
-primitive `internal/controlclient`'s own integration test uses, but `relayd` runs as a
-**separate OS process** under E3 (not an in-process test), and `TestCA.issue` needs the
-CA's private key, which cannot reasonably be handed to `relayd` itself (that would make
-`relayd` its own CA, a different and more confusing test shortcut than this project's
-existing ones).
+Runner setup (CI environment, not relay configuration):
+- Production relayd at the unit's own `ExecStart` path, `/usr/libexec/tetragon-relay/relayd`. relayd-e3 (`-tags testca,testtpm`) and relay-probe (no tags) are installed next to it.
+- Tetragon v1.8.0 at `/usr/local/bin/tetragon` (the path the host-facts `ExecStartPre` hashes), run from a CI-only `/etc/systemd/system/tetragon.service`, so the relay unit's `BindsTo=`/`After=tetragon.service` resolve (run 45923100259).
+- One TPM for every scenario: swtpm through the kernel's `tpm_vtpm_proxy`, which gives a real `/dev/tpmrm0` (group `tss`, 0660). A second TCP swtpm cannot work: the store and host-signer blobs are bound to the TPM that created them (`TPM_RC_INTEGRITY`, run 45854346976).
+- `cmd/testenroll` runs once, after S2, as `tetragon-relay`, outside the sandbox. It enrolls the TPM-held key through `CertManager.Enroll` (C2). The test controller's cert and key are written to a runner-owned directory relayd cannot see (`PrivateTmp`).
 
-The resolution (not yet built): a new **out-of-band provisioning tool**,
-`cmd/testenroll` (build tags `testca && testtpm`), run by the E3 CI job *before* starting
-`relayd`, not by `relayd` itself:
+**Every drop-in line** (`/etc/systemd/system/tetragon-relay.service.d/`, replaced per scenario):
 
-1. Opens the **same** TPM device (the `tcp:host:port` swtpm transport
-   `cmd/relayd/tpmdevice_testtpm.go` already supports) `relayd` will use.
-2. Calls `tpm.NewOrLoadHostSigner(tp, storeDir+"/host-signer.json")` -- the exact same
-   function and path `cmd/relayd/main.go`'s own `run()` calls -- to obtain (and persist)
-   the host's TPM-backed signer, so `relayd`, started afterward, loads the identical key.
-3. Constructs an `identity.NewTestCA(ttl)`, writes its certificate to the path
-   `relay.yaml`'s `identity.trust_bundle` will point at, and issues the test controller's
-   own server certificate from the same CA (the documented test-only simplification
-   section 6/the first partial report's section 6 already records: one CA for both agent
-   and controller certificates in tests).
-4. Issues a one-time join token (`ca.IssueJoinToken()`) and calls
-   `identity.NewCertManager(...).Enroll(ctx, now)` with `identity.NewTestEnroller(ca,
-   token)` as the enroller -- the **same** `CertManager.Enroll` code path
-   `docs/reports/step-05b.md` already built and tested, just invoked from this new tool
-   instead of from inside `relayd`. `Enroll` already calls `persistChain(cfg.StoreDir,
-   chain)` internally, writing the chain to the exact `storeDir` constant `cmd/relayd/
-   main.go` passes to its own `identity.Config.StoreDir`.
-5. `relayd` (built with `testca,testtpm` tags for this job only -- a production build is
-   never touched by this tool or given a way to invoke it) is started *after* this tool
-   exits 0. Its own `certManager.Load()` call (already unconditional in `cmd/relayd/
-   main.go`, today only ever finding `ErrNoPersistedChain`) finds the chain this tool
-   persisted, and D3's `RunSession` goroutine starts for real, exactly as this session's
-   `cmd/relayd/main.go` wiring already does when `len(certManager.Chain()) > 0`.
+| Scenarios | File | Line | Why |
+|---|---|---|---|
+| S1, S2 | (none) | — | The production unit runs unmodified. |
+| S3–S6 | `e3.conf` | `ExecStart=` | Clears the unit's ExecStart; a drop-in must do this before setting a new one. |
+| S3–S6 | `e3.conf` | `ExecStart=/usr/libexec/tetragon-relay/relayd-e3 --config /etc/tetragon-relay/relay.yaml` | The testca,testtpm build (C4), with the same arguments. `ExecStartPre` is not touched. |
+| S3–S6 | `e3.conf` | `IPAddressAllow=` | Clears the unit's `10.20.0.0/24` (the real management network, absent on a runner). `IPAddressDeny=any` stays. |
+| S3–S6 | `e3.conf` | `IPAddressAllow=127.0.0.1/32` | The E3 controller's address, and nothing else. |
+| S5 | `e3-s5.conf` | `Environment=RELAYD_E3_DEGRADED_TIMEOUT=10s` | testca-only override of the 5-minute DEGRADED threshold (permitted by the E3 prompt, S5). |
+| S6 | `e3-s6.conf` | `Environment=RELAYD_E3_STALL_COMPONENT=session_runner` | testca-only hook that stops the session runner's liveness touches. |
 
-This needs **no new network protocol, no new wire format, and no change to any production
-code path** -- `cmd/testenroll` is purely new test infrastructure, calling existing,
-already-tested library functions out of process order relative to where they are normally
-called. The two scenarios that need no identity at all (SIGTERM leaves Tetragon's policies
-unchanged; a production build starts, stays UNENROLLED, still enforces LKG) do not need
-this tool and could be built first.
+S4 runs last: the persisted REVOKED marker (ADR 0035) is terminal for the host's store.
 
-### Remaining E3 work, in the order a fresh session should tackle it
+### 9.2 Evidence per scenario (run 45927274396; journal excerpts with the `time` field removed)
 
-1. `cmd/testenroll` (above).
-2. A CI job (new, or an addition to `.github/workflows/ci.yml`'s existing `integration`
-   job) that: installs `swtpm` (already done for the `tpm`/`internal/tpm` coverage job --
-   reuse that step); starts it; provisions the SRK and NV counter (`relay-probe
-   --provision-tpm`, already exists); writes `relay.yaml`, the TPM-backed host-facts file,
-   and the RPM-shipped initial trust root to the paths `cmd/relayd/main.go`'s constants
-   expect; runs `cmd/testenroll` for the scenarios that need it; starts the real Tetragon
-   binary (the existing `integration` job's own steps already do this, reusable almost
-   verbatim); starts `internal/testcontroller`'s server (via a small new test-only driver
-   binary or a Go test's own `grpc.Serve` call, with an E2 `Script` per scenario) listening
-   on the address `relay.yaml`'s `controller.endpoints` names; starts `relayd` itself as a
-   **transient systemd unit** (`systemd-run` with every directive
-   `packaging/systemd/tetragon-relay.service` declares, matching how the existing
-   `integration` job already starts Tetragon itself as a transient unit, step-03a-review.md
-   R3-1's own precedent) built with `-tags testca,testtpm`.
-3. The six scenarios themselves, each asserted from the CI job's own shell/Go steps:
-   a. Clean start to STEADY with heartbeats arriving (`internal/testcontroller`'s `Script`
-      calls `WaitForAgentMessage` in a loop and asserts at least two `Heartbeat`s arrive).
-   b. `Terminate{REVOKED}` (`Script` calls `SendTerminate(..., controlv1.Terminate_REVOKED,
-      ...)`) stops reconnecting -- assert no new TCP connection arrives at the test
-      controller's listener for some bounded window afterward.
-   c. Controller unavailable (close the test controller's listener, or never start it for
-      this scenario) leads to `DEGRADED` after the threshold -- needs a way to observe
-      `relayd`'s own state from outside the process (not built yet; an operator-facing
-      status surface does not exist in this repository at all today -- the simplest
-      option is almost certainly reading `relayd`'s own structured audit log once a real,
-      non-`FakeAuditor` sink exists, step 7 scope, or a new, test-only `--state-file` debug
-      flag gated behind a build tag, which would need its own small design) -- while
-      confirming Tetragon's own `ListTracingPolicies` output is unchanged throughout
-      (the existing `integration` job's own pattern for "nothing unexpected is loaded").
-   d. SIGTERM leaves Tetragon's loaded policies unchanged -- `systemctl stop` the unit,
-      then run the existing `apply.itest`'s `TestZZZFinalCheck_NoTracingPoliciesLeftLoaded`-
-      style check.
-   e. A production build (no test tags) starts, stays `UNENROLLED`, still enforces LKG --
-      needs no `cmd/testenroll` step at all; can be built and verified first,
-      independently of the rest.
-   f. (R6A-1's addition) A stalled session runner, via an injected test hook, causes the
-      watchdog ping to be withheld and systemd restarts `relayd` -- needs a new,
-      test-only hook into `LivenessRegistry` (e.g. a build-tag-gated environment variable
-      `relayd` checks once at startup to skip calling `Liveness.Touch` from a specific
-      component, or a SIGUSR1-triggered pause) that a production build can never reach;
-      not designed yet.
-4. Update this report's section 13 with the evidence per scenario and the run numbers,
-   per docs/prompts/step-06a.md's own report instructions.
+**S1 — PASS.** The production build starts under the unit, stays UNENROLLED, sends READY=1, and the baseline is unchanged. Both ExecStartPre lines ran; `/run/tetragon-relay/host-facts.json` existed; the journal had no `host_facts`, `host_facts_boot_id` or `agent_build_digest` record (D3).
+```
+02:33:16 relayd[3474]: {"step":"trust_root","detail":"first boot: adopted initial root version 1"}
+02:33:16 relayd[3474]: {"step":"identity","detail":"no persisted identity and no production Enroller available; staying UNENROLLED ..."}
+02:33:16 systemd[1]: Started tetragon-relay.service - Tetragon relay agent.
+e3tetra: loaded policies unchanged: [e3-baseline]
+```
+
+**S2 — PASS.** SIGTERM: a clean exit (`Result=success`), Tetragon's policies unchanged.
+```
+02:33:21 relayd[3588]: {"step":"shutdown","detail":"signal received; stopping (Tetragon policies left unchanged)"}
+02:33:21 systemd[1]: tetragon-relay.service: Deactivated successfully.
+```
+
+**S3 — PASS.** Clean start to STEADY, then heartbeats every 15 s: Hello at 02:33:24, then heartbeats at 02:33:39, 02:33:54 and 02:34:09. No host-facts or `/proc/self/exe` read failure in the journal.
+```
+02:33:24 relayd-e3[3751]: {"step":"state_transition","detail":"CONNECTING -> SYNCING (hello_ack)"}
+e3controller: heartbeat 1/3 from connection #1 at 2026-11-27T02:33:39Z
+e3controller: heartbeat 2/3 from connection #1 at 2026-11-27T02:33:54Z
+e3controller: heartbeat 3/3 from connection #1 at 2026-11-27T02:34:09Z
+```
+
+**S5 — PASS.** No controller is running: DEGRADED after the testca-shortened 10 s threshold. relayd stays active, and the baseline is unchanged.
+```
+02:34:10 relayd-e3[3886]: (start)
+02:34:20 relayd-e3[3886]: {"step":"state_transition","detail":"CONNECTING -> DEGRADED (connect_timeout)"}
+```
+
+**S6 — PASS.** The stalled session runner withholds WATCHDOG=1, the audit record names it, systemd's own watchdog kills relayd, and `Restart=always` restarts it. NRestarts went from 0 to 2 in 90 s.
+```
+02:35:03 relayd-e3[4016]: {"step":"watchdog_withheld","detail":"component \"session_runner\" has not reported in 30.001625558s; withholding WATCHDOG=1"}
+02:35:18 relayd-e3[4016]: {"step":"watchdog_withheld","detail":"component \"session_runner\" has not reported in 45.00234876s; ..."}
+02:35:18 systemd[1]: tetragon-relay.service: Watchdog timeout (limit 30s)!
+02:35:20 systemd[1]: tetragon-relay.service: Scheduled restart job, restart counter is at 1.
+02:36:06 relayd-e3[4052]: {"step":"watchdog_withheld", ... 45.000218493s ...}
+02:36:08 systemd[1]: tetragon-relay.service: Scheduled restart job, restart counter is at 2.
+```
+
+**S4 — PASS.** `Terminate{REVOKED}`: relayd persists REVOKED and parks (D1/D2). The harness then restarts relayd. The new process restores REVOKED without dialing, the controller sees no reconnect within 65 s, the unit is still active, no watchdog timeout fires, and the baseline is unchanged.
+```
+02:36:20 relayd-e3[4217]: {"step":"state_transition","detail":"STEADY -> REVOKED (terminate_revoked)"}
+02:36:20 relayd-e3[4217]: {"step":"revocation_persisted","detail":"REVOKED: e3controller: S4 revoke scenario"}
+02:36:20 relayd-e3[4217]: {"step":"session_parked","detail":"REVOKED: no controller connection until shutdown or operator re-enrollment"}
+02:36:21 systemd[1]: Stopped tetragon-relay.service ...   (harness restart)
+02:36:22 relayd-e3[4252]: {"step":"state_transition","detail":"CONNECTING -> REVOKED (terminate_revoked)"}
+02:36:22 relayd-e3[4252]: {"step":"revocation_restored","detail":"persisted REVOKED since 2026-11-27T02:36:20Z (REVOKED: e3controller: S4 revoke scenario); not connecting"}
+02:36:22 relayd-e3[4252]: {"step":"session_parked", ...}
+e3controller: no reconnect observed within 1m5s
+```
+
+### 9.3 C1: production relayd's symbol table (`make verify-no-test-symbols`, ci job of run 45927274396)
+
+The check builds relayd with no tags, confirms through `go version -m` that the binary has no `-tags` build setting, then greps `go tool nm` for `testca|testenroll|TestCA|NewTestEnroller` (case-insensitive) and fails on any match.
+```
+== go version -m (confirming no build tags) ==
+	build	GOARCH=amd64
+	build	GOOS=linux
+	build	vcs.revision=6853583f1b6d0775ebba17171a60c4868b120bc4
+	build	vcs.modified=false
+== go tool nm (symbol table) ==
+verify-no-test-symbols OK: no testca/testenroll/TestCA/NewTestEnroller symbol in a tagless relayd build
+```
+
+### 9.4 C4: every tag-guarded file
+
+relayd-e3 differs from production only through these files (`grep -l '^//go:build.*\(testca\|testtpm\|e3\)'`):
+
+| Constraint | File | What differs |
+|---|---|---|
+| `testtpm` / `!testtpm` | `cmd/relayd/tpmdevice_testtpm.go` / `cmd/relayd/tpmdevice.go` | testtpm defines `--tpm-device` and also accepts `tcp:<cmd>,<platform>`; production accepts only `/dev/tpmrm0` and has no flag. E3 uses the default `/dev/tpmrm0` in every scenario, so this code path is compiled in but unused. |
+| `testca` / `!testca` | `internal/agent/e3hooks_testca.go` / `internal/agent/e3hooks.go` | `RELAYD_E3_STALL_COMPONENT` (S6) and `RELAYD_E3_DEGRADED_TIMEOUT` (S5), read once. In production both functions return zero values. |
+| `testca` | `internal/identity/testca.go` | The test CA and test enroller (linked by testenroll, not by relayd's own startup). |
+| `testca && testtpm` | `cmd/testenroll/main.go` | Test-only enrollment tool (C1/C2). |
+| `e3` | `cmd/e3controller`, `cmd/e3root`, `cmd/e3tetra` | Harness tools; never part of relayd. |
+| test files | `cmd/relayd/tpmdevice_testtpm_test.go`, `internal/agent/e3hooks_testca_test.go`, `internal/identity/testca_test.go`, `internal/controlclient/integration_test.go` | Tests only. |
+
+### 9.5 D3: every `/proc` and `/sys` path relayd reads, under `ProcSubset=pid` and `ProtectSystem=strict`
+
+| Path | Code | Result under the unit |
+|---|---|---|
+| `/proc/self/exe` | `cmd/relayd/session.go:78` (Hello `agent_build_digest`) | Works: `ProcSubset=pid` keeps the per-process directories, and `ProtectProc=invisible` hides only other users' processes. Evidence: S1 and S3 journals have no `agent_build_digest` failure record (failures used to be thrown away silently; they are now audited). |
+| `/sys/fs/cgroup/<unit>/cgroup.procs` (+ statfs `/sys/fs/cgroup`) | `internal/tetra/peercgroup_linux.go` | Works: read-only under `ProtectControlGroups=yes`, and it is only read. Evidence: every scenario passes the Tetragon dial, which requires this check. |
+| `/proc/sys/kernel/random/boot_id` | `internal/hostprobe/bootid_linux.go` | Hidden by `ProcSubset=pid` (run 45858158620: `no such file or directory`). Still compiled into relayd's binary but never called by relayd since ADR 0034; only relay-probe calls it, as root. |
+| `/sys/fs/bpf/` | `internal/guard/protected.go` | Only a string in the protected-path list; never opened. |
 
 ## 10. Open questions for the architect
 
@@ -527,7 +532,7 @@ that actually drives this table through a live process: it fires `EventHelloAck`
 
 ## 14. E3 integration evidence per scenario
 
-None. E3 is not done (section 9).
+See section 9 (run 45927274396, all six scenarios PASS).
 
 ## Progress log
 
@@ -539,4 +544,5 @@ One dated line per push: commit, what changed, the CI result observed.
 - 2026-11-26 `6f359b4` (with D1 `a440844`, D2 `8a9d3af`/`0bd2f19`, harness `f58b060`): run 45873245634: ci ✓, integration ✓, e3 ✗ at the new `systemd-analyze verify` step. It exited non-zero with no output: the step shell's `-e` aborted at the `$(…)` capture before printing. Scenarios did not run. Fixed so rc and output are always captured and printed.
 - 2026-11-26 `eb9c4c2` (verify rc capture): run 45876885071: ci ✓, integration ✓, e3 ✗. `systemd-analyze verify` returned rc=1 with no output on stderr; scenarios did not run. Next: force `SYSTEMD_LOG_TARGET=console`.
 - 2026-11-27 `d9a49c9` (verify logs to console): run 45923100259: ci ✓, integration ✓, e3 ✗ at verify, now with its reason: `Failed to create tetragon-relay.service/start: Unit tetragon.service not found`. The relay unit's `BindsTo=tetragon.service` can't be resolved against the transient systemd-run Tetragon. Fix: the e3 job runs Tetragon from a real `/etc/systemd/system/tetragon.service` (CI scaffolding for Tetragon); the check and the relay unit are unchanged.
-- 2026-11-27 `3c1d2f6` (Tetragon from a unit file): run 45924877288: ci ✓, integration ✓, e3 ✗. `systemd-analyze verify` passed with no output. S1, S2, S3, S5, S6 PASS. S6: `watchdog_withheld` names `session_runner`; `Watchdog timeout (limit 30s)!` twice; NRestarts 0→2. S4 FAIL, but in the harness, not in relayd. relayd logged `revocation_persisted`, then after the mid-scenario restart `revocation_restored`, never reconnected, and no watchdog timeout fired. e3controller's revoke window `select` returned on the closed stream's ctx without reporting a result (`no result after 2m30s`). Fix: the window is now a timer independent of the stream.
+- 2026-11-27 `ea74a23` (Tetragon from a unit file): run 45924877288: ci ✓, integration ✓, e3 ✗. `systemd-analyze verify` passed with no output. S1, S2, S3, S5, S6 PASS. S6: `watchdog_withheld` names `session_runner`; `Watchdog timeout (limit 30s)!` twice; NRestarts 0→2. S4 FAIL, but in the harness, not in relayd. relayd logged `revocation_persisted`, then after the mid-scenario restart `revocation_restored`, never reconnected, and no watchdog timeout fired. e3controller's revoke window `select` returned on the closed stream's ctx without reporting a result (`no result after 2m30s`). Fix: the window is now a timer independent of the stream.
+- 2026-11-27 `6853583` (e3controller S4 window timer): run 45927274396: ci ✓, integration ✓, e3 ✓. **S1–S6 all PASS**; `systemd-analyze verify` clean. Section 9 now holds the evidence. (Correction: the previous line first named the Tetragon unit-file commit `3c1d2f6`; it is `ea74a23`.)
