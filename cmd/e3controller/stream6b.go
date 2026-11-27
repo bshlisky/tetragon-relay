@@ -100,8 +100,65 @@ func drain(ctx context.Context, n int64, msgs <-chan *controlv1.AgentMessage, er
 	}
 }
 
+// hbWatch enforces --max-heartbeat-gap (step 7b D0): from the connection
+// on, no two heartbeats further apart than limit.
+type hbWatch struct {
+	limit, worst time.Duration
+	last         time.Time
+	count        int
+}
+
+func (w *hbWatch) observe(m *controlv1.AgentMessage) error {
+	if m.GetHeartbeat() == nil {
+		return nil
+	}
+	now := time.Now()
+	gap := now.Sub(w.last)
+	w.worst = max(w.worst, gap)
+	w.last = now
+	w.count++
+	if w.limit > 0 && gap > w.limit {
+		return fmt.Errorf("heartbeat gap %s > %s (heartbeat %d)", gap.Round(time.Millisecond), w.limit, w.count)
+	}
+	return nil
+}
+
+func (w *hbWatch) check() error {
+	if gap := time.Since(w.last); w.limit > 0 && gap > w.limit {
+		return fmt.Errorf("no heartbeat for %s > %s (after heartbeat %d)", gap.Round(time.Millisecond), w.limit, w.count)
+	}
+	return nil
+}
+
 func runBundles(ctx context.Context, cfg config, n int64, stream testcontroller.ScriptStream, msgs <-chan *controlv1.AgentMessage, errs <-chan error) error {
 	seq := testcontroller.NewNextSeqAfterHelloAck()
+	hb := &hbWatch{limit: cfg.maxHeartbeatGap, last: time.Now()}
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	if cfg.bundleDelay > 0 {
+		fmt.Printf("e3controller: [%s] waiting %s before the first bundle\n", stamp(), cfg.bundleDelay)
+		delay := time.After(cfg.bundleDelay)
+	wait:
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case err := <-errs:
+				return fmt.Errorf("stream ended during --bundle-delay: %w", err)
+			case <-delay:
+				break wait
+			case <-tick.C:
+				if err := hb.check(); err != nil {
+					return err
+				}
+			case m := <-msgs:
+				logAgentMessage(n, m)
+				if err := hb.observe(m); err != nil {
+					return err
+				}
+			}
+		}
+	}
 	if len(cfg.trustUpdates) > 0 {
 		var roots [][]byte
 		for _, p := range cfg.trustUpdates {
@@ -137,8 +194,15 @@ func runBundles(ctx context.Context, cfg config, n int64, stream testcontroller.
 				return fmt.Errorf("stream ended waiting for bundle %d's ApplyResult: %w", i+1, err)
 			case <-deadline:
 				return fmt.Errorf("no ApplyResult for bundle %d within %s", i+1, cfg.applyTimeout)
+			case <-tick.C:
+				if err := hb.check(); err != nil {
+					return fmt.Errorf("bundle %d: %w", i+1, err)
+				}
 			case m := <-msgs:
 				logAgentMessage(n, m)
+				if err := hb.observe(m); err != nil {
+					return fmt.Errorf("bundle %d: %w", i+1, err)
+				}
 				if m.GetHeartbeat() != nil {
 					heartbeats++
 				}
@@ -154,6 +218,9 @@ func runBundles(ctx context.Context, cfg config, n int64, stream testcontroller.
 			return fmt.Errorf("bundle %d: only %d heartbeats while waiting for its ApplyResult, want >= %d", i+1, heartbeats, cfg.minHeartbeatsDuringApply)
 		}
 		fmt.Printf("e3controller: bundle %d OK: %s (%d heartbeats while waiting)\n", i+1, res.GetStatus(), heartbeats)
+	}
+	if cfg.maxHeartbeatGap > 0 {
+		fmt.Printf("e3controller: heartbeat gaps OK: %d heartbeats, worst gap %s <= %s\n", hb.count, hb.worst.Round(time.Millisecond), cfg.maxHeartbeatGap)
 	}
 	if cfg.expectAlert != "" {
 		deadline := time.After(cfg.alertTimeout)

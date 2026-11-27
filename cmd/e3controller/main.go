@@ -69,6 +69,10 @@ type config struct {
 	expectAlert              string
 	alertTimeout             time.Duration
 	expectEpochs             listFlag
+
+	// step 7b D0 (P5-CONTROL-UNDER-LOAD)
+	bundleDelay     time.Duration
+	maxHeartbeatGap time.Duration
 }
 
 func parseFlags(args []string) (config, error) {
@@ -91,6 +95,8 @@ func parseFlags(args []string) (config, error) {
 	fs.IntVar(&c.minHeartbeatsDuringApply, "min-heartbeats-during-apply", 0, "bundles mode: heartbeats required while waiting for each ApplyResult")
 	fs.StringVar(&c.expectAlert, "expect-alert", "", "bundles mode: after the bundles, wait for an Alert of this kind (e.g. DRIFT)")
 	fs.DurationVar(&c.alertTimeout, "alert-timeout", 150*time.Second, "bundles mode: how long to wait for --expect-alert")
+	fs.DurationVar(&c.bundleDelay, "bundle-delay", 0, "bundles mode: wait this long after the connection before sending the first bundle (heartbeats are watched meanwhile)")
+	fs.DurationVar(&c.maxHeartbeatGap, "max-heartbeat-gap", 0, "bundles mode: FAIL if two heartbeats (or the connection and the first heartbeat) are ever further apart than this, up to the last ApplyResult; 0 disables")
 	fs.Var(&c.expectEpochs, "expect-epoch", "state mode: scope=N the StateReport must carry (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err

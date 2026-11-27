@@ -1101,6 +1101,102 @@ scenario_p4_rss() {
 	record_result P4-RSS "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
 }
 
+# flood SECONDS LOOPS OUTFILE: LOOPS shell loops exec /usr/bin/true for
+# SECONDS (each exec is an exec and an exit event), with xtrace off (the
+# job runs under set -x). Each loop appends its iteration count to OUTFILE
+# when it ends; flood_events OUTFILE is the number of events generated.
+flood() {
+	local secs="$1" nloops="$2" out="$3"
+	: >"${out}"
+	for _ in $(seq 1 "${nloops}"); do
+		(set +x; n=0; end=$((SECONDS + secs)); while [ "${SECONDS}" -lt "${end}" ]; do /usr/bin/true; n=$((n + 1)); done; echo "${n}" >>"${out}") &
+		flood_pids+=($!)
+	done
+}
+
+flood_events() {
+	awk '{s += 2 * $1} END {print s + 0}' "$1"
+}
+
+# ---------------------------------------------------------------------
+# P5-CONTROL-UNDER-LOAD (docs/reviews/step-07b-decisions.md D0): the
+# control plane keeps its timing under the heaviest exec flood the runner
+# can generate. With relayd under the real unit (CPUQuota=25%) and the
+# default admission budget (2000 non_security events/s), P5_LOOPS shell
+# loops flood exec events for P5_SECS; during the flood the controller
+# delivers a monitor bundle (S7's canary policy, epoch 7). Pass:
+#   - no heartbeat gap above 20 s at the controller, from the connection
+#     to the ApplyResult;
+#   - APPLIED within the health window (the controller's apply timeout);
+#   - no "Watchdog timeout" and no restart;
+#   - rate_limited dropped records in the chain;
+#   - the canary's kprobe events (security) still delivered.
+# Runs after P4-RSS (unit and collector stopped).
+# ---------------------------------------------------------------------
+P5_LOOPS=${P5_LOOPS:-4}
+P5_SECS=${P5_SECS:-150}
+scenario_p5() {
+	log "P5-CONTROL-UNDER-LOAD: monitor bundle during a ${P5_LOOPS}-loop exec flood"
+	write_dropins "e3.conf=$(e3_dropin)"
+	ok=true
+	local store=${COLLECTOR_DIR}/p5.jsonl counts=/tmp/e3-p5-counts pid t0 t1 c0 c1 clk gen n rc
+	stop_collector
+	rm -f "${store}"
+	sudo find "${SPOOL_DIR}" -mindepth 1 -delete
+	sudo install -o root -g root -m 0755 /usr/bin/bash "${CANARY}"
+	canary_policy e3-canary "${CANARY}" >"${BUNDLE_DIR}/e3-canary.yaml"
+	sign_bundle "${BUNDLE_DIR}/p5-monitor.json" "${E3_KEYS}/v3/targets.key" 7 monitor "e3-canary=${BUNDLE_DIR}/e3-canary.yaml" || ok=false
+	start_collector p5 "${store}"
+	# The bundle goes out 30 s after the connection: the flood is running
+	# by then, and keeps running through the 60 s health window.
+	start_controller p5 --mode bundles --overall-timeout 300s --apply-timeout 180s \
+		--bundle-delay 30s --max-heartbeat-gap 20s --min-heartbeats-during-apply 3 \
+		--bundle "${BUNDLE_DIR}/p5-monitor.json" --expect APPLIED
+	SCENARIO_SINCE=$(date '+%Y-%m-%d %H:%M:%S')
+	start_unit || ok=false
+	sleep 3
+	pid=$(systemctl show "${UNIT}" -p MainPID --value)
+	clk=$(getconf CLK_TCK)
+	c0=$(awk '{print $14 + $15}' "/proc/${pid}/stat" 2>/dev/null || echo 0)
+	t0=$(date +%s.%N)
+	flood_pids=()
+	flood "${P5_SECS}" "${P5_LOOPS}" "${counts}"
+	wait "${ctrl_pid}" || ok=false
+	cat /tmp/e3controller-p5.log
+	# Under the monitor bundle the canary's exec hook posts a kprobe event
+	# (actions rewritten to Post) instead of killing it.
+	rc=$(run_canary)
+	echo "canary under the monitor bundle, during the flood: rc=${rc}"
+	[ "${rc}" = 0 ] || { echo "canary rc=${rc} under a monitor bundle (want 0)" >&2; ok=false; }
+	wait "${flood_pids[@]}"
+	t1=$(date +%s.%N)
+	c1=$(awk '{print $14 + $15}' "/proc/${pid}/stat" 2>/dev/null || echo 0)
+	gen=$(flood_events "${counts}")
+	wait_spool_empty 120 || ok=false
+	rep=$(collector_report "${store}" --decode) || ok=false
+	grep -E 'REPORT (chain|CLEAN)' <<<"${rep}"
+	n=$(grep -o '"kind":"events","class":"[a-z_]*","count":[0-9]*' <<<"${rep}" | awk -F: '{s += $NF} END {print s + 0}')
+	awk -v c0="${c0}" -v c1="${c1}" -v clk="${clk}" -v t0="${t0}" -v t1="${t1}" -v n="${n}" -v g="${gen}" 'BEGIN {
+		cpu = (c1 - c0) / clk; wall = t1 - t0
+		printf "P5 generated=%d (%.0f/s) received=%d (%.0f/s) wall=%.1fs relayd_cpu=%.2fs (%.2f%% of one core)\n", g, g / wall, n, n / wall, wall, cpu, 100 * cpu / wall
+	}'
+	grep -E 'reason=rate_limited' <<<"${rep}" | head -3
+	grep -q 'reason=rate_limited' <<<"${rep}" || { echo "no rate_limited dropped record in the chain" >&2; ok=false; }
+	grep -E "event .*ProcessKprobe binary=\"${CANARY}\"" <<<"${rep}" | head -2
+	grep -qE "event .*ProcessKprobe binary=\"${CANARY}\"" <<<"${rep}" || { echo "the canary's kprobe event was not delivered" >&2; ok=false; }
+	[ "$(flood_events "${counts}")" -gt $((5000 * P5_SECS)) ] || echo "P5 note: the flood generated <= 5k events/s on this runner" >&2
+	journal=$(scenario_journal)
+	if grep -i 'watchdog timeout' <<<"${journal}"; then
+		echo "systemd watchdog timeout during the flood" >&2
+		ok=false
+	fi
+	grep -c '"step":"telemetry_rate_limited"' <<<"${journal}" || true
+	[ "$(systemctl show "${UNIT}" -p MainPID --value)" = "${pid}" ] || { echo "relayd restarted under load" >&2; ok=false; }
+	stop_unit
+	stop_collector
+	record_result P5-CONTROL-UNDER-LOAD "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
+}
+
 # T-S4: a tiny spool cap. 64 KiB since step 7b: events are now
 # zstd-compressed (about 4.5x), and 43 s of E3 events fit in 90,776 bytes
 # (run 46039848254), so 7a's 512 KiB never overflowed. The only difference
@@ -1237,7 +1333,7 @@ main() {
 
 	if ! start_swtpm_chardev; then
 		echo "no /dev/tpmrm0; every scenario needs it" >&2
-		for s in S1 S2 S3 S4 S5 S6 S7 S8 S9 S10 S11 S12 S13 T-S1 T-S2 T-S3 P4-RSS T-S4 T-S5; do record_result "${s}" FAIL; done
+		for s in S1 S2 S3 S4 S5 S6 S7 S8 S9 S10 S11 S12 S13 T-S1 T-S2 T-S3 P4-RSS P5-CONTROL-UNDER-LOAD T-S4 T-S5; do record_result "${s}" FAIL; done
 	else
 		# C5: the two identity-free scenarios first, then testenroll,
 		# then the identity scenarios.
@@ -1261,10 +1357,11 @@ main() {
 			# Last of the telemetry scenarios: after its flood, Tetragon
 			# delivered no events to T-S4/T-S5 (run 46051067160).
 			scenario_p4_rss
+			scenario_p5  # after P4-RSS: its own bundle at epoch 7
 			scenario_s13 # needs S10's root-v2.json and S12's bundle; restores the index
 			scenario_s4  # last: revocation is terminal for this store (ADR 0035)
 		else
-			for s in S3 S4 S5 S6 S7 S8 S9 S10 S11 S12 S13 T-S1 T-S2 T-S3 P4-RSS T-S4 T-S5; do record_result "${s}" FAIL; done
+			for s in S3 S4 S5 S6 S7 S8 S9 S10 S11 S12 S13 T-S1 T-S2 T-S3 P4-RSS P5-CONTROL-UNDER-LOAD T-S4 T-S5; do record_result "${s}" FAIL; done
 		fi
 		write_dropins
 		no_sigsys_in_job
