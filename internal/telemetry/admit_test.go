@@ -265,3 +265,35 @@ func FuzzPeekAdmit(f *testing.F) {
 		}
 	})
 }
+
+// TestHeartbeatStats_NeverWaitsForTheSpoolLock: the heartbeat's view is
+// read while a spool write holds the lock (step 7b D0).
+func TestHeartbeatStats_NeverWaitsForTheSpoolLock(t *testing.T) {
+	s := mustOpen(t, spoolCfg(t, t.TempDir(), OSFS{}, "boot-a"))
+	if _, err := s.AppendEvents(batch.ClassSecurity, rec(2), 1, 2); err != nil {
+		t.Fatal(err)
+	}
+	red, _ := NewRedactor(nil)
+	p, err := New(Config{
+		Source: &rawSource{}, EventTypes: []tetragonpb.EventType{1}, Redactor: red, Spool: s, Dialer: &memCollector{},
+		BatchMaxEvents: 1, BatchMaxAge: time.Second, MaxEventRate: 1, Clock: time.Now, Auditor: &recAuditor{}, Liveness: &fakeLiveness{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock() // a write in progress
+	defer s.mu.Unlock()
+	got := make(chan [2]uint64, 1)
+	go func() {
+		seq, backlog := p.HeartbeatStats()
+		got <- [2]uint64{seq, uint64(backlog)}
+	}()
+	select {
+	case v := <-got:
+		if v != [2]uint64{2, 2} { // chain_reset at seq 1, the events batch at 2
+			t.Fatalf("HeartbeatStats = %v, want [2 2]", v)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("HeartbeatStats waited for the spool lock")
+	}
+}

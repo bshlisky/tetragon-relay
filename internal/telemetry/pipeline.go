@@ -151,13 +151,14 @@ func New(cfg Config) (*Pipeline, error) {
 
 // HeartbeatStats is the heartbeat's view (Heartbeat.telemetry_last_seq and
 // telemetry_backlog).
+//
+// It takes no lock the telemetry goroutines hold (step 7b D0): the
+// control loop calls it on every heartbeat, and a spool write in progress
+// (compression, fsyncs) must not delay one.
 func (p *Pipeline) HeartbeatStats() (lastSeq uint64, backlog uint32) {
-	st := p.cfg.Spool.Stats()
-	b := st.Backlog
-	if b > int(^uint32(0)) {
-		b = int(^uint32(0))
-	}
-	return st.LastSeq, uint32(b) //nolint:gosec // G115: clamped above
+	seq, b := p.cfg.Spool.HeartbeatView()
+	b = max(0, min(b, int64(^uint32(0))))
+	return seq, uint32(b) //nolint:gosec // G115: clamped above
 }
 
 // Counters returns the pipeline's own loss and error counters.

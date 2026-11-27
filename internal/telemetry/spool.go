@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bshlisky/tetragon-relay/internal/limits"
@@ -133,6 +134,26 @@ type Spool struct {
 	notify chan struct{}
 	// enc compresses events payloads (under mu).
 	enc *batch.PayloadEncoder
+	// pubSeq and pubBacklog are seq and len(files) as of the last unlock,
+	// for HeartbeatView (step 7b D0): the heartbeat must never wait for
+	// mu, which is held across compression, fsyncs and overflow.
+	pubSeq     atomic.Uint64
+	pubBacklog atomic.Int64
+}
+
+// unlock publishes the heartbeat's view and releases mu. Every holder of
+// mu releases it through unlock.
+func (s *Spool) unlock() {
+	s.pubSeq.Store(s.seq)
+	s.pubBacklog.Store(int64(len(s.files)))
+	s.mu.Unlock()
+}
+
+// HeartbeatView returns the last seq spooled and the number of batches
+// spooled and not yet acked, without taking the spool's lock: it never
+// waits for a write in progress.
+func (s *Spool) HeartbeatView() (lastSeq uint64, backlog int64) {
+	return s.pubSeq.Load(), s.pubBacklog.Load()
 }
 
 func (c *SpoolConfig) validate() error {
@@ -413,6 +434,8 @@ func OpenSpool(cfg SpoolConfig) (*Spool, error) {
 		_, _ = hex.Decode(s.prev[:], []byte(head.Hash))
 		s.seq = head.Seq
 		cfg.Auditor.Record("telemetry_chain_continued", fmt.Sprintf("chain %s continues at seq %d", s.chain, s.seq+1), nil)
+		s.mu.Lock()
+		s.unlock() // publishes the heartbeat's view
 		return s, nil
 	}
 	s.gen = maxGen + 1
@@ -426,7 +449,7 @@ func OpenSpool(cfg SpoolConfig) (*Spool, error) {
 	now := cfg.Clock().UnixNano()
 	s.mu.Lock()
 	_, err = s.appendLocked(batch.KindChainReset, batch.ClassControl, 0, now, now, payload, batch.EncNone)
-	s.mu.Unlock()
+	s.unlock()
 	if err != nil {
 		return nil, fmt.Errorf("telemetry: start chain: %w", err)
 	}
@@ -508,7 +531,7 @@ func (s *Spool) AppendEventsPayload(class string, payload []byte, count uint64, 
 		return Entry{}, fmt.Errorf("telemetry: AppendEvents payload is not %d records", count)
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.unlock()
 	// Compressed when that makes it smaller (it almost always does); the
 	// hashes cover the bytes as sent either way.
 	enc := batch.EncNone
@@ -533,7 +556,7 @@ func (s *Spool) AppendRateLimited(events uint64, first, last int64) (Entry, erro
 		return Entry{}, err
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.unlock()
 	if err := s.makeRoomLocked(int64(len(p)) + int64(len(fileMagic)+4+macSize+limits.MaxTelemetryHeaderBytes/4)); err != nil {
 		return Entry{}, err
 	}
@@ -624,7 +647,7 @@ func (s *Spool) removeEntryLocked(name string) {
 // many it deleted. The exporter validates the ack before calling this.
 func (s *Spool) Ack(chain batch.ChainID, seq uint64) int {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.unlock()
 	n := 0
 	kept := s.files[:0]
 	for _, e := range s.files {
@@ -647,7 +670,7 @@ func (s *Spool) Ack(chain batch.ChainID, seq uint64) int {
 // when cur is nil).
 func (s *Spool) After(cur *Entry) (Entry, bool) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.unlock()
 	for _, e := range s.files {
 		if cur == nil || cur.before(e) {
 			return e, true
@@ -678,7 +701,7 @@ func (s *Spool) Read(e Entry) (header, payload []byte, err error) {
 		s.mu.Lock()
 		s.stats.CorruptDropped++
 		s.removeEntryLocked(e.name)
-		s.mu.Unlock()
+		s.unlock()
 		s.cfg.Auditor.Record("telemetry_batch_corrupt", "spooled batch failed its integrity check on read; deleted, never sent: "+e.name, err)
 		return nil, nil, fmt.Errorf("%w: %w", ErrSpoolCorrupt, err)
 	}
@@ -691,7 +714,7 @@ func (s *Spool) Notify() <-chan struct{} { return s.notify }
 // Stats returns the current counters.
 func (s *Spool) Stats() Stats {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.unlock()
 	st := s.stats
 	st.LastSeq = s.seq
 	st.Backlog = len(s.files)
@@ -702,6 +725,6 @@ func (s *Spool) Stats() Stats {
 // Chain returns the current chain's ID.
 func (s *Spool) Chain() batch.ChainID {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.unlock()
 	return s.chain
 }
