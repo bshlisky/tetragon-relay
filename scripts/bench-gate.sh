@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
-# Step 7b P1/P3: the telemetry pipeline benchmark, its per-stage
-# breakdown, CPU and allocation profiles, and the CPU gate.
+# Step 7b P1/P3/D1: the telemetry pipeline benchmark, its per-stage
+# breakdown, CPU and allocation profiles, and the CPU regression gate.
 #
 #   scripts/bench-gate.sh [out-dir]
 #
-# Gate: BenchmarkPipeline5k's cpu-ns/event (process CPU over the measured
-# window / events; scripts and harness do no work in it) must be
-# <= BENCH_GATE_NS (6000 ns = 3 % of one core at 5k events/s) in EVERY one
-# of BENCH_GATE_RUNS runs: the worst run is gated, not the best.
+# Gate (docs/reviews/step-07b-decisions.md D1, ADR 0041): a regression
+# gate on the same machine. BENCH_GATE_REF (the commit D1 landed in) and
+# HEAD are both built and run here, alternately, BENCH_GATE_RUNS times
+# each. BenchmarkPipeline5k's cpu-ns/event (process CPU over the measured
+# window / events) of the WORST HEAD run must be <= BENCH_GATE_RATIO
+# (1.25) times the MEDIAN of the reference runs. GitHub's runners are not
+# one CPU model, so an absolute threshold does not hold across runs; the
+# step 7b P3 absolute gate (6000 ns) is retired by D1.
 set -euo pipefail
 
 out=${1:-bench-out}
-gate_ns=${BENCH_GATE_NS:-6000}
 runs=${BENCH_GATE_RUNS:-3}
+gate_ref=${BENCH_GATE_REF:?BENCH_GATE_REF must name the D1 reference commit}
+gate_ratio=${BENCH_GATE_RATIO:-1.25}
 events=${BENCH_EVENTS:-200000}
 mkdir -p "$out"
 
@@ -82,17 +87,29 @@ for stage in \
 	printf '%-9s %s\n' "$name" "${line:-0%}"
 done | tee "$out/stage-shares.txt"
 
-echo "== gate: $runs unprofiled runs of $events events, each must be <= $gate_ns cpu-ns/event"
-"$t" -test.run=NONE -test.bench='^BenchmarkPipeline5k$' -test.benchtime="${events}x" -test.count="$runs" | tee "$out/gate.txt"
-worst=$(awk '/^BenchmarkPipeline5k/ { for (i = 1; i < NF; i++) if ($(i+1) == "cpu-ns/event") print $i }' "$out/gate.txt" | sort -n | tail -1)
-if [ -z "$worst" ]; then
-	echo "GATE: no cpu-ns/event measured" >&2
+echo "== gate: $runs runs each of $gate_ref and HEAD, alternating; worst HEAD <= $gate_ratio x median $gate_ref"
+ref_src="$out/src-gate-ref"
+rm -rf "$ref_src"
+git worktree add -f --detach "$ref_src" "$gate_ref" >/dev/null 2>&1
+(cd "$ref_src" && go test -c -o ../gate-ref.test ./internal/telemetry) >/dev/null
+git worktree remove -f "$ref_src"
+: >"$out/gate.txt"
+for _ in $(seq 1 "$runs"); do
+	"$out/gate-ref.test" -test.run=NONE -test.bench='^BenchmarkPipeline5k$' -test.benchtime="${events}x" | grep '^Benchmark' | sed 's/^/REF  /' | tee -a "$out/gate.txt"
+	"$t" -test.run=NONE -test.bench='^BenchmarkPipeline5k$' -test.benchtime="${events}x" | grep '^Benchmark' | sed 's/^/HEAD /' | tee -a "$out/gate.txt"
+done
+ns_of() { awk -v w="$1" '$1 == w { for (i = 2; i < NF; i++) if ($(i+1) == "cpu-ns/event") print $i }' "$out/gate.txt"; }
+worst=$(ns_of HEAD | sort -n | tail -1)
+ref=$(ns_of REF | sort -n | awk '{ v[NR] = $1 } END { if (NR) print v[int((NR + 1) / 2)] }')
+if [ -z "$worst" ] || [ -z "$ref" ]; then
+	echo "GATE: no cpu-ns/event measured (HEAD '$worst', ref '$ref')" >&2
 	exit 1
 fi
-printf 'GATE: worst of %s runs = %s cpu-ns/event (%.2f %% of one core at 5k events/s); limit %s\n' \
-	"$runs" "$worst" "$(awk -v w="$worst" 'BEGIN { print w * 5000 / 1e7 }')" "$gate_ns"
-if [ "${BENCH_GATE_ENFORCE:-1}" = 1 ] && awk -v w="$worst" -v g="$gate_ns" 'BEGIN { exit !(w > g) }'; then
-	echo "GATE FAIL: pipeline CPU $worst ns/event > $gate_ns" >&2
+limit=$(awk -v r="$ref" -v k="$gate_ratio" 'BEGIN { printf "%.0f", r * k }')
+printf 'GATE: worst HEAD run = %s cpu-ns/event (%.2f %% of one core at 5k events/s); median %s = %s; limit %s (x%s)\n' \
+	"$worst" "$(awk -v w="$worst" 'BEGIN { print w * 5000 / 1e7 }')" "$gate_ref" "$ref" "$limit" "$gate_ratio"
+if [ "${BENCH_GATE_ENFORCE:-1}" = 1 ] && awk -v w="$worst" -v l="$limit" 'BEGIN { exit !(w > l) }'; then
+	echo "GATE FAIL: pipeline CPU $worst ns/event > $limit ($gate_ratio x $ref, $gate_ref on this machine)" >&2
 	exit 1
 fi
 if [ "${BENCH_GATE_ENFORCE:-1}" = 1 ]; then echo "GATE PASS"; else echo "GATE NOT ENFORCED (BENCH_GATE_ENFORCE=0)"; fi

@@ -152,14 +152,17 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      # Step 7b P3: fails if the worst of 3 runs is above 6000 ns of
-      # pipeline CPU per event (3 % of one core at 5k events/s). Not
-      # relaxed: when it fails, the profile goes to the architect.
-      - name: Telemetry pipeline benchmark, profiles and CPU gate
+      # Step 7b D1 (docs/reviews/step-07b-decisions.md, ADR 0041): a
+      # blocking regression gate on this machine. The worst of 3 HEAD runs
+      # must be <= 1.25 x the median of 3 runs of f80fcf4 (D1's wire-level
+      # redaction), run alternately here. It replaces P3's absolute 6 us
+      # gate, which D1 retires.
+      - name: Telemetry pipeline benchmark, profiles and CPU regression gate
         env:
-          # Step 7b P2: before/after of each change on this one machine
-          # (7a35c03 is the 7a pipeline with the P1 benchmark).
-          BENCH_HISTORY: "7a35c03:baseline 4b22e1a:field-redaction 25ac330:buffers+hash-hmac 0b99e92:zstd"
+          BENCH_GATE_REF: f80fcf4
+          # Step 7b P2/D0/D1: before/after of each change on this one
+          # machine (7a35c03 is the 7a pipeline with the P1 benchmark).
+          BENCH_HISTORY: "7a35c03:baseline 4b22e1a:field-redaction 25ac330:buffers+hash-hmac 0b99e92:zstd d9e83a4:admission(decode-in-pipeline) f80fcf4:wire-redaction"
         run: scripts/bench-gate.sh bench-out
 
       - name: Upload pipeline profiles
