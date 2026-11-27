@@ -39,8 +39,8 @@ func (l *fakeLiveness) Touch(n string) {
 }
 
 type chanSource struct {
-	ch    chan *tetragonpb.GetEventsResponse
-	calls int
+	ch      chan *tetragonpb.GetEventsResponse
+	calls   int
 	mu      sync.Mutex
 	types   []tetragonpb.EventType
 	exclude []string
