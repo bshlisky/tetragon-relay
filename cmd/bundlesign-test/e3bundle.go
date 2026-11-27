@@ -68,12 +68,12 @@ func runE3Bundle(args []string) error {
 	}
 	now := time.Now()
 	payload, err := buildBundlePayload(bundleSpec{
-		bundleID:           fmt.Sprintf("e3-%s-%d", *scope, *epoch),
-		epoch:              *epoch,
-		scope:              *scope,
-		hostUUIDs:          []string{*hostUUID},
-		notBefore:          now.Add(-5 * time.Minute),
-		expires:            now.Add(*validity),
+		bundleID:  fmt.Sprintf("e3-%s-%d", *scope, *epoch),
+		epoch:     *epoch,
+		scope:     *scope,
+		hostUUIDs: []string{*hostUUID},
+		notBefore: now.Add(-5 * time.Minute),
+		expires:   now.Add(*validity),
 		// E3 tests delivery, not verify's version gate (covered by
 		// internal/verify's tests and vectors): a low minimum keeps a
 		// pre-release suffix in the CI tarball's GetVersion (which
