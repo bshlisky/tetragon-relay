@@ -63,11 +63,11 @@ func TestParse_ValidConfig_DefaultsApplied(t *testing.T) {
 	if cfg.EnforcementSurgeThreshold != 500 {
 		t.Errorf("EnforcementSurgeThreshold default = %d, want 500", cfg.EnforcementSurgeThreshold)
 	}
-	if len(cfg.ArgvPatterns) != len(defaultArgvPatterns) {
-		t.Errorf("ArgvPatterns default = %v", cfg.ArgvPatterns)
+	if len(cfg.ArgvPatterns) != 0 {
+		t.Errorf("ArgvPatterns default = %v, want none beyond the built-in set", cfg.ArgvPatterns)
 	}
-	if cfg.KeepEnv {
-		t.Errorf("KeepEnv default = true, want false (secure default: drop env)")
+	if len(cfg.EventTypes) != 6 {
+		t.Errorf("EventTypes default = %v, want all six", cfg.EventTypes)
 	}
 	if cfg.AllowSELinuxDisabled {
 		t.Errorf("AllowSELinuxDisabled default = true, want false")
@@ -124,18 +124,20 @@ tetragon:
   socket: "unix:///var/run/tetragon/tetragon.sock"
   persist_dir: "/etc/tetragon/tetragon.tp.d/relay"
   allow_selinux_disabled: true
-redaction:
-  keep_env: true
 `
 	cfg, err := parse([]byte(y))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if !cfg.AllowSELinuxDisabled || !cfg.KeepEnv {
+	if !cfg.AllowSELinuxDisabled {
 		t.Fatalf("relaxation flags not set: %+v", cfg)
 	}
-	if len(cfg.SecurityRelaxations()) != 2 {
-		t.Fatalf("SecurityRelaxations = %v, want 2 entries", cfg.SecurityRelaxations())
+	if len(cfg.SecurityRelaxations()) != 1 {
+		t.Fatalf("SecurityRelaxations = %v, want 1 entry", cfg.SecurityRelaxations())
+	}
+	// ADR 0039: keep_env: true is refused; the environment is always dropped.
+	if _, err := parse([]byte(y + "redaction:\n  keep_env: true\n")); !errors.Is(err, ErrKeepEnvUnsupported) {
+		t.Fatalf("keep_env: true: err = %v, want ErrKeepEnvUnsupported", err)
 	}
 }
 
@@ -264,6 +266,9 @@ func TestValidateAndBuild_EveryRule(t *testing.T) {
 		{"missing tetragon persist dir", mutateYAML(`persist_dir: "/etc/tetragon/tetragon.tp.d/relay"`, `persist_dir: ""`), ErrMissingPersistDir},
 		{"invalid health window", mutateYAML("tetragon:\n  socket:", "apply:\n  health_window: \"nope\"\ntetragon:\n  socket:"), ErrInvalidHealthWindow},
 		{"invalid surge threshold", mutateYAML("tetragon:\n  socket:", "apply:\n  enforcement_event_surge_threshold: -1\ntetragon:\n  socket:"), ErrInvalidSurgeThreshold},
+		{"unknown event type", mutateYAML("collector:\n  endpoints:", "collector:\n  event_types: [\"process_bogus\"]\n  endpoints:"), ErrInvalidEventType},
+		{"duplicate event type", mutateYAML("collector:\n  endpoints:", "collector:\n  event_types: [\"process_exec\", \"process_exec\"]\n  endpoints:"), ErrInvalidEventType},
+		{"empty event types", mutateYAML("collector:\n  endpoints:", "collector:\n  event_types: []\n  endpoints:"), ErrInvalidEventType},
 		{"invalid redaction pattern", mutateYAML("tetragon:\n  socket:", "redaction:\n  argv_patterns: [\"(unterminated\"]\ntetragon:\n  socket:"), ErrInvalidRedactionPattern},
 	}
 	for _, tc := range tests {
@@ -335,5 +340,15 @@ redaction:
 	}
 	if len(cfg.ArgvPatterns) != 1 || cfg.ArgvPatterns[0] != `custom=\S+` {
 		t.Errorf("ArgvPatterns = %v", cfg.ArgvPatterns)
+	}
+}
+
+func TestParse_EventTypesSubset(t *testing.T) {
+	cfg, err := parse([]byte(mutateYAML("collector:\n  endpoints:", "collector:\n  event_types: [\"process_kprobe\", \"process_exec\"]\n  endpoints:")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.EventTypes) != 2 || cfg.EventTypes[0] != "process_kprobe" {
+		t.Fatalf("EventTypes = %v", cfg.EventTypes)
 	}
 }

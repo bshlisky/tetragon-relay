@@ -58,6 +58,8 @@ var (
 	ErrInvalidSpoolMaxBytes         = errors.New("config: collector.spool_max_bytes must be positive")
 	ErrInvalidBatchMaxEvents        = errors.New("config: collector.batch_max_events must be positive")
 	ErrInvalidBatchMaxAge           = errors.New("config: collector.batch_max_age must be positive")
+	ErrInvalidEventType             = errors.New("config: collector.event_types entries must be distinct names from process_exec, process_exit, process_kprobe, process_tracepoint, process_uprobe, process_lsm")
+	ErrKeepEnvUnsupported           = errors.New("config: redaction.keep_env: true is not supported; the process environment is always dropped from telemetry (ADR 0039)")
 	ErrMissingIdentityTrustDomain   = errors.New("config: identity.trust_domain is required")
 	ErrMissingEnrollmentTrustBundle = errors.New("config: identity.trust_bundle is required")
 	ErrInvalidIdentityProvider      = errors.New("config: identity.provider must be \"spire\" or \"idm\"")

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"slices"
 	"time"
 
 	"github.com/bshlisky/tetragon-relay/internal/limits"
@@ -138,6 +139,21 @@ func validateCollector(cl rawCollector, c *Config) error {
 		}
 		batchMaxAge = d
 	}
+	eventTypes := validEventTypes
+	if cl.EventTypes != nil {
+		if len(cl.EventTypes) == 0 {
+			return fmt.Errorf("%w: empty list", ErrInvalidEventType)
+		}
+		seen := map[string]bool{}
+		for _, t := range cl.EventTypes {
+			if seen[t] || !slices.Contains(validEventTypes, t) {
+				return fmt.Errorf("%w: %q", ErrInvalidEventType, t)
+			}
+			seen[t] = true
+		}
+		eventTypes = cl.EventTypes
+	}
+	c.EventTypes = append([]string(nil), eventTypes...)
 	c.CollectorEndpoints = append([]string(nil), cl.Endpoints...)
 	c.CollectorSPIFFEID = cl.SPIFFEID
 	c.SpoolMaxBytes = spoolMaxBytes
@@ -214,17 +230,19 @@ func validateApply(ap rawApply, c *Config) error {
 	return nil
 }
 
+// validateRedaction: configured patterns are added to the built-in set,
+// never replace it, and each must compile as Go RE2. keep_env: true is
+// refused in step 7a: the environment is always dropped (ADR 0039 section
+// 7); a relaxation can only come from signed metadata (step 7b).
 func validateRedaction(r rawRedaction, c *Config) error {
-	patterns := defaultArgvPatterns
-	if len(r.ArgvPatterns) > 0 {
-		for _, p := range r.ArgvPatterns {
-			if _, err := regexp.Compile(p); err != nil {
-				return fmt.Errorf("%w: %q: %w", ErrInvalidRedactionPattern, p, err)
-			}
+	for _, p := range r.ArgvPatterns {
+		if _, err := regexp.Compile(p); err != nil {
+			return fmt.Errorf("%w: %q: %w", ErrInvalidRedactionPattern, p, err)
 		}
-		patterns = r.ArgvPatterns
 	}
-	c.ArgvPatterns = append([]string(nil), patterns...)
-	c.KeepEnv = r.KeepEnv
+	if r.KeepEnv {
+		return ErrKeepEnvUnsupported
+	}
+	c.ArgvPatterns = append([]string(nil), r.ArgvPatterns...)
 	return nil
 }

@@ -34,6 +34,7 @@ type rawCollector struct {
 	SpoolMaxBytes  int64    `yaml:"spool_max_bytes"`
 	BatchMaxEvents int      `yaml:"batch_max_events"`
 	BatchMaxAge    string   `yaml:"batch_max_age"`
+	EventTypes     []string `yaml:"event_types"`
 }
 
 // rawIdentity's TrustDomain field is a deviation from architecture doc
@@ -84,19 +85,9 @@ type rawRedaction struct {
 	KeepEnv      bool     `yaml:"keep_env"`
 }
 
-// defaultArgvPatterns is used when relay.yaml's redaction.argv_patterns is
-// absent: architecture doc 8.6's own example patterns, so a host with no
-// explicit redaction configuration still redacts the obvious secret
-// shapes rather than redacting nothing. A configured list fully replaces
-// this default rather than appending to it (production redaction
-// patterns are expected to eventually come from signed trust metadata,
-// architecture doc 10.5 -- out of scope until step 7 -- not from local
-// config merging logic).
-var defaultArgvPatterns = []string{
-	`(?i)--password[= ]\S+`,
-	`(?i)token=\S+`,
-	`AKIA[0-9A-Z]{16}`,
-}
+// validEventTypes is collector.event_types' vocabulary (ADR 0039): the
+// Tetragon event types telemetry can classify. Absent means all six.
+var validEventTypes = []string{"process_exec", "process_exit", "process_kprobe", "process_tracepoint", "process_uprobe", "process_lsm"}
 
 // Config is the validated result of Load: every required field is
 // non-zero, every duration/size field has its default applied, and
@@ -113,6 +104,8 @@ type Config struct {
 	SpoolMaxBytes      int64
 	BatchMaxEvents     int
 	BatchMaxAge        time.Duration
+	// EventTypes is collector.event_types: the GetEvents allow-list.
+	EventTypes []string
 
 	IdentityProvider      string
 	IdentityTrustDomain   string
@@ -127,8 +120,10 @@ type Config struct {
 	HealthWindow              time.Duration
 	EnforcementSurgeThreshold int
 
+	// ArgvPatterns are the configured redaction patterns. They are only
+	// ever ADDED to internal/telemetry.DefaultArgvPatterns (ADR 0039
+	// section 7): config cannot remove a built-in pattern.
 	ArgvPatterns []string
-	KeepEnv      bool
 
 	digest [32]byte
 }
@@ -150,9 +145,6 @@ func (c *Config) SecurityRelaxations() []string {
 	var out []string
 	if c.AllowSELinuxDisabled {
 		out = append(out, "tetragon.allow_selinux_disabled=true: SELinux peer-verification checks on the Tetragon socket are disabled")
-	}
-	if c.KeepEnv {
-		out = append(out, "redaction.keep_env=true: process environment variables are NOT redacted from telemetry")
 	}
 	return out
 }

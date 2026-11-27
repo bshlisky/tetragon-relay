@@ -13,6 +13,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -362,6 +363,20 @@ func run(configPath string, auditor *agentAuditor) error {
 		return fmt.Errorf("new apply worker: %w", err)
 	}
 	controlLoop.Jobs = worker
+
+	// Step 7a (ADR 0039): the telemetry pipeline, on its own connection.
+	// It shares only two narrow interfaces with the control path: epochs
+	// for its headers, and HeartbeatStats for the heartbeat.
+	if pipeline, terr := startTelemetry(sessionCtx, telemetryDeps{
+		cfg: cfg, auditor: auditor, sealer: tpmComponents.Sealer, tetraClient: tetraClient, liveness: liveness,
+		bootID: bootID, epochs: storeEpochs(startupResult.Store, cfg.AllowedScopes),
+		clientCert: func() tls.Certificate { return clientCertificate(certManager.Chain(), hostSigner) },
+		caBundle:   enrollmentBundle,
+	}); terr != nil {
+		auditor.Record(agent.AuditEvent{Step: "telemetry_disabled", Detail: "telemetry pipeline did not start; enforcement and the control session continue", Err: terr})
+	} else {
+		controlLoop.Telemetry = pipeline
+	}
 	trustExpiry := &agent.TrustExpiryMonitor{Trust: trustState, Alerter: alerter, Clock: time.Now}
 
 	sessionCfg := agent.SessionConfig{

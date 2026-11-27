@@ -21,7 +21,44 @@ linters:
     - bodyclose
     - nilerr
     - gosec
+    - depguard
   settings:
+    # Architecture 10.2 / ADR 0039 section 8: telemetry cannot reach the
+    # control path, and the control path cannot reach telemetry. The only
+    # shared surface is two narrow interfaces connected in cmd/relayd.
+    depguard:
+      rules:
+        telemetry-isolated:
+          files:
+            - "**/internal/telemetry/**"
+          deny:
+            - pkg: github.com/bshlisky/tetragon-relay/internal/apply
+              desc: telemetry must not reach apply (architecture 10.2)
+            - pkg: github.com/bshlisky/tetragon-relay/internal/verify
+              desc: telemetry must not reach verify (architecture 10.2)
+            - pkg: github.com/bshlisky/tetragon-relay/internal/guard
+              desc: telemetry must not reach guard (architecture 10.2)
+            - pkg: github.com/bshlisky/tetragon-relay/internal/trust
+              desc: telemetry must not reach trust (architecture 10.2)
+            - pkg: github.com/bshlisky/tetragon-relay/internal/controlclient
+              desc: telemetry has its own dialer; shared TLS code is internal/spiffetls
+            - pkg: github.com/bshlisky/tetragon-relay/internal/agent
+              desc: telemetry must not reach the agent (apply worker, control loop)
+            - pkg: github.com/bshlisky/tetragon-relay/internal/tetra
+              desc: telemetry gets a read-only EventSource, never a client that can write policies
+            - pkg: github.com/bshlisky/tetragon-relay/internal/store
+              desc: telemetry gets a derived key, never the store
+        control-without-telemetry:
+          files:
+            - "**/internal/apply/**"
+            - "**/internal/verify/**"
+            - "**/internal/guard/**"
+            - "**/internal/trust/**"
+            - "**/internal/controlclient/**"
+            - "**/internal/agent/**"
+          deny:
+            - pkg: github.com/bshlisky/tetragon-relay/internal/telemetry
+              desc: the control path must not reach telemetry (architecture 10.2)
     exhaustive:
       default-signifies-exhaustive: false
     gosec:

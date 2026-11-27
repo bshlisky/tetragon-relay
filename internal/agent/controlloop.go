@@ -118,6 +118,11 @@ type ControlLoop struct {
 	// built without bundle processing, e.g. in tests), a PolicyBundle is
 	// answered with APPLY_FAILED and nothing else happens.
 	Jobs JobSink
+	// Telemetry supplies Heartbeat.telemetry_last_seq and
+	// telemetry_backlog (architecture doc 10.3). Optional: nil reports
+	// zero (no telemetry pipeline running). This is the only surface the
+	// control path shares with telemetry (ADR 0039 section 8).
+	Telemetry TelemetryStats
 
 	mu            sync.Mutex
 	revokedReason string
@@ -130,6 +135,13 @@ func (cl *ControlLoop) RevokedReason() string {
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
 	return cl.revokedReason
+}
+
+// TelemetryStats is the heartbeat's read-only view of the telemetry
+// pipeline (internal/telemetry.Pipeline satisfies it; cmd/relayd connects
+// them, so neither package imports the other).
+type TelemetryStats interface {
+	HeartbeatStats() (lastSeq uint64, backlog uint32)
 }
 
 // JobSink is where the control loop hands work it must not do on the
@@ -293,8 +305,8 @@ func (cl *ControlLoop) buildStateReport(ctx context.Context, nonce []byte) *cont
 }
 
 // BuildHeartbeat implements the periodic (15 s, architecture doc 6.3 step
-// 5) Heartbeat the caller's ticker loop sends via out. Telemetry fields
-// stay zero (step 7 scope).
+// 5) Heartbeat the caller's ticker loop sends via out, with the telemetry
+// pipeline's last spooled seq and backlog when one is running.
 func (cl *ControlLoop) BuildHeartbeat(ctx context.Context, out *OutboundSeq) (*controlv1.AgentMessage, error) {
 	snap, err := cl.Snapshot.Snapshot(ctx)
 	if err != nil {
@@ -304,6 +316,9 @@ func (cl *ControlLoop) BuildHeartbeat(ctx context.Context, out *OutboundSeq) (*c
 		Epochs:       snap.Epochs,
 		LoadedDigest: snap.LoadedDigest,
 		Health:       snap.Health,
+	}
+	if cl.Telemetry != nil {
+		hb.TelemetryLastSeq, hb.TelemetryBacklog = cl.Telemetry.HeartbeatStats()
 	}
 	return cl.wrap(out, &controlv1.AgentMessage{Body: &controlv1.AgentMessage_Heartbeat{Heartbeat: hb}}), nil
 }

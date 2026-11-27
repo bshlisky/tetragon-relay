@@ -357,7 +357,7 @@ func TestBuildHeartbeat(t *testing.T) {
 		t.Fatalf("Heartbeat epochs = %v", hb.GetEpochs())
 	}
 	if hb.GetTelemetryLastSeq() != 0 || hb.GetTelemetryBacklog() != 0 {
-		t.Fatalf("telemetry fields must stay zero until step 7")
+		t.Fatalf("telemetry fields must be zero with no pipeline")
 	}
 	if msg.GetSeq() != 2 {
 		t.Fatalf("Heartbeat seq = %d, want 2", msg.GetSeq())
@@ -417,5 +417,22 @@ func mustFire(t *testing.T, sm *StateMachine, event Event) {
 	t.Helper()
 	if err := sm.Fire(event); err != nil {
 		t.Fatalf("Fire(%s) from %s: %v", event, sm.Current(), err)
+	}
+}
+
+type fixedTelemetry struct{}
+
+func (fixedTelemetry) HeartbeatStats() (uint64, uint32) { return 42, 7 }
+
+func TestBuildHeartbeat_TelemetryFields(t *testing.T) {
+	cl, _, snap, _ := testControlLoop(t)
+	snap.snap = StateSnapshot{Epochs: map[string]uint64{"prod-db": 3}}
+	cl.Telemetry = fixedTelemetry{}
+	msg, err := cl.BuildHeartbeat(context.Background(), NewOutboundSeqAfterHello())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hb := msg.GetHeartbeat(); hb.GetTelemetryLastSeq() != 42 || hb.GetTelemetryBacklog() != 7 {
+		t.Fatalf("heartbeat telemetry = %d, %d", hb.GetTelemetryLastSeq(), hb.GetTelemetryBacklog())
 	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"time"
@@ -130,6 +131,19 @@ func runTampered(cfg *config.Config, auditor *agentAuditor, tpmConn transport.TP
 		return fmt.Errorf("new tampered jobs: %w", err)
 	}
 	controlLoop.Jobs = jobs
+
+	// Telemetry keeps running in tampered mode, on a new chain (reset
+	// reason tampered_mode) with empty epochs.
+	if pipeline, terr := startTelemetry(sessionCtx, telemetryDeps{
+		cfg: cfg, auditor: auditor, sealer: tpmComponents.Sealer, tetraClient: tetraClient, liveness: liveness,
+		bootID: bootID, tampered: true, epochs: func() map[string]uint64 { return map[string]uint64{} },
+		clientCert: func() tls.Certificate { return clientCertificate(certManager.Chain(), hostSigner) },
+		caBundle:   enrollmentBundle,
+	}); terr != nil {
+		auditor.Record(agent.AuditEvent{Step: "telemetry_disabled", Detail: "telemetry pipeline did not start in tampered mode", Err: terr})
+	} else {
+		controlLoop.Telemetry = pipeline
+	}
 
 	buildDigest, digestErr := agentBuildDigest()
 	if digestErr != nil {
