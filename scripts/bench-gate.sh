@@ -24,6 +24,32 @@ uname -a
 grep -m1 'model name' /proc/cpuinfo 2>/dev/null || sysctl -n machdep.cpu.brand_string 2>/dev/null || true
 nproc 2>/dev/null || true
 
+# Same-machine history (step 7b P2: before and after each change). GitHub's
+# runners are not one CPU model, so numbers from different runs do not
+# compare; BENCH_HISTORY="ref:label ..." builds each ref's benchmark and runs
+# them all here, on this machine, one after another.
+if [ -n "${BENCH_HISTORY:-}" ]; then
+	echo "== same-machine history: $BENCH_HISTORY"
+	: >"$out/history.txt"
+	for item in $BENCH_HISTORY; do
+		ref=${item%%:*}
+		label=${item#*:}
+		src="$out/src-$ref"
+		rm -rf "$src"
+		git worktree add -f --detach "$src" "$ref" >/dev/null 2>&1
+		(cd "$src" && go test -c -o "../history-$ref.test" ./internal/telemetry) >/dev/null
+		git worktree remove -f "$src"
+		h="$out/history-$ref.test"
+		{
+			echo "### $label ($ref)"
+			"$h" -test.run=NONE -test.bench='^BenchmarkStage(Decode|Redact|Marshal|Compress)$' -test.benchtime=50000x | grep '^Benchmark' || true
+			"$h" -test.run=NONE -test.bench='^BenchmarkStageSpool$' -test.benchtime=300x | grep '^Benchmark' || true
+			"$h" -test.run=NONE -test.bench='^BenchmarkPipeline5k$' -test.benchtime="${events}x" -test.count=2 | grep '^Benchmark' || true
+		} | tee -a "$out/history.txt"
+		rm -f "$h"
+	done
+fi
+
 echo "== stage breakdown"
 "$t" -test.run=NONE -test.bench='^BenchmarkStage(Decode|Classify|Redact|Marshal|Compress)$' -test.benchtime=50000x | tee "$out/stages.txt"
 "$t" -test.run=NONE -test.bench='^BenchmarkStageSpool$' -test.benchtime=300x | tee -a "$out/stages.txt"

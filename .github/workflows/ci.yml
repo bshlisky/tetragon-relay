@@ -142,6 +142,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # BENCH_HISTORY builds earlier commits' benchmarks.
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -152,6 +155,9 @@ jobs:
       - name: Telemetry pipeline benchmark, profiles and CPU gate
         env:
           BENCH_GATE_ENFORCE: "0"
+          # Step 7b P2: before/after of each change on this one machine
+          # (7a35c03 is the 7a pipeline with the P1 benchmark).
+          BENCH_HISTORY: "7a35c03:baseline 4b22e1a:field-redaction 25ac330:buffers+hash-hmac 0b99e92:zstd"
         run: scripts/bench-gate.sh bench-out
 
       - name: Upload pipeline profiles
