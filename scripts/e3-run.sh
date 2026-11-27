@@ -214,9 +214,20 @@ write_throwaway_ca() {
 	rm -rf "${tmpdir}"
 }
 
+# E3_KEYS: the E3 test root's private keys (step 6b F2), kept by e3root
+# in a runner-owned directory relayd never reads (it runs under
+# PrivateTmp=yes and cannot see /tmp at all). v1/targets.key signs the
+# S7-S9 bundles.
+E3_KEYS=/tmp/e3-keys
+BUNDLE_DIR=/tmp/e3-bundles
+SCOPE=e3-scope
+CANARY=/usr/local/bin/e3-canary-sh
+
 write_root_json() {
 	log "writing ${ROOT_JSON}"
-	"${BIN_DIR}/e3root" --out /tmp/e3-root.json
+	mkdir -p "${E3_KEYS}" "${BUNDLE_DIR}"
+	chmod 0700 "${E3_KEYS}"
+	"${BIN_DIR}/e3root" --out /tmp/e3-root.json --keys-out "${E3_KEYS}/v1"
 	sudo cp /tmp/e3-root.json "${ROOT_JSON}"
 	sudo chmod 0644 "${ROOT_JSON}"
 }
@@ -440,6 +451,9 @@ scenario_s4() {
 	write_dropins "e3.conf=$(e3_dropin)"
 	start_controller s4 --mode revoke --reconnect-assert-for 65s
 	ok=true
+	# S7 left relay-managed policies loaded, so S4 compares against what
+	# is loaded when it starts rather than against the baseline alone.
+	loaded_before=$(loaded_names)
 	start_unit || ok=false
 	wait_journal_step revocation_persisted 20 || ok=false
 	sudo systemctl restart "${UNIT}" || ok=false
@@ -453,7 +467,7 @@ scenario_s4() {
 		echo "systemd watchdog fired while REVOKED (D1)" >&2
 		ok=false
 	fi
-	check_baseline_unchanged || ok=false
+	check_loaded_unchanged "${loaded_before}" || ok=false
 	stop_unit
 	record_result S4 "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
 }
@@ -513,6 +527,153 @@ scenario_s6() {
 	record_result S6 "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
 }
 
+# ---------------------------------------------------------------------
+# Step 6b: bundles delivered over the stream (S7-S9). Bundles are signed
+# here, at scenario time, by cmd/bundlesign-test e3-bundle (testtools
+# tag) with the E3 test root's targets key.
+# ---------------------------------------------------------------------
+
+loaded_names() {
+	"${BIN_DIR}/e3tetra" --mode=list --tetragon-binary "${TETRAGON_BIN}" | tr '\n' ',' | sed 's/,$//'
+}
+
+check_loaded_unchanged() {
+	local before="$1" after
+	after=$(loaded_names)
+	echo "loaded before: ${before}"
+	echo "loaded after:  ${after}"
+	[ "${before}" = "${after}" ]
+}
+
+# sign_bundle OUT KEY EPOCH MODE NAME=YAMLFILE...
+sign_bundle() {
+	local out="$1" key="$2" epoch="$3" mode="$4"
+	shift 4
+	local args=() p
+	for p in "$@"; do args+=(--policy "${p}"); done
+	"${BIN_DIR}/bundlesign-test" e3-bundle --key "${key}" --out "${out}" \
+		--scope "${SCOPE}" --epoch "${epoch}" --mode "${mode}" --host-uuid "${HOST_UUID}" "${args[@]}"
+}
+
+# canary_policy NAME BINARY: Sigkill on security_bprm_check for BINARY as
+# the exec caller (ADR 0020: the hook reports the caller, so the canary
+# is killed when it execs its next command).
+canary_policy() {
+	cat <<POLICY
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: "$1"
+spec:
+  kprobes:
+  - call: "security_bprm_check"
+    syscall: false
+    selectors:
+      - matchBinaries:
+        - operator: "In"
+          values:
+          - "$2"
+        matchActions:
+        - action: "Sigkill"
+POLICY
+}
+
+# run_canary: a private copy of bash (never the real /usr/bin/bash) that
+# execs two external commands, so it is the caller of an exec (ADR 0020;
+# two commands, because bash tail-calls a single trailing one). Prints
+# the exit status: 137 (128+SIGKILL) means the canary was killed.
+run_canary() {
+	local rc=0
+	timeout 20 "${CANARY}" -c "/usr/bin/true; /usr/bin/true" || rc=$?
+	echo "${rc}"
+}
+
+prepare_s7_bundles() {
+	sudo install -o root -g root -m 0755 /usr/bin/bash "${CANARY}"
+	canary_policy e3-canary "${CANARY}" >"${BUNDLE_DIR}/e3-canary.yaml"
+	sign_bundle "${BUNDLE_DIR}/s7-monitor.json" "${E3_KEYS}/v1/targets.key" 1 monitor "e3-canary=${BUNDLE_DIR}/e3-canary.yaml" &&
+		sign_bundle "${BUNDLE_DIR}/s7-enforce.json" "${E3_KEYS}/v1/targets.key" 2 enforce "e3-canary=${BUNDLE_DIR}/e3-canary.yaml"
+}
+
+# ---------------------------------------------------------------------
+# S7: a monitor bundle, then an enforce bundle, over the stream. Both
+# APPLIED (each after its 60 s health window, with heartbeats throughout);
+# the canary is killed under the enforce bundle; after a restart the
+# persisted epoch (2) is reported in a StateReport.
+# ---------------------------------------------------------------------
+scenario_s7() {
+	log "S7: monitor then enforce bundle over the stream; canary killed; epoch persists"
+	write_dropins "e3.conf=$(e3_dropin)"
+	ok=true
+	prepare_s7_bundles || ok=false
+	echo "canary before any bundle: rc=$(run_canary)"
+	start_controller s7 --mode bundles --overall-timeout 420s --apply-timeout 180s \
+		--min-heartbeats-during-apply 3 \
+		--bundle "${BUNDLE_DIR}/s7-monitor.json" --expect APPLIED \
+		--bundle "${BUNDLE_DIR}/s7-enforce.json" --expect APPLIED
+	start_unit || ok=false
+	wait "${ctrl_pid}" || ok=false
+	cat /tmp/e3controller-s7.log
+	echo "loaded after S7's bundles: $(loaded_names)"
+	rc=$(run_canary)
+	echo "canary under the enforce bundle: rc=${rc}"
+	[ "${rc}" = 137 ] || { echo "canary was not killed (rc=${rc}, want 137)" >&2; ok=false; }
+	scenario_journal
+	stop_unit
+
+	log "S7: restart; the persisted epoch survives"
+	start_controller s7-restart --mode state --expect-epoch "${SCOPE}=2"
+	start_unit || ok=false
+	wait "${ctrl_pid}" || ok=false
+	cat /tmp/e3controller-s7-restart.log
+	scenario_journal
+	stop_unit
+	record_result S7 "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
+}
+
+# ---------------------------------------------------------------------
+# S8: a bundle signed by a key outside the trust root gets
+# REJECTED_SIGNATURE, and nothing changes in Tetragon.
+# ---------------------------------------------------------------------
+scenario_s8() {
+	log "S8: bad signature -> REJECTED_SIGNATURE, Tetragon unchanged"
+	write_dropins "e3.conf=$(e3_dropin)"
+	ok=true
+	"${BIN_DIR}/e3root" --out /tmp/e3-bogus-root.json --keys-out "${E3_KEYS}/bogus" || ok=false
+	canary_policy e3-bogus /tmp/e3-never-run >"${BUNDLE_DIR}/e3-bogus.yaml"
+	sign_bundle "${BUNDLE_DIR}/s8-badsig.json" "${E3_KEYS}/bogus/targets.key" 3 monitor "e3-bogus=${BUNDLE_DIR}/e3-bogus.yaml" || ok=false
+	before=$(loaded_names)
+	start_controller s8 --mode bundles --overall-timeout 120s --apply-timeout 60s \
+		--bundle "${BUNDLE_DIR}/s8-badsig.json" --expect REJECTED_SIGNATURE
+	start_unit || ok=false
+	wait "${ctrl_pid}" || ok=false
+	cat /tmp/e3controller-s8.log
+	check_loaded_unchanged "${before}" || ok=false
+	scenario_journal
+	stop_unit
+	record_result S8 "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
+}
+
+# ---------------------------------------------------------------------
+# S9: replaying S7's enforce bundle (epoch 2, already persisted) gets
+# REJECTED_EPOCH, and nothing changes in Tetragon.
+# ---------------------------------------------------------------------
+scenario_s9() {
+	log "S9: replay of S7's bundle -> REJECTED_EPOCH, Tetragon unchanged"
+	write_dropins "e3.conf=$(e3_dropin)"
+	ok=true
+	before=$(loaded_names)
+	start_controller s9 --mode bundles --overall-timeout 120s --apply-timeout 60s \
+		--bundle "${BUNDLE_DIR}/s7-enforce.json" --expect REJECTED_EPOCH
+	start_unit || ok=false
+	wait "${ctrl_pid}" || ok=false
+	cat /tmp/e3controller-s9.log
+	check_loaded_unchanged "${before}" || ok=false
+	scenario_journal
+	stop_unit
+	record_result S9 "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
+}
+
 main() {
 	setup_users_and_dirs
 	write_relay_yaml
@@ -523,7 +684,7 @@ main() {
 
 	if ! start_swtpm_chardev; then
 		echo "no /dev/tpmrm0; every scenario needs it" >&2
-		for s in S1 S2 S3 S4 S5 S6; do record_result "${s}" FAIL; done
+		for s in S1 S2 S3 S4 S5 S6 S7 S8 S9; do record_result "${s}" FAIL; done
 	else
 		# C5: the two identity-free scenarios first, then testenroll,
 		# then the identity scenarios.
@@ -533,9 +694,12 @@ main() {
 			scenario_s3
 			scenario_s5
 			scenario_s6
+			scenario_s7
+			scenario_s8
+			scenario_s9 # needs S7's bundle and persisted epoch
 			scenario_s4 # last: revocation is terminal for this store (ADR 0035)
 		else
-			for s in S3 S4 S5 S6; do record_result "${s}" FAIL; done
+			for s in S3 S4 S5 S6 S7 S8 S9; do record_result "${s}" FAIL; done
 		fi
 		write_dropins
 	fi
