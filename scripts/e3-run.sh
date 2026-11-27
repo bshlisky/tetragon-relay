@@ -673,6 +673,43 @@ scenario_s9() {
 	stop_unit
 	record_result S9 "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
 }
+# ---------------------------------------------------------------------
+# S10: a TrustUpdate carrying root versions 2 and 3 (each signed by its
+# predecessor's root key and its own) is adopted and persisted; a bundle
+# signed under root 3's targets key is APPLIED. After a restart (the
+# RPM-shipped root.json is still version 1) a second bundle under root 3
+# is APPLIED too, which proves version 3 was persisted and restored.
+# ---------------------------------------------------------------------
+scenario_s10() {
+	log "S10: trust update chain v2, v3 over the stream; persisted across a restart"
+	write_dropins "e3.conf=$(e3_dropin)"
+	ok=true
+	"${BIN_DIR}/e3root" --version 2 --prev-keys "${E3_KEYS}/v1" --keys-out "${E3_KEYS}/v2" --out "${BUNDLE_DIR}/root-v2.json" || ok=false
+	"${BIN_DIR}/e3root" --version 3 --prev-keys "${E3_KEYS}/v2" --keys-out "${E3_KEYS}/v3" --out "${BUNDLE_DIR}/root-v3.json" || ok=false
+	canary_policy e3-s10 /tmp/e3-never-run >"${BUNDLE_DIR}/e3-s10.yaml"
+	sign_bundle "${BUNDLE_DIR}/s10-a.json" "${E3_KEYS}/v3/targets.key" 3 monitor "e3-s10=${BUNDLE_DIR}/e3-s10.yaml" || ok=false
+	sign_bundle "${BUNDLE_DIR}/s10-b.json" "${E3_KEYS}/v3/targets.key" 4 monitor "e3-s10=${BUNDLE_DIR}/e3-s10.yaml" || ok=false
+	start_controller s10 --mode bundles --overall-timeout 300s --apply-timeout 180s \
+		--trust-update "${BUNDLE_DIR}/root-v2.json" --trust-update "${BUNDLE_DIR}/root-v3.json" \
+		--bundle "${BUNDLE_DIR}/s10-a.json" --expect APPLIED
+	start_unit || ok=false
+	wait "${ctrl_pid}" || ok=false
+	cat /tmp/e3controller-s10.log
+	journal=$(scenario_journal)
+	echo "${journal}"
+	grep '"step":"trust_root_adopted"' <<<"${journal}" | grep -q 'version 3' || { echo "no trust_root_adopted for version 3" >&2; ok=false; }
+	stop_unit
+
+	log "S10: restart; root version 3 is restored from the store"
+	start_controller s10-restart --mode bundles --overall-timeout 300s --apply-timeout 180s \
+		--bundle "${BUNDLE_DIR}/s10-b.json" --expect APPLIED
+	start_unit || ok=false
+	wait "${ctrl_pid}" || ok=false
+	cat /tmp/e3controller-s10-restart.log
+	scenario_journal
+	stop_unit
+	record_result S10 "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
+}
 
 main() {
 	setup_users_and_dirs
@@ -684,7 +721,7 @@ main() {
 
 	if ! start_swtpm_chardev; then
 		echo "no /dev/tpmrm0; every scenario needs it" >&2
-		for s in S1 S2 S3 S4 S5 S6 S7 S8 S9; do record_result "${s}" FAIL; done
+		for s in S1 S2 S3 S4 S5 S6 S7 S8 S9 S10; do record_result "${s}" FAIL; done
 	else
 		# C5: the two identity-free scenarios first, then testenroll,
 		# then the identity scenarios.
@@ -697,9 +734,10 @@ main() {
 			scenario_s7
 			scenario_s8
 			scenario_s9 # needs S7's bundle and persisted epoch
+			scenario_s10
 			scenario_s4 # last: revocation is terminal for this store (ADR 0035)
 		else
-			for s in S3 S4 S5 S6 S7 S8 S9; do record_result "${s}" FAIL; done
+			for s in S3 S4 S5 S6 S7 S8 S9 S10; do record_result "${s}" FAIL; done
 		fi
 		write_dropins
 	fi

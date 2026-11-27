@@ -244,8 +244,7 @@ forwarding, the full message loop) — do not use it as a reference for those.
 
 ## 9. What this repository does not implement yet (so you don't wait on it)
 
-- `TrustUpdate` processing, reconcile scheduling and drift alerts (step 6b Parts C-E, in
-  progress; until then `TrustUpdate` is answered as in step 6a).
+- Reconcile scheduling and reconcile-driven drift alerts (step 6b Parts D-E, in progress).
 - Remote attestation (`Hello.pcr_quote` is always empty from this repository today).
 - The production controller, gateway, signer and collector themselves — this repository only
   ever builds the agent, plus `cmd/testcontroller` (handshake-only test tooling) and this
@@ -317,7 +316,34 @@ Status refinements:
 | --- | --- |
 | `GUARDRAIL_REJECT` | A bundle was rejected `REJECTED_GUARDRAIL` or `REJECTED_CAPABILITY`; `detail` carries the bundle digest and rule ID. |
 | `DRIFT` | ROLLBACK_FAILED (above). Reconcile-driven drift alerts follow in step 6b Part D. |
+| `TRUST_EXPIRED` | The agent's current trust root is expired: once per connection (after HelloAck) and again daily while it stays expired. Every bundle is rejected meanwhile (`REJECTED_SIGNATURE`, reason `trust root metadata has expired`); LKG stays enforced. Send a `TrustUpdate`. |
+| `KIND_UNSPECIFIED`, detail `TRUST_UPDATE_REJECTED: ...` | A `TrustUpdate` (or a step of it) was not adopted (section 10.5). The proto has no trust-update alert kind. |
 
 Every kind is rate-limited agent-side to one per 5 minutes (the first is always sent).
 Alerts and ApplyResults produced while disconnected are queued (at most 64; the oldest
 is dropped when full) and sent after the next HelloAck, before anything else.
+
+### 10.5 `TrustUpdate`
+
+`TrustUpdate.signed_roots` is the ordered chain N+1..M of root metadata envelopes, each
+the exact signed bytes. The agent:
+
+- processes it on the same worker as bundles: **after** any bundle apply in progress
+  finishes and **before** a pending bundle is verified, so a root never changes during a
+  verification, and a bundle sent right after a `TrustUpdate` is verified under the new
+  root;
+- skips entries at or below its current version (you do not need to know which version
+  the agent has; sending the whole chain from version 2 is fine);
+- verifies each next version against its predecessor (old root threshold and new root
+  threshold, exactly one version forward, not expired, validity at most 365 days) and
+  persists it before it becomes current; each step is atomic;
+- stops at the first entry that fails, keeping the last version it reached, and raises
+  `Alert{KIND_UNSPECIFIED, "TRUST_UPDATE_REJECTED: ..."}`. The same happens, adopting
+  nothing, if the store is TAMPERED, if `signed_roots` is empty or has more than 64
+  entries, or if a version requires `mldsa-87` and the agent's build has no ML-DSA;
+- sends no reply on success. The adopted version shows up as `Hello.trust_root_version`
+  on the next connection. A successful update is audited locally.
+
+At most 4 `TrustUpdate` messages are held while a bundle apply runs; beyond that the
+oldest is dropped. You resend trust metadata on every reconcile anyway (architecture 6.3
+step 4).
