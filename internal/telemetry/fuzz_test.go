@@ -21,12 +21,18 @@ func FuzzSpoolFile(f *testing.F) {
 	raw, _ := h.Marshal()
 	name := fileName(1, h.ChainID, 2)
 	f.Add(s.seal(name, raw, p), uint32(len(raw)), name)
+	f.Add(s.sealV1(name, raw, p), uint32(len(raw))|1<<31, name)
 	f.Add([]byte("TRS1"), uint32(0), "x.batch")
+	f.Add([]byte("TRS2"), uint32(0), "x.batch")
 	f.Fuzz(func(t *testing.T, body []byte, split uint32, name string) {
 		_, _ = s.unseal(name, body) // arbitrary bytes: must not panic
 		// Sealed by the agent around arbitrary bytes.
-		cut := int(split) % (len(body) + 1)
+		// The high bit of split picks the format: step 7a's (TRS1) or 7b's.
+		cut := int(split&^(1<<31)) % (len(body) + 1)
 		sealed := s.seal(name, body[:cut], body[cut:])
+		if split&(1<<31) != 0 {
+			sealed = s.sealV1(name, body[:cut], body[cut:])
+		}
 		b, err := s.unseal(name, sealed)
 		if err != nil {
 			return

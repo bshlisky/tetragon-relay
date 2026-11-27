@@ -105,7 +105,13 @@ var (
 )
 
 const (
-	fileMagic  = "TRS1"
+	// fileMagicV1 is step 7a's batch file: its HMAC covers the file name
+	// and the whole body. Still read, never written.
+	fileMagicV1 = "TRS1"
+	// fileMagic is step 7b's: its HMAC covers the file name, the magic
+	// and the batch hash, which commits to the header length, header and
+	// payload, so the payload is hashed once, not hashed and MACed.
+	fileMagic  = "TRS2"
 	headName   = "head"
 	fileSuffix = ".batch"
 	macSize    = sha512.Size384
@@ -197,42 +203,61 @@ func parseFileName(name string) (gen uint64, chain batch.ChainID, seq uint64, ok
 	return g, chain, q, true
 }
 
-// seal is a batch file's bytes: magic, be32 header length, header,
-// payload, and an HMAC-SHA-384 over the file name and all of that.
-func (s *Spool) seal(name string, header, payload []byte) []byte {
-	var n [4]byte
-	binary.BigEndian.PutUint32(n[:], uint32(len(header))) //nolint:gosec // G115: bounded by MaxTelemetryHeaderBytes
-	body := make([]byte, 0, len(fileMagic)+4+len(header)+len(payload)+macSize)
-	body = append(body, fileMagic...)
-	body = append(body, n[:]...)
-	body = append(body, header...)
-	body = append(body, payload...)
-	return append(body, s.mac([]byte(name), body)...)
+// sealParts is a batch file's bytes, in the order written: magic, be32
+// header length and header; the payload (not copied); and an HMAC-SHA-384
+// over the file name, the magic and the batch hash.
+func (s *Spool) sealParts(name string, header, payload []byte, hash batch.Hash) [3][]byte {
+	pre := make([]byte, 0, len(fileMagic)+4+len(header))
+	pre = append(pre, fileMagic...)
+	pre = binary.BigEndian.AppendUint32(pre, uint32(len(header))) //nolint:gosec // G115: bounded by MaxTelemetryHeaderBytes
+	pre = append(pre, header...)
+	return [3][]byte{pre, payload, s.mac([]byte(name), []byte(fileMagic), hash[:])}
 }
 
-// unseal checks a batch file and returns its header and payload.
+// unseal checks a batch file (either format) and returns its header and
+// payload. The MAC is checked before the header is parsed.
 func (s *Spool) unseal(name string, raw []byte) (batch.Batch, error) {
-	if len(raw) < len(fileMagic)+4+macSize || string(raw[:len(fileMagic)]) != fileMagic {
-		return batch.Batch{}, fmt.Errorf("%w: %s: short or bad magic", ErrSpoolCorrupt, name)
+	if len(raw) < len(fileMagic)+4+macSize {
+		return batch.Batch{}, fmt.Errorf("%w: %s: short", ErrSpoolCorrupt, name)
 	}
+	magic := string(raw[:len(fileMagic)])
 	body, tag := raw[:len(raw)-macSize], raw[len(raw)-macSize:]
-	if !hmac.Equal(tag, s.mac([]byte(name), body)) {
-		return batch.Batch{}, fmt.Errorf("%w: %s: HMAC mismatch", ErrSpoolCorrupt, name)
-	}
 	hl := binary.BigEndian.Uint32(body[len(fileMagic):])
 	rest := body[len(fileMagic)+4:]
 	if uint64(hl) > uint64(len(rest)) {
 		return batch.Batch{}, fmt.Errorf("%w: %s: header length", ErrSpoolCorrupt, name)
 	}
-	b, err := batch.Parse(rest[:hl], rest[hl:])
+	header, payload := rest[:hl], rest[hl:]
+	hash := batch.HashOf(header, payload)
+	switch magic {
+	case fileMagic:
+		if !hmac.Equal(tag, s.mac([]byte(name), []byte(fileMagic), hash[:])) {
+			return batch.Batch{}, fmt.Errorf("%w: %s: HMAC mismatch", ErrSpoolCorrupt, name)
+		}
+	case fileMagicV1:
+		if !hmac.Equal(tag, s.mac([]byte(name), body)) {
+			return batch.Batch{}, fmt.Errorf("%w: %s: HMAC mismatch", ErrSpoolCorrupt, name)
+		}
+	default:
+		return batch.Batch{}, fmt.Errorf("%w: %s: bad magic", ErrSpoolCorrupt, name)
+	}
+	h, err := batch.ParseHeader(header)
+	if err == nil && len(payload) > limits.MaxTelemetryPayloadBytes {
+		err = fmt.Errorf("%w: payload %d bytes", batch.ErrBadPayload, len(payload))
+	}
+	// Re-checked although the MAC already covers it (step 7a's review
+	// relies on this check on read).
+	if err == nil && sha256Sum(payload) != h.PayloadSHA256 {
+		err = batch.ErrPayloadDigest
+	}
 	if err != nil {
 		return batch.Batch{}, fmt.Errorf("%w: %s: %w", ErrSpoolCorrupt, name, err)
 	}
 	gen, chain, seq, ok := parseFileName(name)
-	if !ok || chain != b.Header.ChainID || seq != b.Header.Seq || gen == 0 {
+	if !ok || chain != h.ChainID || seq != h.Seq || gen == 0 {
 		return batch.Batch{}, fmt.Errorf("%w: %s: name does not match header", ErrSpoolCorrupt, name)
 	}
-	return b, nil
+	return batch.Batch{Header: h, RawHeader: header, Payload: payload, Hash: hash}, nil
 }
 
 type headState int
@@ -424,8 +449,8 @@ func (s *Spool) appendLocked(kind, class string, count uint64, first, last int64
 	}
 	hash := batch.HashOf(raw, payload)
 	name := fileName(s.gen, s.chain, h.Seq)
-	content := s.seal(name, raw, payload)
-	if err := writeAtomic(s.cfg.FS, s.cfg.Dir, name, content); err != nil {
+	parts := s.sealParts(name, raw, payload, hash)
+	if err := writeAtomic(s.cfg.FS, s.cfg.Dir, name, parts[:]...); err != nil {
 		s.stats.WriteFailures++
 		return Entry{}, err
 	}
@@ -435,7 +460,7 @@ func (s *Spool) appendLocked(kind, class string, count uint64, first, last int64
 		s.removeQuiet(name)
 		return Entry{}, err
 	}
-	e := Entry{Gen: s.gen, Chain: s.chain, Seq: h.Seq, Hash: hash, Class: class, Size: int64(len(content)), name: name}
+	e := Entry{Gen: s.gen, Chain: s.chain, Seq: h.Seq, Hash: hash, Class: class, Size: int64(len(parts[0]) + len(parts[1]) + len(parts[2])), name: name}
 	s.seq, s.prev = h.Seq, hash
 	s.files = append(s.files, e)
 	s.total += e.Size
@@ -450,18 +475,29 @@ func (s *Spool) signal() {
 	}
 }
 
-// AppendEvents spools one events batch of class. If the spool would
-// exceed MaxBytes, the oldest non_security batches are dropped first, then
-// the oldest security batches; a dropped record listing them is written
-// before they are deleted, so the loss is in the chain even across a
-// crash.
+// AppendEvents spools one events batch of class made of records (see
+// AppendEventsPayload).
 func (s *Spool) AppendEvents(class string, records [][]byte, first, last int64) (Entry, error) {
-	if class != batch.ClassSecurity && class != batch.ClassNonSecurity {
-		return Entry{}, fmt.Errorf("telemetry: AppendEvents class %q", class)
-	}
 	var payload []byte
 	for _, r := range records {
 		payload = batch.AppendRecord(payload, r)
+	}
+	return s.AppendEventsPayload(class, payload, uint64(len(records)), first, last)
+}
+
+// AppendEventsPayload spools one events batch of class whose payload is
+// count records (batch.AppendRecord). The spool does not keep payload:
+// the caller may reuse it once this returns. If the spool would exceed
+// MaxBytes, the oldest non_security batches are dropped first, then the
+// oldest security batches; a dropped record listing them is written
+// before they are deleted, so the loss is in the chain even across a
+// crash.
+func (s *Spool) AppendEventsPayload(class string, payload []byte, count uint64, first, last int64) (Entry, error) {
+	if class != batch.ClassSecurity && class != batch.ClassNonSecurity {
+		return Entry{}, fmt.Errorf("telemetry: AppendEvents class %q", class)
+	}
+	if n, ok := countRecords(payload); !ok || n != count || count == 0 {
+		return Entry{}, fmt.Errorf("telemetry: AppendEvents payload is not %d records", count)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -469,7 +505,25 @@ func (s *Spool) AppendEvents(class string, records [][]byte, first, last int64) 
 	if err := s.makeRoomLocked(need); err != nil {
 		return Entry{}, err
 	}
-	return s.appendLocked(batch.KindEvents, class, uint64(len(records)), first, last, payload)
+	return s.appendLocked(batch.KindEvents, class, count, first, last, payload)
+}
+
+// countRecords counts payload's length-prefixed records without copying.
+func countRecords(payload []byte) (uint64, bool) {
+	var n uint64
+	for len(payload) > 0 {
+		if len(payload) < batch.RecordOverhead {
+			return 0, false
+		}
+		l := binary.BigEndian.Uint32(payload)
+		payload = payload[batch.RecordOverhead:]
+		if l == 0 || l > limits.MaxTelemetryEventBytes || uint64(l) > uint64(len(payload)) {
+			return 0, false
+		}
+		payload = payload[l:]
+		n++
+	}
+	return n, true
 }
 
 func (s *Spool) makeRoomLocked(need int64) error {

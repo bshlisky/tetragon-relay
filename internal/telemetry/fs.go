@@ -64,19 +64,21 @@ func (OSFS) FsyncDir(name string) error {
 	return cerr
 }
 
-// writeAtomic writes b to dir/name: a temp file, fsync, rename, fsync of
-// the directory. A crash at any step leaves either the old file or the
+// writeAtomic writes parts, in order, to dir/name: a temp file, fsync,
+// rename, fsync of the directory. A crash at any step leaves either the old file or the
 // new one, never a partial one under name (a stale temp file is ignored
 // and removed at the next Open).
-func writeAtomic(fsys FS, dir, name string, b []byte) error {
+func writeAtomic(fsys FS, dir, name string, parts ...[]byte) error {
 	tmp := filepath.Join(dir, name+tmpSuffix)
 	f, err := fsys.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("telemetry: create %s: %w", tmp, err)
 	}
-	if _, err := f.Write(b); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("telemetry: write %s: %w", tmp, err)
+	for _, b := range parts {
+		if _, err := f.Write(b); err != nil {
+			_ = f.Close()
+			return fmt.Errorf("telemetry: write %s: %w", tmp, err)
+		}
 	}
 	if err := f.Sync(); err != nil {
 		_ = f.Close()

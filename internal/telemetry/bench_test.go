@@ -234,11 +234,15 @@ func BenchmarkStageSpool(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
+	var payload []byte
+	for _, r := range recs {
+		payload = batch.AppendRecord(payload, r)
+	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	c0 := cpuNow()
 	for i := 0; i < b.N; i++ {
-		e, err := s.AppendEvents(batch.ClassNonSecurity, recs, 1, 2)
+		e, err := s.AppendEventsPayload(batch.ClassNonSecurity, payload, uint64(len(recs)), 1, 2)
 		if err != nil {
 			b.Fatal(err)
 		}

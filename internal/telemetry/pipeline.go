@@ -235,9 +235,13 @@ func (p *Pipeline) ingest(ctx context.Context) {
 	}
 }
 
+// pending is one class's batch being built. Its payload buffer is reused
+// for every batch of that class (the spool does not keep it), so the
+// builder allocates nothing per event once the buffers have grown.
 type pending struct {
-	records     [][]byte
-	bytes       int
+	class       string
+	payload     []byte
+	count       uint64
 	first, last int64
 	started     time.Time
 }
@@ -246,26 +250,26 @@ type pending struct {
 // batch at BatchMaxEvents, at limits.MaxTelemetryPayloadBytes, or after
 // BatchMaxAge.
 func (p *Pipeline) build(ctx context.Context) {
-	cur := map[string]*pending{batch.ClassSecurity: {}, batch.ClassNonSecurity: {}}
-	flush := func(class string) {
-		b := cur[class]
-		if len(b.records) == 0 {
+	cur := [2]pending{{class: batch.ClassSecurity}, {class: batch.ClassNonSecurity}}
+	flush := func(b *pending) {
+		if b.count == 0 {
 			return
 		}
-		if _, err := p.cfg.Spool.AppendEvents(class, b.records, b.first, b.last); err != nil {
-			p.lostOnWrite.Add(uint64(len(b.records)))
-			p.cfg.Auditor.Record("telemetry_spool_write_failed", fmt.Sprintf("%d %s events not spooled", len(b.records), class), err)
+		if _, err := p.cfg.Spool.AppendEventsPayload(b.class, b.payload, b.count, b.first, b.last); err != nil {
+			p.lostOnWrite.Add(b.count)
+			p.cfg.Auditor.Record("telemetry_spool_write_failed", fmt.Sprintf("%d %s events not spooled", b.count, b.class), err)
 		}
-		cur[class] = &pending{}
+		b.payload, b.count = b.payload[:0], 0
 	}
 	tick := time.NewTicker(min(p.cfg.BatchMaxAge/4+time.Millisecond, touchEvery))
 	defer tick.Stop()
 	marshal := proto.MarshalOptions{Deterministic: true}
+	var scratch []byte
 	for {
 		select {
 		case <-ctx.Done():
-			flush(batch.ClassSecurity)
-			flush(batch.ClassNonSecurity)
+			flush(&cur[0])
+			flush(&cur[1])
 			return
 		case ev := <-p.events:
 			if rl := ev.GetRateLimitInfo(); rl != nil {
@@ -281,8 +285,9 @@ func (p *Pipeline) build(ctx context.Context) {
 			if p.cfg.Redactor.Redact(ev) > 0 {
 				p.unknownFields.Add(1)
 			}
-			raw, err := marshal.Marshal(ev)
-			if err != nil || len(raw) == 0 || len(raw) > limits.MaxTelemetryEventBytes {
+			var err error
+			scratch, err = marshal.MarshalAppend(scratch[:0], ev)
+			if err != nil || len(scratch) == 0 || len(scratch) > limits.MaxTelemetryEventBytes {
 				p.oversized.Add(1)
 				continue
 			}
@@ -290,26 +295,28 @@ func (p *Pipeline) build(ctx context.Context) {
 			if t := ev.GetTime(); t != nil {
 				ts = t.AsTime().UnixNano()
 			}
-			b := cur[class]
-			if len(b.records) > 0 && b.bytes+len(raw)+batch.RecordOverhead > limits.MaxTelemetryPayloadBytes {
-				flush(class)
-				b = cur[class]
+			b := &cur[1]
+			if class == batch.ClassSecurity {
+				b = &cur[0]
 			}
-			if len(b.records) == 0 {
+			if b.count > 0 && len(b.payload)+len(scratch)+batch.RecordOverhead > limits.MaxTelemetryPayloadBytes {
+				flush(b)
+			}
+			if b.count == 0 {
 				b.first, b.last, b.started = ts, ts, p.cfg.Clock()
 			}
 			b.first, b.last = min(b.first, ts), max(b.last, ts)
-			b.records = append(b.records, raw)
-			b.bytes += len(raw) + batch.RecordOverhead
-			if len(b.records) >= p.cfg.BatchMaxEvents {
-				flush(class)
+			b.payload = batch.AppendRecord(b.payload, scratch)
+			b.count++
+			if b.count >= uint64(p.cfg.BatchMaxEvents) {
+				flush(b)
 			}
 		case <-tick.C:
 			p.cfg.Liveness.Touch(LivenessBuilder)
 			now := p.cfg.Clock()
-			for class, b := range cur {
-				if len(b.records) > 0 && now.Sub(b.started) >= p.cfg.BatchMaxAge {
-					flush(class)
+			for i := range cur {
+				if cur[i].count > 0 && now.Sub(cur[i].started) >= p.cfg.BatchMaxAge {
+					flush(&cur[i])
 				}
 			}
 		}
