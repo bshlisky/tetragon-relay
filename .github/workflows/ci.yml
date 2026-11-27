@@ -346,6 +346,9 @@ jobs:
   # cmd/e3controller. See docs/reports/step-06a.md section 9/14 for the
   # full design and per-scenario evidence.
   e3:
+    # A hung scenario must not hold a runner for the 6 h default (step 7b:
+    # run 46040250809's P4-RSS waited on the collector).
+    timeout-minutes: 60
     runs-on: ubuntu-24.04
     needs: [ci, integration]
     env:

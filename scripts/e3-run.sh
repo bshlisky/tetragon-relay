@@ -1038,15 +1038,19 @@ scenario_p4_rss() {
 	grep -E 'VmRSS|VmHWM' "/proc/${pid}/status"
 	c0=$(awk '{print $14 + $15}' "/proc/${pid}/stat")
 	t0=$(date +%s.%N)
+	local loops=()
 	for _ in $(seq 1 "${P4_LOOPS}"); do
 		(end=$((SECONDS + 60)); while [ "${SECONDS}" -lt "${end}" ]; do /usr/bin/true; done) &
+		loops+=($!)
 	done
 	for _ in $(seq 1 60); do
 		rss=$(awk '/^VmRSS:/ {print $2}' "/proc/${pid}/status")
 		[ "${rss}" -gt "${maxrss}" ] && maxrss=${rss}
 		sleep 1
 	done
-	wait
+	# Only the load loops: a bare wait would also wait for the collector
+	# and controller, which never exit.
+	wait "${loops[@]}"
 	t1=$(date +%s.%N)
 	c1=$(awk '{print $14 + $15}' "/proc/${pid}/stat")
 	wait_spool_empty 120 || ok=false
