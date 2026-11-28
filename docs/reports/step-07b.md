@@ -701,6 +701,280 @@ GATE PASS
   following the messages Tetragon delivers. I didn't establish why Tetragon delivered
   fewer here; it is a question for T-S6, not an assumption.
 
+# Session 3: docs/reviews/step-07b-decisions-2.md, items 1–5 (V3 as observation)
+
+Base: `da61669`. Decisions: `docs/reviews/step-07b-decisions-2.md` (committed verbatim in
+`846d5cb`). Date: 2026-11-28.
+
+## S3.1 Summary
+
+**Boundary:** items 1–4 are done, plus V1, V2 and T-S6 as an observation. ci, bench
+and integration are green. **e3 is red on P5-CONTROL-UNDER-LOAD's new enforce case,
+which found a real enforcement-safety problem (S3.9 Q1).** The gate was not relaxed.
+
+- **e3 went green first, as asked** (run 46113949265 on `2d634ab`). P4-RSS's CPU line is
+  now report-only, and RSS fails at ≥ 96 MiB and warns at ≥ 64 MiB (E1.2, E2).
+- **P5 now proves the saturated case** (E1.1). The compiled generator
+  (`cmd/e3execflood`) makes **10,363 events/s** on the runner, against about 3–6k/s from
+  the shell loops. relayd sat at its quota: 23.22 % of one core and `nr_throttled`
+  +1,271. Heartbeats held: every gap was 15 s through both applies.
+- **Finding: under that flood, an enforce bundle that should roll back was APPLIED.**
+  - The admin-path shell **was** killed (exit 137).
+  - relayd's health window never received the kill event, so the window passed and
+    epoch 8 was committed (`ApplyResult status=APPLIED epoch=8`).
+  - In the same window the canary's kprobe event never reached telemetry.
+  - Tetragon ran at 104 % of one core, and its own counter
+    `tetragon_notify_overflowed_events_total` grows when a client falls behind (T-S6
+    below). This is the starvation path E1.1 was meant to test.
+- **T-S6 (V3): Tetragon drops events for a slow client with no signal on the stream.**
+  - relayd read at most 100 msgs/s while 2,000 events/s were generated for 60 s.
+  - relayd received 12,017 of 120,004 events.
+  - `tetragon_notify_overflowed_events_total` went from 145 to 167,801.
+  - Tetragon sent no RateLimitInfo, the stream never ended, and Tetragon logged
+    nothing about it. Its memory did not grow: it drops, it doesn't buffer.
+- **V1:** v1.8.0's flag is `--enable-process-environment-variables`, read from
+  `tetragon --help` in CI.
+- **V2:** with the flag on, a separate GetEvents client with no field filter saw the
+  canary's `SECRET_TOKEN`; that client is the positive control. No event relayd
+  forwarded carried an environment (`env=0` throughout). The first run failed on a
+  harness bug: my own `grep -F <token>` put the token in argv, and Tetragon reported
+  that exec. Fixed in `940b9d5`; the result is in S3.14.
+- **E1.3 (chunked handoff):** in the local benchmark it costs 10.0–10.4 µs per event,
+  against 13.5–14.7 µs for one channel send per event. The E3 A/B was confounded in its
+  first run, because after the first flood Tetragon itself became the bottleneck. It now
+  runs first, alternating rounds (S3.11).
+- **E1.5 (aggregation_options):** v1.8.0 does not aggregate exec or exit. In six
+  alternating rounds (three aggregated, three control) all 20 execs and 20 exits
+  arrived, with no `aggregation_info`. One earlier aggregated round got 19 execs and 20
+  exits. The API says the aggregator drops events when its buffer is full. Not built on.
+
+| Item | Status | Commits |
+| --- | --- | --- |
+| Decisions committed; progress line for `da61669` | done | `846d5cb`, `2d634ab` |
+| 1 E1.2 P4-RSS CPU report-only; E2 RSS 96/64 MiB; e3 green | done, e3 ✓ (run 46113949265) | `2d634ab` |
+| 2 E1.1 compiled generator; P5 quota assertion; enforce/rollback case | done. **P5 FAIL: rollback not seen under saturation** (S3.9 Q1) | `fbe4b11`, `940b9d5` |
+| 3 E1.3 chunked handoff; gRPC read buffer / window, measured | built; per-event kept as `HandoffChunk 1`; testca knobs; E3 A/B `P4-TUNING` (S3.11) | `d426451`, `940b9d5` |
+| 4 E1.5 aggregation_options (report only) | done: no aggregation of exec/exit | `283e142`, `9457c24` |
+| 5 V1 environment flag from `--help` | done | `b5b1306`, `dd4f3a3` |
+| 5 V2 secret-token proof | built; S3.14 | `b5b1306`, `940b9d5` |
+| 5 V3 / T-S6 | **observation only** (loss without signal; detection needs a decision, S3.9 Q2) | `56501c2` |
+| 6–7 Part S, D2/S6 contract, ADRs Accepted | not started (next session) | — |
+
+## S3.2 Files added or changed (since `da61669`)
+
+```
+.github/workflows/ci.yml                 V1 step; Tetragon with the env flag and a localhost
+                                         metrics server; builds cmd/e3execflood
+cmd/e3execflood/main.go                  new (e3): N fork/execve loops, --rate, SIGTERM
+cmd/e3tetra/main.go                      env-probe mode (V2 positive control)
+cmd/relayd/e3tuning.go, e3tuning_testca.go  new: testca-only RELAYD_E3_* knobs (handoff chunk,
+                                         gRPC read buffer/window, paced source); no-op in production
+cmd/relayd/main.go, telemetry.go         wire the knobs
+internal/telemetry/handoff.go            new: chunked ingest -> builder handoff
+internal/telemetry/pipeline.go           uses it; Config.HandoffChunk
+internal/tetra/config.go, dial_linux.go  ReadBufferSize, InitialWindowSize (0: grpc defaults)
+internal/tetra/aggregation_integration_test.go  new (E1.5)
+scripts/e3-run.sh                        P4-RSS report-only CPU, RSS 96/64, cpu_per_delivered;
+                                         P4-TUNING (replaces P4-GOMAXPROCS1); T-S6; P5 at
+                                         saturation with the enforce case; T-S1 V2
+docs/decisions/0041-resource-targets-measured.md  section 9; decision table
+```
+
+## S3.3 Command output
+
+Local, before each push:
+
+```
+$ go vet ./... && go test -count=1 ./internal/... ./cmd/...     all ok
+$ go test -count=1 -race -cover ./internal/telemetry/...
+ok   internal/telemetry          coverage: 92.0% of statements
+$ GOOS=linux golangci-lint run ./internal/telemetry/... ./internal/tetra/... ./cmd/relayd/...   0 issues.
+$ GOOS=linux golangci-lint run --build-tags testca ./cmd/relayd/...                           0 issues.
+$ go test -run=NONE -bench=BenchmarkPipeline5k -benchtime=100000x -count=2 ./internal/telemetry   (Apple M-series, local)
+  chunked (d426451):  10377, 9975 cpu-ns/event
+  per-event (before): 13526, 14722 cpu-ns/event
+```
+
+V1 (run 46117755144, e3 step "V1"):
+
+```
+38:      --enable-process-environment-variables      Include environment variables in process_exec events. Disabled by default. Note that this option can significantly increase the size of the events and may impact performance, as well as capture sensitive information such as passwords in the events ...
+61:      --filter-environment-variables strings      Filter for specific environment variables
+```
+
+E1.5 (run 46121973985, integration):
+
+```
+AGGREGATION round=0 aggregation_options=true  ... exec=20 exit=20 responses_with_aggregation_info=0 (of 41 responses)
+AGGREGATION round=1 aggregation_options=false ... exec=20 exit=20 responses_with_aggregation_info=0 (of 40 responses)
+AGGREGATION round=2 aggregation_options=true  ... exec=20 exit=20 responses_with_aggregation_info=0 (of 40 responses)
+AGGREGATION round=3 aggregation_options=false ... exec=20 exit=20 responses_with_aggregation_info=0 (of 40 responses)
+AGGREGATION round=4 aggregation_options=true  ... exec=20 exit=20 responses_with_aggregation_info=0 (of 40 responses)
+AGGREGATION round=5 aggregation_options=false ... exec=20 exit=20 responses_with_aggregation_info=0 (of 40 responses)
+(run 46119904742, one aggregated round: exec=19 exit=20)
+```
+
+P5 (run 46121973985):
+
+```
+e3execflood workers=4 secs=148.5 execs=769661 generated=1539322 rate=10363/s failed=0
+P5 generated=1539322 (10363/s) received=298773 (2011/s) wall=148.5s relayd_cpu=34.49s (23.22% of one core) nr_throttled=+1271
+P5 saturation: relayd was at its CPU quota during the flood
+P5 tetragon.service CPU: 155.07s (104.4% of one core)
+P5 admin-path shell exit status: 137 (137 = SIGKILL)
+e3controller: [08:29:00Z] sent bundle 2 (/tmp/e3-bundles/p5-enforce.json ...)
+e3controller: [08:30:01Z] conn #1 seq=13 ApplyResult status=APPLIED epoch=8 ...
+e3controller: FAIL: bundle 2: ApplyResult status APPLIED, want ROLLED_BACK (detail "action-rewrite")
+the canary's kprobe event was not delivered
+no admin-path health-window failure in the journal
+```
+
+T-S6 (run 46121973985):
+
+```
+e3execflood workers=2 secs=60.0 execs=60002 generated=120004 rate=2000/s failed=0
+T-S6 tetragon VmRSS: before=4354016 KiB, max during=4366736 KiB, at flood end=3566856 KiB, 60 s after=3567696 KiB
+T-S6 generated=120004 received=12017 (relayd read at most 100/s for 120 s = 12000)
+tetragon_notify_overflowed_events_total 145      (before)
+tetragon_notify_overflowed_events_total 167801   (after)
+tetragon_observer_ringbuf_events_lost_total 0, tetragon_export_ratelimit_events_dropped_total 0 (both, before and after)
+T-S6 RateLimitInfo seen by relayd: 0
+T-S6 relayd ingest stream ends: 0
+T-S6 tetragon log lines about queues, drops or slow clients: (none)
+```
+
+## S3.4 Mapping: item → functions → tests
+
+| Item | Functions | Tests |
+| --- | --- | --- |
+| E1.2, E2 | `scenario_p4_rss` | E3 P4-RSS |
+| E1.1 | `cmd/e3execflood`, `flood`, `unit_cpu_stat`, `scenario_p5` | E3 P5-CONTROL-UNDER-LOAD |
+| E1.3 | `handoff.put/take/ready`, `Pipeline.build`, `Config.HandoffChunk`, `tetra.Config.dialOptions`, `e3Tuning` | `TestHandoff_*` (4), `TestDialOptions_BufferSizesOptIn`, pipeline tests, E3 P4-TUNING |
+| E1.5 | — | `TestIntegration_AggregationOptions` |
+| V1 | ci step "V1" | e3 job |
+| V2 | `e3tetra --mode=env-probe`, `scenario_ts1` | E3 T-S1 |
+| V3 | `e3Source`/`pacedSource` (testca), `scenario_ts6`, `tetragon_metrics` | E3 T-S6 (INFO) |
+
+## S3.5 Invariants and threats addressed
+
+- **Admission still comes before any queuing.** `peekAdmit` and the token bucket run in
+  ingest, and only admitted events enter the handoff queue. The 1024-event backpressure
+  bound is unchanged: `put` blocks when the queue is full, so Tetragon is read no
+  faster than the pipeline spools.
+- **The handoff never holds Tetragon's bytes after a take** (`clear(evs)`). The added
+  latency is at most 10 ms.
+- **Production takes no tuning from its environment.** `e3Tuning` and `e3Source` are
+  identities without `testca`; `verify-no-test-symbols` still passes.
+- **The V2 secret is never in argv.** It sits in a 0600 pattern file, and the canary
+  gets it through its environment only.
+
+## S3.6 Deviations
+
+1. **E1.2 is report-only, not a regression gate** (ADR 0041 section 9). At the quota,
+   `cpu_per_generated` ≈ quota / generator rate: identical code measured 51.2 µs and
+   35.5 µs. P4-RSS now also prints `cpu_per_delivered` (CPU per message Tetragon
+   delivered, admitted + rate_limited), which is what E1.3 is measured by.
+2. **P4-RSS keeps the shell loops**, so its numbers stay comparable across step 7b. Only
+   P5 and T-S6 use the compiled generator.
+3. **T-S6 throttles relayd's reader, not its builder** (testca `RELAYD_E3_SOURCE_RATE`).
+   From Tetragon's side it is the same slow client: with a slow builder the handoff
+   queue fills and the reader blocks. This keeps test hooks out of `internal/telemetry`.
+4. **Tetragon now runs with `--metrics-server 127.0.0.1:2112`** in e3. That was needed to
+   observe its drops (T-S6, P5). relayd's own unit still can't reach it.
+5. **P4-GOMAXPROCS1 is retired.** Its result is in ADR 0041 section 8.
+6. **V3 stops at observation.** The detection design is S3.9 Q2.
+
+## S3.7 Dependencies added
+
+None.
+
+## S3.8 Known limitations
+
+- Tetragon's RSS in e3 is 3.5–4.4 GB late in the job, with the environment flag on and
+  after about 2M exec events. That is Tetragon, not relayd, but it shares the runner.
+- The E3 A/B for E1.3 and the gRPC buffer sizes is pending a clean run (S3.11).
+
+## S3.9 Open questions for the architect
+
+**Q1. Health-window signals are lost under a saturating exec flood (P5).**
+- With Tetragon at about one core and relayd at its quota, the kill event that should
+  have failed the enforce bundle's health window never reached relayd. Epoch 8 was
+  committed as APPLIED.
+- The health window's stream is separate from telemetry's: it asks only for
+  kprobe/uprobe/LSM events of the bundle's policies. Tetragon still did not deliver the
+  event. T-S6 shows Tetragon drops events for clients that fall behind, counted only in
+  `tetragon_notify_overflowed_events_total`.
+- I have not proven which listener's queue overflowed. The next run prints that counter
+  before and after P5.
+- Options:
+  - (a) The health window fails safe when it can't trust its event stream. That needs a
+    loss signal relayd can read; relayd can't reach Tetragon's metrics endpoint.
+  - (b) A positive liveness probe during the window: a known trigger whose event must
+    arrive, and the window fails if it doesn't.
+  - (c) Accept the risk and document it: an attacker who can flood exec can also blind
+    the health window.
+- My recommendation is (b). It turns "no event" from "healthy" into "unknown".
+
+**Q2. Detecting Tetragon's silent drops (V3).**
+- The stream carries no sequence number, and RateLimitInfo only comes from Tetragon's
+  export rate limiter, which is not used here.
+- The one discontinuity in the stream is exec/exit pairing: every `ProcessExit` carries
+  the `process.exec_id` of a `ProcessExec`. An exit whose exec_id relayd never saw
+  (after the stream's first N seconds) is evidence of a dropped exec. That gives an
+  estimate, not a count, and it needs a bounded exec_id set.
+- Shall I build that (an `Alert` plus a `dropped` record with `reason=tetragon_overflow`
+  and an estimated count), or leave it to Tetragon's metric?
+
+**Q3. Tetragon's environment flag.** V2 needs it, and the help text warns about size
+and performance. Should production deployments run Tetragon with it at all? relayd
+excludes and redacts the environment regardless. `--filter-environment-variables` could
+let Part S's `keep_env` be enforced at the source.
+
+## S3.10 Self-review: where a reviewer is most likely to find a bug
+
+1. `handoff.take` can return early on a stale notify. That is harmless (it takes
+   whatever is queued), but it does mean an extra wake-up.
+2. `put` signals at `n+1 == 1` or at a multiple of `chunk`. A take that swaps the
+   buffer mid-chunk resets the count, which is intended.
+3. `pacedSource` uses `time.After` per message: fine at 100/s, testca only.
+4. P5's saturation check reads the cgroup's `cpu.stat` from the start of the flood to
+   the end of the controller run, so it can include the post-flood seconds.
+5. `flood_events` parses `generated=` from both generator formats; an empty file counts
+   as 0.
+
+## S3.11 Profile breakdown, before and after (E1.3)
+
+Local benchmark (unpaced source, so it understates the wake-up savings): 10.0–10.4 µs
+per event chunked, against 13.5–14.7 µs per event per-event.
+
+E3 `P4-TUNING`, run 46121973985 (confounded: run after P4-RSS, Tetragon was the
+bottleneck from the second round on):
+
+| Setting | Delivered | relayd CPU | cpu_per_delivered |
+| --- | --- | --- | --- |
+| per-event (round 1) | 3,396/s | 15.31 % | 45.1 µs |
+| chunked | 1,377/s | 0.74 % | 5.4 µs |
+| chunked + read buffer 256 KiB | 2,533/s | 1.19 % | 4.7 µs |
+| chunked + window 1 MiB | 2,524/s | 1.07 % | 4.3 µs |
+
+P4-RSS (chunked, first flood of that run): 6,258 generated/s, 20.36 % of one core,
+**cpu_per_delivered 32.7 µs**, 62.9 MiB. The clean A/B is in the next run (S3.14).
+
+## S3.12 Compression ratio and spool hours
+
+Unchanged (ADR 0041 section 6; E3 kept as stated).
+
+## S3.13 Tetragon's slow-client behaviour (T-S6)
+
+See S3.1 and S3.3. **Tetragon v1.8.0 does not buffer for a slow GetEvents client: it
+drops.** Its RSS did not grow during the flood. The drops show up only in
+`tetragon_notify_overflowed_events_total`; the stream carried no RateLimitInfo, no
+error and no end. relayd therefore can't tell today. Detection: S3.9 Q2.
+
+## S3.14 E3 evidence
+
+<PENDING>
+
 ## Progress log
 
 One dated line per push: commit, what changed, the CI result observed.
@@ -728,3 +1002,6 @@ One dated line per push: commit, what changed, the CI result observed.
 - 2026-11-28 `c817fb1` (that test): run 46083840295: ci ✓, bench ✓ (15,193 ≤ 19,060 ns, slower runner), integration ✓, e3 ✗: **P4-RSS FAIL** (4,689 generated events/s, gate not evaluated; 24.0 %). Everything else PASS, P5 PASS. P4-GOMAXPROCS1: 15.5 % at 2,805/s (55.4 µs per generated event, against 51.2 µs).
 - 2026-11-28 `da61669` (session-2 report; ADR 0039 section 10; ADR 0041): run 46088223116: ci ✓, bench ✓, integration ✓, e3 ✗: **P4-RSS FAIL on the 15 % gate** (24.11 % at 6,800 generated events/s; 63.5 MiB). Everything else PASS, P5 PASS (3,768 generated/s, relayd 1.56 %: not at its quota). P4-GOMAXPROCS1: 12.9 % at 3,274/s.
 - 2026-11-28 `846d5cb`, `2d634ab` (decisions-2 committed; P4-RSS CPU report-only, RSS 96/64 MiB): run 46113949265: ci ✓, bench ✓, integration ✓, **e3 ✓: S1–S13, T-S1–T-S5, P4-RSS, P5 and NO_SIGSYS PASS.** P4-RSS: 23.85 % of one core at 5,004 generated events/s (report only), cpu_per_generated 47.7 µs, peak 62.1 MiB. P5 (old form): relayd 1.14 % at 2,501 generated/s, not at its quota.
+- 2026-11-28 `fbe4b11`, `d426451`, `283e142`, `b5b1306`, `56501c2` (E1.1, E1.3, E1.5, V1/V2, T-S6): run 46117755144: ci ✓, bench ✓, integration ✓ (E1.5 20/20), e3 ✗ at the V1 step: v1.8.0 has two flags naming "environment" (`--enable-process-environment-variables`, `--filter-environment-variables`).
+- 2026-11-28 `dd4f3a3` (V1 picks the boolean --enable-* flag; progress line for `2d634ab`): run 46119904742: ci ✓, bench ✓, integration ✗ (E1.5: one aggregated round got 19 exec / 20 exit), e3 skipped.
+- 2026-11-28 `9457c24` (E1.5 alternates aggregated and control rounds): run 46121973985: ci ✓, bench ✓, integration ✓ (6 rounds, all 20/20), e3 ✗: **T-S1 FAIL** (harness: the token in my own grep's argv), **P5 FAIL** (at saturation, 10,363 generated/s, relayd 23.22 %, nr_throttled +1,271: the enforce bundle was APPLIED, not ROLLED_BACK; the kill event never reached the health window). Everything else PASS; T-S6 INFO (12,017 of 120,004 received at 100 msgs/s; `tetragon_notify_overflowed_events_total` 145 → 167,801; no RateLimitInfo).

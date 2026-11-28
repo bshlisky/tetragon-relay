@@ -235,6 +235,28 @@ continue without a gap. The separate head is kept (about 1.5 % of the pipeline's
 samples). Each batch file carries one HMAC-SHA-384, over the file name, the magic and
 the batch hash (step 7b P2).
 
+#### 10d. Tetragon's behaviour toward a slow client (step 7b V3, T-S6, observed)
+
+Measured on the real Tetragon v1.8.0 in E3 (run 46121973985): relayd read at most 100
+GetEvents messages per second (a testca-only pacing of its reader) while 2,000 exec
+and exit events per second were generated for 60 s.
+
+- relayd received 12,017 of 120,004 events over 120 s, which is its read rate.
+- **Tetragon does not buffer for a slow client: it drops.** Its VmRSS did not grow
+  (4.35 GB before the flood, 4.37 GB at most during it).
+- The drops appear only in Tetragon's own metric
+  `tetragon_notify_overflowed_events_total` (145 → 167,801). The metrics
+  `tetragon_observer_ringbuf_events_lost_total` and
+  `tetragon_export_ratelimit_events_dropped_total` stayed at 0.
+- **Nothing reached the stream.** There was no RateLimitInfo (that comes only from
+  Tetragon's export rate limiter), no error and no stream end, and Tetragon logged
+  nothing.
+
+The chain therefore proves completeness from the spool onward, but not from Tetragon:
+an event Tetragon drops for relayd leaves no trace. The same mechanism is the likely
+cause of the missed health-window event in P5 (step 7b report S3.9 Q1). Detection from
+the stream (exec/exit pairing on `process.exec_id`) is proposed there, not decided.
+
 ## Consequences
 
 - The backend team implements `relay.telemetry.v1.Collector` and the verifier described
@@ -243,3 +265,5 @@ the batch hash (step 7b P2).
 - Events read from Tetragon but not yet spooled when relayd crashes are lost without a
   trace in the chain. The chain proves completeness from the spool onward, not from
   the kernel.
+- Tetragon drops events for a GetEvents client that falls behind, and it says so only
+  in its own metrics (section 10d). Those drops are invisible to the chain.
