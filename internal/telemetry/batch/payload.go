@@ -24,16 +24,25 @@ type Ref struct {
 //     events that ingest dropped over the configured event-rate budget,
 //     before they were decoded. They never formed batches, so Batches is
 //     empty, and the header's first_ts/last_ts bound when they were
-//     dropped.
+//     dropped;
+//   - estimated Tetragon loss (step-07b-decisions-3.md F2; Reason
+//     DropTetragonUnsignalled, Estimated true): a lower bound on the
+//     non_security events Tetragon dropped without signalling it, counted
+//     as exits whose exec relayd never received. Batches is empty.
 type Dropped struct {
-	Class   string
-	Batches []Ref
-	Reason  string
-	Events  uint64
+	Class     string
+	Batches   []Ref
+	Reason    string
+	Estimated bool
+	Events    uint64
 }
 
 // DropRateLimited is the reason of an admission dropped record.
 const DropRateLimited = "rate_limited"
+
+// DropTetragonUnsignalled is the reason of an estimated-loss dropped
+// record (F2). Its count is a lower bound, never an exact number.
+const DropTetragonUnsignalled = "tetragon_unsignalled"
 
 // Reset reasons (ADR 0039 section 3).
 const (
@@ -71,8 +80,21 @@ func appendRef(b []byte, r Ref) []byte {
 
 // Marshal returns d's canonical JSON.
 func (d *Dropped) Marshal() ([]byte, error) {
+	if d.Estimated != (d.Reason == DropTetragonUnsignalled) {
+		return nil, fmt.Errorf("%w: dropped reason %q with estimated=%t", ErrBadPayload, d.Reason, d.Estimated)
+	}
 	switch d.Reason {
 	case "":
+	case DropTetragonUnsignalled:
+		if d.Class != ClassNonSecurity || d.Events == 0 || len(d.Batches) != 0 {
+			return nil, fmt.Errorf("%w: tetragon_unsignalled dropped record: class %q, %d events, %d batches", ErrBadPayload, d.Class, d.Events, len(d.Batches))
+		}
+		b := append([]byte(`{"class":"`), d.Class...)
+		b = append(b, `","reason":"`...)
+		b = append(b, d.Reason...)
+		b = append(b, `","estimated":true,"events":`...)
+		b = strconv.AppendUint(b, d.Events, 10)
+		return append(b, '}'), nil
 	case DropRateLimited:
 		// Security events are never rate-limited (step 7b D0).
 		if d.Class != ClassNonSecurity || d.Events == 0 || len(d.Batches) != 0 {
@@ -131,11 +153,12 @@ func (w wireRef) ref() (Ref, error) {
 // form.
 func ParseDropped(raw []byte) (Dropped, error) {
 	var w struct {
-		Class   string    `json:"class"`
-		Reason  string    `json:"reason"`
-		Events  uint64    `json:"events"`
-		Count   int       `json:"count"`
-		Batches []wireRef `json:"batches"`
+		Class     string    `json:"class"`
+		Reason    string    `json:"reason"`
+		Estimated bool      `json:"estimated"`
+		Events    uint64    `json:"events"`
+		Count     int       `json:"count"`
+		Batches   []wireRef `json:"batches"`
 	}
 	if len(raw) > limits.MaxTelemetryPayloadBytes {
 		return Dropped{}, fmt.Errorf("%w: dropped payload too large", ErrBadPayload)
@@ -146,7 +169,7 @@ func ParseDropped(raw []byte) (Dropped, error) {
 	if w.Count != len(w.Batches) {
 		return Dropped{}, fmt.Errorf("%w: dropped count %d but %d entries", ErrBadPayload, w.Count, len(w.Batches))
 	}
-	d := Dropped{Class: w.Class, Reason: w.Reason, Events: w.Events}
+	d := Dropped{Class: w.Class, Reason: w.Reason, Estimated: w.Estimated, Events: w.Events}
 	for _, e := range w.Batches {
 		r, err := e.ref()
 		if err != nil {

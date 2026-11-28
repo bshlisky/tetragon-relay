@@ -40,6 +40,8 @@ type telemetryDeps struct {
 	// e3 are the testca build's measurement settings (e3Tuning); zero in
 	// production.
 	e3 e3Knobs
+	// onLoss raises Alert{TELEMETRY_LOSS} (F2); nil in tampered mode.
+	onLoss func(missing, received uint64)
 }
 
 // telemetryAuditor adapts agent.Auditor to telemetry.Auditor.
@@ -105,7 +107,7 @@ func startTelemetry(ctx context.Context, d telemetryDeps) (*telemetry.Pipeline, 
 		Source: e3Source(tetraEventSource{d.tetraClient}, d.e3), EventTypes: types, Redactor: redactor, Spool: spool,
 		Dialer: dialer, BatchMaxEvents: d.cfg.BatchMaxEvents, BatchMaxAge: d.cfg.BatchMaxAge,
 		MaxEventRate: d.cfg.MaxEventRate, Clock: time.Now, Auditor: aud, Liveness: d.liveness,
-		HandoffChunk: d.e3.handoffChunk,
+		HandoffChunk: d.e3.handoffChunk, OnLoss: d.onLoss,
 	})
 	if err != nil {
 		return nil, err

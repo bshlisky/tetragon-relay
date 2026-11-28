@@ -144,6 +144,11 @@ const (
 	// MaxApplyHealthWindow bounds a configured health window from above.
 	MaxApplyHealthWindow = 600 * time.Second
 
+	// TelemetryLossInterval is how often relayd declares its estimate of
+	// Tetragon's silent drops (exits with no exec) in the chain
+	// (step-07b-decisions-3.md F2).
+	TelemetryLossInterval = 60 * time.Second
+
 	// SentinelInterval is how often the health window fires a freshness
 	// sentinel (step-07b-decisions-3.md F0.1; ADR 0042): once at the
 	// window's start and every SentinelInterval after.

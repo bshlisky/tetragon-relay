@@ -162,6 +162,10 @@ message Alert {
     // (Hello.tetragon_env_collection == "on"); once per connection
     // (step-07b-decisions-3.md F4).
     TETRAGON_ENV_COLLECTION = 9;
+    // relayd's estimate of Tetragon's silent drops (exits whose exec never
+    // arrived) exceeded 1 % of the exec and exit events received in an
+    // interval; a lower bound (step-07b-decisions-3.md F2).
+    TELEMETRY_LOSS = 10;
   }
   Kind   kind      = 1;
   string detail    = 2; // bounded 4 KiB, no secrets

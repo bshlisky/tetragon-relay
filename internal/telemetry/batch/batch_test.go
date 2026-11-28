@@ -366,3 +366,44 @@ func TestDropped_RateLimited(t *testing.T) {
 		}
 	}
 }
+
+// step-07b-decisions-3.md F2: the estimated-loss form.
+func TestDropped_TetragonUnsignalled(t *testing.T) {
+	d := Dropped{Class: ClassNonSecurity, Reason: DropTetragonUnsignalled, Estimated: true, Events: 42}
+	raw, err := d.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"class":"non_security","reason":"tetragon_unsignalled","estimated":true,"events":42}`; string(raw) != want {
+		t.Fatalf("Marshal = %s, want %s", raw, want)
+	}
+	got, err := ParseDropped(raw)
+	if err != nil || got.Reason != DropTetragonUnsignalled || !got.Estimated || got.Events != 42 {
+		t.Fatalf("ParseDropped: %+v %v", got, err)
+	}
+	s := string(raw)
+	for name, in := range map[string]string{
+		"not estimated":          strings.Replace(s, `true`, `false`, 1),
+		"estimated absent":       strings.Replace(s, `"estimated":true,`, ``, 1),
+		"zero":                   strings.Replace(s, `42`, `0`, 1),
+		"security":               strings.Replace(s, `"non_security"`, `"security"`, 1),
+		"order":                  `{"class":"non_security","reason":"tetragon_unsignalled","events":42,"estimated":true}`,
+		"rate_limited estimated": `{"class":"non_security","reason":"rate_limited","estimated":true,"events":1}`,
+	} {
+		if _, err := ParseDropped([]byte(in)); !errors.Is(err, ErrBadPayload) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	for name, bad := range map[string]Dropped{
+		"not estimated":  {Class: ClassNonSecurity, Reason: DropTetragonUnsignalled, Events: 1},
+		"estimated rl":   {Class: ClassNonSecurity, Reason: DropRateLimited, Estimated: true, Events: 1},
+		"security":       {Class: ClassSecurity, Reason: DropTetragonUnsignalled, Estimated: true, Events: 1},
+		"no events":      {Class: ClassNonSecurity, Reason: DropTetragonUnsignalled, Estimated: true},
+		"with batches":   {Class: ClassNonSecurity, Reason: DropTetragonUnsignalled, Estimated: true, Events: 1, Batches: []Ref{{Seq: 1}}},
+		"overflow estim": {Class: ClassNonSecurity, Estimated: true, Batches: []Ref{{Seq: 1}}},
+	} {
+		if _, err := bad.Marshal(); !errors.Is(err, ErrBadPayload) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}

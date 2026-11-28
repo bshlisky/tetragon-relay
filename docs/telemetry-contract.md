@@ -107,10 +107,29 @@ part of the chain. **Check both hashes before you decompress anything.**
     configured budget (`collector.max_event_rate`, default 2000/s, at most 5000/s), before
     decoding them. They never formed batches, so no seq is missing.
   - The header's `first_ts` and `last_ts` bound when they were dropped.
-  - `rate_limited` is the only reason, and its class is always `non_security`: security
-    events (kprobe, LSM, tracepoint, uprobe) are never rate-limited. Any other
-    combination is `bad_payload`.
+  - Its class is always `non_security`: security events (kprobe, LSM, tracepoint,
+    uprobe) are never rate-limited. Any other combination is `bad_payload`.
   - A dropped record without `reason` is the spool-overflow form above.
+- `dropped` with `reason` `tetragon_unsignalled` (an estimate,
+  step-07b-decisions-3.md F2): canonical JSON
+  `{"class":"non_security","reason":"tetragon_unsignalled","estimated":true,"events":17}`.
+  - **`events` is a lower bound, not a count.** Tetragon v1.8.0 drops events for a
+    slow client with no signal on its stream (T-S6); it reports the loss only in its
+    own metrics. The agent estimates it from the one discontinuity the stream has:
+    every exit carries the `exec_id` of the exec that started its process.
+  - An exit whose exec the agent never received on the current stream counts as one
+    dropped exec, for processes that started after the stream began (plus a 2 s
+    grace).
+  - Exits that never arrive are not counted, since long-lived processes make them
+    unknowable. Processes older than the stream aren't counted either, and nor are
+    execs the agent's own rate limit dropped: those are declared as `rate_limited`.
+  - Declared at most once a minute, when non-zero. The header's `first_ts` and
+    `last_ts` bound the interval.
+  - `estimated` is `true` exactly for this reason. Any other combination is
+    `bad_payload`.
+  - When an interval's estimate exceeds 1 % of the exec and exit events received in
+    it, the agent also raises `Alert{TELEMETRY_LOSS}` on the control stream
+    (rate-limited).
 - `chain_reset`: canonical JSON `{"reason":"boot_changed","prev":{"chain_id":"…","seq":41,"hash":"…"}}`
   or `{"reason":"head_missing","prev":null}`. Reasons: `boot_changed`, `head_missing`,
   `head_corrupt`, `tampered_mode`, `boot_id_unknown`.
@@ -142,7 +161,7 @@ ahead of a gap. Flag:
 | `chain_reset` | Every seq-1 batch. Expected after a reboot (`boot_changed`); anything else (`head_missing`, `head_corrupt`, `tampered_mode`, `boot_id_unknown`) is a security event. | `boot_changed`: check it against the maintenance window; others: alert. |
 | `duplicate_mismatch` | The same `(chain_id, seq)` arrives twice with different hashes (also a `chain_fork`). | High. |
 | `bad_header`, `hash_mismatch` | Section 2. | Alert; the batch is not part of the chain. |
-| `dropped` | Every `dropped` record: loss is declared, with class and count. | Informational; `security` class drops are an alert. A sustained `rate_limited` stream means the host generates more non_security events than its budget: tune the budget or the workload. |
+| `dropped` | Every `dropped` record: loss is declared, with class and count. | Informational; `security` class drops are an alert. A sustained `rate_limited` stream means the host generates more non_security events than its budget: tune the budget or the workload. A `tetragon_unsignalled` record means Tetragon itself lost events before the agent saw them (its own queue overflowed): the true loss is at least that number; Tetragon's `tetragon_notify_overflowed_events_total` metric on the host is authoritative. |
 
 An identical duplicate (same seq, same hash) is expected after a reconnect and is not a
 signal.

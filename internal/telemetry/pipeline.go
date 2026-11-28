@@ -128,6 +128,14 @@ type Config struct {
 	// per wake-up at most (handoff.go). Zero means defaultHandoffChunk;
 	// 1 is one wake-up per event (the E3 A/B baseline).
 	HandoffChunk int
+	// OnLoss, if set, is called by the builder when an interval's
+	// estimated Tetragon loss (exits with no exec, F2) exceeds 1 % of the
+	// exec and exit events received in it. relayd raises
+	// Alert{TELEMETRY_LOSS} (rate-limited) from it.
+	OnLoss func(missing, received uint64)
+	// LossInterval is how often the estimate is declared. Zero means
+	// limits.TelemetryLossInterval (60 s).
+	LossInterval time.Duration
 }
 
 // Pipeline runs the telemetry goroutines.
@@ -135,6 +143,7 @@ type Pipeline struct {
 	cfg   Config
 	h     *handoff
 	drops rateDrops
+	pair  *execPairing
 	// admitRate is cfg.MaxEventRate; the benchmark sets it to +Inf.
 	admitRate float64
 	rw        *wireRewriter
@@ -146,6 +155,7 @@ type Pipeline struct {
 	unclassified    atomic.Uint64
 	unknownFields   atomic.Uint64
 	lostOnWrite     atomic.Uint64
+	unsignalled     atomic.Uint64
 	protocolErrors  atomic.Uint64
 }
 
@@ -183,7 +193,10 @@ func New(cfg Config) (*Pipeline, error) {
 		cfg.HandoffChunk = defaultHandoffChunk
 	}
 	h := newHandoff(min(cfg.HandoffChunk, eventQueueDepth), eventQueueDepth, handoffDrainDelay)
-	return &Pipeline{cfg: cfg, h: h, admitRate: float64(cfg.MaxEventRate), rw: rw}, nil
+	if cfg.LossInterval <= 0 {
+		cfg.LossInterval = limits.TelemetryLossInterval
+	}
+	return &Pipeline{cfg: cfg, h: h, admitRate: float64(cfg.MaxEventRate), rw: rw, pair: newExecPairing()}, nil
 }
 
 // HeartbeatStats is the heartbeat's view (Heartbeat.telemetry_last_seq and
@@ -214,6 +227,9 @@ func (p *Pipeline) Counters() map[string]uint64 {
 		"events_with_unknown_fields": p.unknownFields.Load(),
 		"events_lost_on_write":       p.lostOnWrite.Load(),
 		"protocol_errors":            p.protocolErrors.Load(),
+		// A lower bound on exec events Tetragon dropped without a signal
+		// (F2), declared in tetragon_unsignalled dropped records.
+		"tetragon_unsignalled_at_least": p.unsignalled.Load(),
 	}
 }
 
@@ -258,10 +274,15 @@ func (p *Pipeline) ingest(ctx context.Context) {
 	for ctx.Err() == nil {
 		p.cfg.Liveness.Touch(LivenessIngest)
 		started := p.cfg.Clock()
+		// F2: a new stream pairs only what it sees itself.
+		p.pair.reset(started.UnixNano())
 		res := make(chan error, 1)
 		go func() {
 			res <- p.cfg.Source.StreamEvents(ctx, p.cfg.EventTypes, ExcludedFields, func(raw []byte) bool {
 				if peekAdmit(raw) == admitOther {
+					// Before admission: an exec relayd rate-limits is
+					// still seen, never counted as Tetragon's loss.
+					p.pair.observe(raw)
 					if now := p.cfg.Clock(); !bucket.allow(now) {
 						p.rateLimited.Add(1)
 						p.drops.add(now.UnixNano())
@@ -327,6 +348,23 @@ func (p *Pipeline) build(ctx context.Context) {
 	defer tick.Stop()
 	var scratch []byte
 	var lastDecl, lastAudit time.Time
+	lastLoss := p.cfg.Clock()
+	declareLoss := func(now time.Time) {
+		missing, received := p.pair.take()
+		if missing == 0 {
+			return
+		}
+		if _, err := p.cfg.Spool.AppendUnsignalled(missing, lastLoss.UnixNano(), now.UnixNano()); err != nil {
+			p.pair.putBack(missing)
+			p.cfg.Auditor.Record("telemetry_spool_write_failed", fmt.Sprintf("tetragon_unsignalled record for >= %d events not spooled; retried", missing), err)
+			return
+		}
+		p.unsignalled.Add(missing)
+		p.cfg.Auditor.Record("telemetry_tetragon_unsignalled", fmt.Sprintf("at least %d exec events dropped by Tetragon without a signal (exits with no exec) of %d exec and exit events received in %s; declared in the chain as an estimate", missing, received, now.Sub(lastLoss).Round(time.Second)), nil)
+		if p.cfg.OnLoss != nil && missing*100 > received {
+			p.cfg.OnLoss(missing, received)
+		}
+	}
 	declare := func(now time.Time) {
 		n, first, last := p.drops.take()
 		if n == 0 {
@@ -410,6 +448,7 @@ func (p *Pipeline) build(ctx context.Context) {
 			flush(&cur[0])
 			flush(&cur[1])
 			declare(p.cfg.Clock())
+			declareLoss(p.cfg.Clock())
 			return
 		case <-p.h.ready():
 			evs := p.h.take(ctx, spare)
@@ -423,6 +462,10 @@ func (p *Pipeline) build(ctx context.Context) {
 			now := p.cfg.Clock()
 			if now.Sub(lastDecl) >= p.cfg.BatchMaxAge {
 				declare(now)
+			}
+			if now.Sub(lastLoss) >= p.cfg.LossInterval {
+				declareLoss(now)
+				lastLoss = now
 			}
 			for i := range cur {
 				if cur[i].count > 0 && now.Sub(cur[i].started) >= p.cfg.BatchMaxAge {

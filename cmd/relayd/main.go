@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	controlv1 "github.com/bshlisky/tetragon-relay/api/relay/control/v1"
 	"github.com/bshlisky/tetragon-relay/internal/agent"
 	"github.com/bshlisky/tetragon-relay/internal/apply"
 	"github.com/bshlisky/tetragon-relay/internal/audit"
@@ -393,6 +394,9 @@ func run(configPath string, auditor *agentAuditor) error {
 		bootID: bootID, epochs: storeEpochs(startupResult.Store, cfg.AllowedScopes), e3: knobs,
 		clientCert: func() tls.Certificate { return clientCertificate(certManager.Chain(), hostSigner) },
 		caBundle:   enrollmentBundle,
+		onLoss: func(missing, received uint64) {
+			alerter.Raise(controlv1.Alert_TELEMETRY_LOSS, fmt.Sprintf("Tetragon dropped at least %d exec events without a signal in the last interval (exits with no exec), against %d exec and exit events received: above 1 %%. The count is a lower bound, declared in the chain as tetragon_unsignalled.", missing, received))
+		},
 	}); terr != nil {
 		auditor.Record(agent.AuditEvent{Step: "telemetry_disabled", Detail: "telemetry pipeline did not start; enforcement and the control session continue", Err: terr})
 	} else {

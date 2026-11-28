@@ -82,6 +82,10 @@ type ChainSummary struct {
 	// RateLimited is the number of events the chain's rate_limited
 	// dropped records declare (step 7b D0).
 	RateLimited uint64
+	// UnsignalledAtLeast is the sum of the chain's tetragon_unsignalled
+	// dropped records: a lower bound on events Tetragon dropped without
+	// signalling it (step-07b-decisions-3.md F2).
+	UnsignalledAtLeast uint64
 	// ResetReason is the seq-1 chain_reset's reason, if received.
 	ResetReason string
 }
@@ -131,6 +135,7 @@ type chain struct {
 	received    int
 	declared    int
 	rateLimited uint64
+	unsignalled uint64 // estimated (lower bound), F2
 	resetReason string
 }
 
@@ -261,10 +266,14 @@ func (v *Verifier) Add(header, payload []byte) []Finding {
 			out = append(out, f(BadPayload, cid, h.Seq, "%v", err))
 			break
 		}
-		if d.Reason == batch.DropRateLimited {
+		switch d.Reason {
+		case batch.DropRateLimited:
 			c.rateLimited += d.Events
 			out = append(out, f(Dropped, cid, h.Seq, "class=%s reason=%s events=%d", d.Class, d.Reason, d.Events))
-		} else {
+		case batch.DropTetragonUnsignalled:
+			c.unsignalled += d.Events
+			out = append(out, f(Dropped, cid, h.Seq, "class=%s reason=%s estimated=true events>=%d", d.Class, d.Reason, d.Events))
+		default:
 			out = append(out, f(Dropped, cid, h.Seq, "class=%s count=%d", d.Class, len(d.Batches)))
 		}
 		for _, ref := range d.Batches {
@@ -392,7 +401,7 @@ func (v *Verifier) Chains() []ChainSummary {
 		c := v.chains[id]
 		out = append(out, ChainSummary{
 			ChainID: id.String(), HostUUID: c.host, BootID: c.boot, Contiguous: c.contiguous,
-			MaxSeq: c.maxSeq, Received: c.received, Declared: c.declared, RateLimited: c.rateLimited, ResetReason: c.resetReason,
+			MaxSeq: c.maxSeq, Received: c.received, Declared: c.declared, RateLimited: c.rateLimited, UnsignalledAtLeast: c.unsignalled, ResetReason: c.resetReason,
 		})
 	}
 	return out

@@ -563,6 +563,23 @@ func (s *Spool) AppendRateLimited(events uint64, first, last int64) (Entry, erro
 	return s.appendLocked(batch.KindDropped, batch.ClassControl, 0, first, last, p, batch.EncNone)
 }
 
+// AppendUnsignalled spools a tetragon_unsignalled dropped record: at
+// least events non_security events Tetragon dropped without a signal
+// between first and last (step-07b-decisions-3.md F2, an estimate).
+func (s *Spool) AppendUnsignalled(events uint64, first, last int64) (Entry, error) {
+	d := batch.Dropped{Class: batch.ClassNonSecurity, Reason: batch.DropTetragonUnsignalled, Estimated: true, Events: events}
+	p, err := d.Marshal()
+	if err != nil {
+		return Entry{}, err
+	}
+	s.mu.Lock()
+	defer s.unlock()
+	if err := s.makeRoomLocked(int64(len(p)) + int64(len(fileMagic)+4+macSize+limits.MaxTelemetryHeaderBytes/4)); err != nil {
+		return Entry{}, err
+	}
+	return s.appendLocked(batch.KindDropped, batch.ClassControl, 0, first, last, p, batch.EncNone)
+}
+
 // countRecords counts payload's length-prefixed records without copying.
 func countRecords(payload []byte) (uint64, bool) {
 	var n uint64

@@ -155,21 +155,26 @@ const (
 	// (Hello.tetragon_env_collection == "on"); once per connection
 	// (step-07b-decisions-3.md F4).
 	Alert_TETRAGON_ENV_COLLECTION Alert_Kind = 9
+	// relayd's estimate of Tetragon's silent drops (exits whose exec never
+	// arrived) exceeded 1 % of the exec and exit events received in an
+	// interval; a lower bound (step-07b-decisions-3.md F2).
+	Alert_TELEMETRY_LOSS Alert_Kind = 10
 )
 
 // Enum value maps for Alert_Kind.
 var (
 	Alert_Kind_name = map[int32]string{
-		0: "KIND_UNSPECIFIED",
-		1: "DRIFT",
-		2: "TETRAGON_UNHEALTHY",
-		3: "TRUST_EXPIRED",
-		4: "TAMPER",
-		5: "GUARDRAIL_REJECT",
-		6: "TRUST_UPDATE_REJECTED",
-		7: "ROLLBACK_FAILED",
-		8: "HEALTH_UNVERIFIABLE",
-		9: "TETRAGON_ENV_COLLECTION",
+		0:  "KIND_UNSPECIFIED",
+		1:  "DRIFT",
+		2:  "TETRAGON_UNHEALTHY",
+		3:  "TRUST_EXPIRED",
+		4:  "TAMPER",
+		5:  "GUARDRAIL_REJECT",
+		6:  "TRUST_UPDATE_REJECTED",
+		7:  "ROLLBACK_FAILED",
+		8:  "HEALTH_UNVERIFIABLE",
+		9:  "TETRAGON_ENV_COLLECTION",
+		10: "TELEMETRY_LOSS",
 	}
 	Alert_Kind_value = map[string]int32{
 		"KIND_UNSPECIFIED":        0,
@@ -182,6 +187,7 @@ var (
 		"ROLLBACK_FAILED":         7,
 		"HEALTH_UNVERIFIABLE":     8,
 		"TETRAGON_ENV_COLLECTION": 9,
+		"TELEMETRY_LOSS":          10,
 	}
 )
 
@@ -1545,11 +1551,11 @@ const file_relay_control_v1_control_proto_rawDesc = "" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05state\x18\x02 \x01(\tR\x05state\x12\x18\n" +
 	"\aenabled\x18\x03 \x01(\bR\aenabled\x12)\n" +
-	"\x10canonical_sha256\x18\x04 \x01(\fR\x0fcanonicalSha256\"\xcb\x02\n" +
+	"\x10canonical_sha256\x18\x04 \x01(\fR\x0fcanonicalSha256\"\xdf\x02\n" +
 	"\x05Alert\x120\n" +
 	"\x04kind\x18\x01 \x01(\x0e2\x1c.relay.control.v1.Alert.KindR\x04kind\x12\x16\n" +
 	"\x06detail\x18\x02 \x01(\tR\x06detail\x12\x1b\n" +
-	"\tunix_time\x18\x03 \x01(\x03R\bunixTime\"\xda\x01\n" +
+	"\tunix_time\x18\x03 \x01(\x03R\bunixTime\"\xee\x01\n" +
 	"\x04Kind\x12\x14\n" +
 	"\x10KIND_UNSPECIFIED\x10\x00\x12\t\n" +
 	"\x05DRIFT\x10\x01\x12\x16\n" +
@@ -1561,7 +1567,9 @@ const file_relay_control_v1_control_proto_rawDesc = "" +
 	"\x15TRUST_UPDATE_REJECTED\x10\x06\x12\x13\n" +
 	"\x0fROLLBACK_FAILED\x10\a\x12\x17\n" +
 	"\x13HEALTH_UNVERIFIABLE\x10\b\x12\x1b\n" +
-	"\x17TETRAGON_ENV_COLLECTION\x10\t\"^\n" +
+	"\x17TETRAGON_ENV_COLLECTION\x10\t\x12\x12\n" +
+	"\x0eTELEMETRY_LOSS\x10\n" +
+	"\"^\n" +
 	"\bHelloAck\x12\x14\n" +
 	"\x05nonce\x18\x01 \x01(\fR\x05nonce\x12<\n" +
 	"\x1aheartbeat_interval_seconds\x18\x02 \x01(\rR\x18heartbeatIntervalSeconds\"*\n" +
