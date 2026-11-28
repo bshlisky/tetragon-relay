@@ -215,7 +215,7 @@ func steadyScript(cfg config, resultCh chan<- error) testcontroller.Script {
 			}
 			heartbeats++
 			hb := msg.GetHeartbeat()
-			fmt.Printf("e3controller: heartbeat %d/%d from connection #%d at %s telemetry_last_seq=%d telemetry_backlog=%d\n", heartbeats, cfg.minHeartbeats, n, time.Now().UTC().Format(time.RFC3339), hb.GetTelemetryLastSeq(), hb.GetTelemetryBacklog())
+			fmt.Printf("e3controller: heartbeat %d/%d from connection #%d at %s telemetry_last_seq=%d telemetry_backlog=%d telemetry_events_per_s=%d\n", heartbeats, cfg.minHeartbeats, n, time.Now().UTC().Format(time.RFC3339), hb.GetTelemetryLastSeq(), hb.GetTelemetryBacklog(), hb.GetTelemetryEventsPerS())
 		}
 		trySend(resultCh, nil)
 		// Keep the stream (and this connection's Script call) open so a

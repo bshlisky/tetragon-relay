@@ -156,7 +156,7 @@ ahead of a gap. Flag:
 
 | Signal | When | Severity (architecture 10.4) |
 | --- | --- | --- |
-| `chain_gap` | A seq is missing and no `dropped` record explains it, after the chain has moved on (the reference verifier reports it at the end of a run; a live collector should allow a grace period, e.g. 10 minutes or until the next heartbeat cross-check). | High; quarantine if combined with any other signal. |
+| `chain_gap` | A seq is missing and no `dropped` record explains it, after the chain has moved on (the reference verifier reports it at the end of a run; a live collector should allow a grace period; see section 4.1 for the proposed default). | High; quarantine if combined with any other signal. |
 | `chain_fork` | Two different batches claim the same `(chain_id, seq)` with different hashes, or a batch's `prev_hash` is not the hash of the batch before it (received, or listed in a `dropped` record). | High; quarantine if combined with any other signal. |
 | `chain_reset` | Every seq-1 batch. Expected after a reboot (`boot_changed`); anything else (`head_missing`, `head_corrupt`, `tampered_mode`, `boot_id_unknown`) is a security event. | `boot_changed`: check it against the maintenance window; others: alert. |
 | `duplicate_mismatch` | The same `(chain_id, seq)` arrives twice with different hashes (also a `chain_fork`). | High. |
@@ -165,6 +165,23 @@ ahead of a gap. Flag:
 
 An identical duplicate (same seq, same hash) is expected after a reconnect and is not a
 signal.
+
+### 4.1 Proposed defaults (backend to confirm; step-07a-review.md R7A-6)
+
+These numbers are the backend team's to choose. Proposed:
+
+- **Gap grace period: 35 s.** That is 2 × `batch_max_age` (2 × 2 s) plus the agent's
+  maximum reconnect backoff (30 s). A missing seq that is still neither received nor
+  declared after that is a `chain_gap`.
+- **Pruning chain state: 24 h** after a chain's last batch, or as soon as a newer
+  `boot_id` has been seen for that host and the old chain has drained.
+
+### 4.2 Hosts that send no telemetry (step-07a-review.md R7A-2)
+
+An agent sends no telemetry before it is enrolled: it has no identity to bind a chain
+to, and no collector it may talk to. **Treat a host that is enrolled but sends no
+telemetry as a signal**, the same way the controller treats silence on the control
+stream.
 
 ## 5. Ack rules
 
@@ -183,7 +200,9 @@ signal.
 The control stream's `Heartbeat` carries:
 
 - `telemetry_last_seq`: the highest seq the agent has spooled in its **current** chain;
-- `telemetry_backlog`: the number of batches spooled and not yet acked, across chains.
+- `telemetry_backlog`: the number of batches spooled and not yet acked, across chains;
+- `telemetry_events_per_s`: events spooled per second, averaged over the last minute
+  (step-07b-decisions.md D2). Rate-limited events are not spooled and not counted.
 
 The controller compares `telemetry_last_seq` with the highest seq the collector has
 received for that host's current chain. If the agent reports a seq the collector never
@@ -191,6 +210,22 @@ receives within a reasonable window (backlog draining aside), or the collector r
 seqs the agent never reports, something between them is dropping or injecting data
 (architecture 10.3). A steadily growing `telemetry_backlog` with a reachable collector
 means the collector is not acking.
+
+### 6.1 Sizing the spool (step-07b-decisions.md D2, ADR 0041 section 6)
+
+Size `collector.spool_max_bytes` per site from the rate the host reports:
+
+```
+hours of outage the spool holds = spool_max_bytes / (bytes_per_event × telemetry_events_per_s × 3600)
+```
+
+`bytes_per_event` is measured, not fixed: 23 B for E3's repetitive load (21.5× zstd) to
+243 B for a varied corpus (4.5×). Use 243 B unless the site's own batches show better.
+The default 2 GiB at 1,000 events/s therefore holds 2.5–25 h, and at 5,000 events/s
+0.5–5 h. With the default admission budget, the sustained non_security rate is at most
+2,000 events/s, which gives about 1.2–13 h per 2 GiB. On overflow the agent drops
+non_security batches first, so security events survive the longest outage. The per-host
+disk budget is the customer's.
 
 ## 7. What the agent never does
 

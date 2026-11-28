@@ -728,8 +728,11 @@ type Heartbeat struct {
 	Health           *TetragonHealth   `protobuf:"bytes,3,opt,name=health,proto3" json:"health,omitempty"`                                                // from GetHealth + process liveness
 	TelemetryLastSeq uint64            `protobuf:"varint,4,opt,name=telemetry_last_seq,json=telemetryLastSeq,proto3" json:"telemetry_last_seq,omitempty"` // last telemetry batch seq shipped
 	TelemetryBacklog uint32            `protobuf:"varint,5,opt,name=telemetry_backlog,json=telemetryBacklog,proto3" json:"telemetry_backlog,omitempty"`   // batches spooled, not acked
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Events spooled per second, averaged over the last minute; what the
+	// spool is sized from (telemetry contract, step-07b-decisions.md D2).
+	TelemetryEventsPerS uint32 `protobuf:"varint,6,opt,name=telemetry_events_per_s,json=telemetryEventsPerS,proto3" json:"telemetry_events_per_s,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *Heartbeat) Reset() {
@@ -793,6 +796,13 @@ func (x *Heartbeat) GetTelemetryLastSeq() uint64 {
 func (x *Heartbeat) GetTelemetryBacklog() uint32 {
 	if x != nil {
 		return x.TelemetryBacklog
+	}
+	return 0
+}
+
+func (x *Heartbeat) GetTelemetryEventsPerS() uint32 {
+	if x != nil {
+		return x.TelemetryEventsPerS
 	}
 	return 0
 }
@@ -1496,13 +1506,14 @@ const file_relay_control_v1_control_proto_rawDesc = "" +
 	"\x17tetragon_env_collection\x18\x0e \x01(\tR\x15tetragonEnvCollection\x1a9\n" +
 	"\vEpochsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\xc1\x02\n" +
+	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\xf6\x02\n" +
 	"\tHeartbeat\x12?\n" +
 	"\x06epochs\x18\x01 \x03(\v2'.relay.control.v1.Heartbeat.EpochsEntryR\x06epochs\x12#\n" +
 	"\rloaded_digest\x18\x02 \x01(\fR\floadedDigest\x128\n" +
 	"\x06health\x18\x03 \x01(\v2 .relay.control.v1.TetragonHealthR\x06health\x12,\n" +
 	"\x12telemetry_last_seq\x18\x04 \x01(\x04R\x10telemetryLastSeq\x12+\n" +
-	"\x11telemetry_backlog\x18\x05 \x01(\rR\x10telemetryBacklog\x1a9\n" +
+	"\x11telemetry_backlog\x18\x05 \x01(\rR\x10telemetryBacklog\x123\n" +
+	"\x16telemetry_events_per_s\x18\x06 \x01(\rR\x13telemetryEventsPerS\x1a9\n" +
 	"\vEpochsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\xb2\x04\n" +

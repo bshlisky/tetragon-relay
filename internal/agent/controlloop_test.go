@@ -436,3 +436,27 @@ func TestBuildHeartbeat_TelemetryFields(t *testing.T) {
 		t.Fatalf("heartbeat telemetry = %d, %d", hb.GetTelemetryLastSeq(), hb.GetTelemetryBacklog())
 	}
 }
+
+type ratedTelemetry struct{ fixedTelemetry }
+
+func (ratedTelemetry) EventsPerSecond() uint32 { return 1234 }
+
+// step-07b-decisions.md D2: telemetry_events_per_s, when the pipeline
+// reports it.
+func TestBuildHeartbeat_TelemetryRate(t *testing.T) {
+	cl, _, snap, _ := testControlLoop(t)
+	snap.snap = StateSnapshot{Epochs: map[string]uint64{"prod-db": 3}}
+	for _, tc := range []struct {
+		tel  TelemetryStats
+		want uint32
+	}{{fixedTelemetry{}, 0}, {ratedTelemetry{}, 1234}} {
+		cl.Telemetry = tc.tel
+		msg, err := cl.BuildHeartbeat(context.Background(), NewOutboundSeqAfterHello())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := msg.GetHeartbeat().GetTelemetryEventsPerS(); got != tc.want {
+			t.Fatalf("telemetry_events_per_s = %d, want %d", got, tc.want)
+		}
+	}
+}

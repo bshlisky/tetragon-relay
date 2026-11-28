@@ -346,7 +346,7 @@ customer; the contract's sizing formula covers the rest.
 | Control plane under load | **Binding gate (E1.1):** E3 `P5-CONTROL-UNDER-LOAD`, with relayd shown to be at its quota during the flood: no heartbeat gap above 20 s, applies complete in their health window, an enforce bundle rolls back with heartbeats continuing, no watchdog timeout |
 | Event budget | `collector.max_event_rate` non_security events/s, default 2000, hard maximum 5000. Security events are not rate-limited. 5k/s of non_security events is above the default budget |
 | Apply latency, reconnect | unchanged |
-| Spool capacity (D2, E3) | 2 GiB default, configurable. Stated as hours per GiB at a rate and ratio: on disk an event takes 23 B (E3's repetitive load, 21.5×) to 243 B (varied corpus, 4.5×), so 2 GiB holds **0.49–5.0 h at 5k events/s** and **2.5–25 h at 1k events/s** (2 GiB / (243 B × 1000/s) = 2.45 h). With the default budget, sustained non_security traffic is at most 2k/s (1.2–12.6 h per 2 GiB). Overflow drops non_security batches first. The per-host disk budget is the customer's; operators size the spool from the observed rate (contract formula) |
+| Spool capacity (D2, E3) | 2 GiB default, configurable. Stated as hours per GiB at a rate and ratio: on disk an event takes 23 B (E3's repetitive load, 21.5×) to 243 B (varied corpus, 4.5×), so 2 GiB holds **0.49–5.0 h at 5k events/s** and **2.5–25 h at 1k events/s** (2 GiB / (243 B × 1000/s) = 2.45 h). With the default budget, sustained non_security traffic is at most 2k/s (1.2–13 h per 2 GiB). Overflow drops non_security batches first. The per-host disk budget is the customer's; operators size the spool from the observed rate (contract formula) |
 
 ## Consequences
 

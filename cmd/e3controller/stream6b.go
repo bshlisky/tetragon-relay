@@ -48,7 +48,7 @@ func stamp() string { return time.Now().UTC().Format(time.RFC3339) }
 func logAgentMessage(conn int64, m *controlv1.AgentMessage) {
 	switch b := m.GetBody().(type) {
 	case *controlv1.AgentMessage_Heartbeat:
-		fmt.Printf("e3controller: [%s] conn #%d seq=%d heartbeat epochs=%v loaded_digest=%x telemetry_last_seq=%d telemetry_backlog=%d\n", stamp(), conn, m.GetSeq(), b.Heartbeat.GetEpochs(), b.Heartbeat.GetLoadedDigest(), b.Heartbeat.GetTelemetryLastSeq(), b.Heartbeat.GetTelemetryBacklog())
+		fmt.Printf("e3controller: [%s] conn #%d seq=%d heartbeat epochs=%v loaded_digest=%x telemetry_last_seq=%d telemetry_backlog=%d telemetry_events_per_s=%d\n", stamp(), conn, m.GetSeq(), b.Heartbeat.GetEpochs(), b.Heartbeat.GetLoadedDigest(), b.Heartbeat.GetTelemetryLastSeq(), b.Heartbeat.GetTelemetryBacklog(), b.Heartbeat.GetTelemetryEventsPerS())
 	case *controlv1.AgentMessage_ApplyResult:
 		r := b.ApplyResult
 		fmt.Printf("e3controller: [%s] conn #%d seq=%d ApplyResult status=%s epoch=%d bundle_digest=%x loaded_digest_after=%x detail=%q\n", stamp(), conn, m.GetSeq(), r.GetStatus(), r.GetEpoch(), r.GetBundleDigest(), r.GetLoadedDigestAfter(), r.GetDetail())

@@ -144,6 +144,13 @@ type TelemetryStats interface {
 	HeartbeatStats() (lastSeq uint64, backlog uint32)
 }
 
+// TelemetryRate is optionally implemented by a TelemetryStats:
+// Heartbeat.telemetry_events_per_s, events spooled per second over the
+// last minute (step-07b-decisions.md D2).
+type TelemetryRate interface {
+	EventsPerSecond() uint32
+}
+
 // JobSink is where the control loop hands work it must not do on the
 // stream loop's goroutine (*ApplyWorker implements it). SubmitBundle must
 // return without blocking.
@@ -319,6 +326,9 @@ func (cl *ControlLoop) BuildHeartbeat(ctx context.Context, out *OutboundSeq) (*c
 	}
 	if cl.Telemetry != nil {
 		hb.TelemetryLastSeq, hb.TelemetryBacklog = cl.Telemetry.HeartbeatStats()
+		if r, ok := cl.Telemetry.(TelemetryRate); ok {
+			hb.TelemetryEventsPerS = r.EventsPerSecond()
+		}
 	}
 	return cl.wrap(out, &controlv1.AgentMessage{Body: &controlv1.AgentMessage_Heartbeat{Heartbeat: hb}}), nil
 }

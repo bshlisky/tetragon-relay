@@ -144,6 +144,7 @@ type Pipeline struct {
 	h     *handoff
 	drops rateDrops
 	pair  *execPairing
+	rate  rateMeter
 	// admitRate is cfg.MaxEventRate; the benchmark sets it to +Inf.
 	admitRate float64
 	rw        *wireRewriter
@@ -156,6 +157,7 @@ type Pipeline struct {
 	unknownFields   atomic.Uint64
 	lostOnWrite     atomic.Uint64
 	unsignalled     atomic.Uint64
+	spooledEvents   atomic.Uint64 // events added to batches (D2's rate)
 	protocolErrors  atomic.Uint64
 }
 
@@ -428,6 +430,7 @@ func (p *Pipeline) build(ctx context.Context) {
 		b.first, b.last = min(b.first, ts), max(b.last, ts)
 		b.payload = batch.AppendRecord(b.payload, scratch)
 		b.count++
+		p.spooledEvents.Add(1)
 		if b.count >= uint64(p.cfg.BatchMaxEvents) {
 			flush(b)
 		}
@@ -460,6 +463,7 @@ func (p *Pipeline) build(ctx context.Context) {
 		case <-tick.C:
 			p.cfg.Liveness.Touch(LivenessBuilder)
 			now := p.cfg.Clock()
+			p.rate.sample(now, p.spooledEvents.Load())
 			if now.Sub(lastDecl) >= p.cfg.BatchMaxAge {
 				declare(now)
 			}

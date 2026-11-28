@@ -77,6 +77,9 @@ message Heartbeat {
   TetragonHealth health = 3;        // from GetHealth + process liveness
   uint64 telemetry_last_seq = 4;    // last telemetry batch seq shipped
   uint32 telemetry_backlog = 5;     // batches spooled, not acked
+  // Events spooled per second, averaged over the last minute; what the
+  // spool is sized from (telemetry contract, step-07b-decisions.md D2).
+  uint32 telemetry_events_per_s = 6;
 }
 
 message ApplyResult {
