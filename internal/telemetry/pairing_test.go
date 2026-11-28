@@ -68,11 +68,11 @@ func TestExecPairing(t *testing.T) {
 	x.observe(procEvent(t, false, "c", after))
 	x.observe(procEvent(t, false, "c", after)) // duplicate exec
 	x.observe(procEvent(t, true, "c", after))
-	x.observe(procEvent(t, true, "c", after)) // a second exit for c: its exec is gone, counted
+	x.observe(procEvent(t, true, "c", after)) // a second exit for c (a fork-only child's): paired, not counted
 	x.observe([]byte{0xff})                   // ignored
 	missing, received := x.take()
-	if missing != 2 || received != 9 {
-		t.Fatalf("missing=%d received=%d, want 2 and 9", missing, received)
+	if missing != 1 || received != 9 {
+		t.Fatalf("missing=%d received=%d, want 1 and 9", missing, received)
 	}
 	if m, r := x.take(); m != 0 || r != 0 {
 		t.Fatalf("take did not clear: %d %d", m, r)
@@ -107,8 +107,8 @@ func TestExecPairing_EvictionNeverOvercounts(t *testing.T) {
 	if m, _ := x.take(); m != 0 {
 		t.Fatalf("eviction produced %d false losses", m)
 	}
-	if len(x.seen) != 0 {
-		t.Fatalf("%d entries left", len(x.seen))
+	if len(x.seen) > pairingCapacity {
+		t.Fatalf("%d entries held, over the %d bound", len(x.seen), pairingCapacity)
 	}
 }
 

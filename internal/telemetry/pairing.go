@@ -18,17 +18,25 @@ import (
 // paired). Exits never seen can't be counted reliably (long-lived
 // processes), so they aren't. The count is therefore a lower bound.
 //
+// An exit never removes its exec: Tetragon does not track forks exactly,
+// and a fork-only child's exit carries its parent's exec data
+// (tetragon.proto, Process.flags `taskWalk`), so the parent's own exit
+// can follow with the same exec_id. E3 run 46149776060 counted those as
+// losses ("1 of 10" while idle) when the first exit deleted the entry.
+// Entries leave only by eviction, which raises the floor.
+//
 // The pairing runs in ingest, before admission, so execs that relayd's own
 // rate limit drops are still recorded as seen and never counted as
 // Tetragon's loss.
 
 const (
 	// pairingCapacity bounds the exec_ids held (8 bytes of hash plus 8 of
-	// start time each, about 1 MiB with the map). When it is full the
+	// start time each, about 2.5 MiB with the map and ring; at 8k execs/s
+	// about 8 s of history). When it is full the
 	// oldest entry is evicted and the floor moves past its start time, so
 	// an exit of an evicted process is never counted: the estimate stays
 	// a lower bound.
-	pairingCapacity = 1 << 15
+	pairingCapacity = 1 << 16
 	// pairingGrace is added to the stream's start before a process counts
 	// as "started after the stream began", for clock differences between
 	// Tetragon's start_time and relayd's wall clock.
@@ -86,7 +94,6 @@ func (x *execPairing) observe(raw []byte) {
 		x.insert(key, start)
 	case fieldProcessExit:
 		if _, ok := x.seen[key]; ok {
-			delete(x.seen, key)
 			return
 		}
 		if start > x.floor {
