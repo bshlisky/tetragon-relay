@@ -720,15 +720,11 @@ func TestDial_RealSocketEndToEnd(t *testing.T) {
 	}
 }
 
-// step-07b-decisions-2.md E1.3: the buffer sizes are opt-in; the zero
-// Config keeps grpc's defaults (no extra options).
-func TestDialOptions_BufferSizesOptIn(t *testing.T) {
+// step-07b-decisions-3.md F3: no buffer or window options; exactly the
+// dialer, the transport credentials and the response size limit.
+func TestDialOptions_NoBufferTuning(t *testing.T) {
 	d := func(context.Context, string) (net.Conn, error) { return nil, errors.New("unused") }
-	base := len(Config{}.dialOptions(d))
-	if n := len(Config{ReadBufferSize: 1 << 18}.dialOptions(d)); n != base+1 {
-		t.Fatalf("ReadBufferSize: %d options, want %d", n, base+1)
-	}
-	if n := len(Config{InitialWindowSize: 1 << 20}.dialOptions(d)); n != base+2 {
-		t.Fatalf("InitialWindowSize: %d options, want %d (stream and connection windows)", n, base+2)
+	if n := len(Config{}.dialOptions(d)); n != 3 {
+		t.Fatalf("dialOptions: %d options, want 3", n)
 	}
 }

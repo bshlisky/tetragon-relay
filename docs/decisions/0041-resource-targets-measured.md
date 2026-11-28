@@ -309,6 +309,22 @@ each, with relayd below its quota because Tetragon saturates first. In the local
 benchmark the handoff is about 25 % cheaper. Keep or drop: report S3.9 Q4. P4-RSS and
 P4-TUNING print `cpu_per_delivered`.
 
+**Decided (step-07b-decisions-3.md F3).**
+- **The chunked handoff stays.** Its local gain is real, about 25 %, and E3 can't show it
+  only because Tetragon saturates first.
+  - Its tests now cover the partial chunk (`TestHandoff_PartialChunk`) and the shutdown
+    drain (`TestPipeline_ShutdownDrainsQueuedEvents`).
+  - That test found a gap, now fixed: at shutdown the builder flushed its open batches but
+    dropped events still queued in the handoff, without declaring them. It now drains the
+    queue first.
+- **The gRPC read-buffer and window settings are removed** (`tetra.Config`,
+  `RELAYD_E3_TETRA_*`, P4-TUNING's two rounds).
+  - Neither had a measured effect.
+  - A setting with no measured effect is an unexplained knob that someone will "tune"
+    later.
+  - grpc's defaults apply: a 32 KiB read buffer, and a 64 KiB window grown by BDP
+    estimation.
+
 **E2: RSS.** The target is < 96 MiB at the admission budget. P4-RSS fails at ≥ 96 MiB,
 warns at ≥ 64 MiB, and prints its peak on every run (`P4-RSS peak VmRSS=...`).
 `MemoryMax=256M` stays the hard bound. `GOMEMLIMIT` is not set: it would trade memory for

@@ -343,18 +343,13 @@ func verifyPeerCredAndTetragon(cfg Config, uc *net.UnixConn) error {
 
 // dialOptions are Dial's grpc options: the verifying dialer, no transport
 // security (a local unix socket whose peer Dial verifies), the response
-// size limit, and the optional buffer sizes.
+// size limit. grpc's buffer and window defaults apply (ADR 0041 section
+// 9, step-07b-decisions-3.md F3).
 func (c Config) dialOptions(dialer func(context.Context, string) (net.Conn, error)) []grpc.DialOption {
 	opts := []grpc.DialOption{
 		grpc.WithContextDialer(dialer),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(limits.MaxGetEventsResponseBytes)),
-	}
-	if c.ReadBufferSize > 0 {
-		opts = append(opts, grpc.WithReadBufferSize(c.ReadBufferSize))
-	}
-	if c.InitialWindowSize > 0 {
-		opts = append(opts, grpc.WithInitialWindowSize(c.InitialWindowSize), grpc.WithInitialConnWindowSize(c.InitialWindowSize))
 	}
 	return opts
 }

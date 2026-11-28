@@ -398,6 +398,15 @@ func (p *Pipeline) build(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			// step-07b-decisions-3.md F3: drain what ingest already
+			// queued before the final flush, so admitted events are
+			// spooled rather than lost at shutdown (take does not wait out
+			// its delay once ctx is done).
+			evs := p.h.take(ctx, spare)
+			for _, raw := range evs {
+				handle(raw)
+			}
+			clear(evs)
 			flush(&cur[0])
 			flush(&cur[1])
 			declare(p.cfg.Clock())

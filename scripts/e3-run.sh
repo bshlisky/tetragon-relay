@@ -1245,7 +1245,7 @@ scenario_ts6() {
 # Rounds alternate, and P4-TUNING runs before the other floods: in run
 # 46121973985, run after P4-RSS, Tetragon itself became the bottleneck
 # from the second round on (relayd ~1 % CPU), which confounded the A/B.
-P4_TUNING=${P4_TUNING:-"per-event=RELAYD_E3_HANDOFF_CHUNK=1 chunked=RELAYD_E3_HANDOFF_CHUNK=64 per-event=RELAYD_E3_HANDOFF_CHUNK=1 chunked=RELAYD_E3_HANDOFF_CHUNK=64 chunked+win1m=RELAYD_E3_TETRA_WINDOW=1048576 chunked+rb256k=RELAYD_E3_TETRA_READ_BUFFER=262144"}
+P4_TUNING=${P4_TUNING:-"per-event=RELAYD_E3_HANDOFF_CHUNK=1 chunked=RELAYD_E3_HANDOFF_CHUNK=64 per-event=RELAYD_E3_HANDOFF_CHUNK=1 chunked=RELAYD_E3_HANDOFF_CHUNK=64"}
 scenario_p4_tuning() {
 	log "P4-TUNING: P4-RSS's load per setting (report only): ${P4_TUNING}"
 	local setting label envs store counts=/tmp/e3-p4t-counts u0 u1 th0 th1 tu0 tu1 t0 t1 gen n rl rep

@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"slices"
 	"strings"
@@ -434,5 +435,44 @@ func TestRedactor_AncestorsAndLists(t *testing.T) {
 	}
 	if a := e.GetAncestors()[0]; len(a.GetEnvironmentVariables()) != 0 || a.GetArguments() != Redacted {
 		t.Fatalf("ancestor = %v", a)
+	}
+}
+
+// step-07b-decisions-3.md F3: events ingest already queued when the
+// pipeline stops are spooled by the builder's final flush, not lost.
+func TestPipeline_ShutdownDrainsQueuedEvents(t *testing.T) {
+	cfg := spoolCfg(t, t.TempDir(), OSFS{}, "boot-a")
+	s := mustOpen(t, cfg)
+	red, err := NewRedactor(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(Config{
+		Source: &chanSource{ch: make(chan *tetragonpb.GetEventsResponse)}, EventTypes: []tetragonpb.EventType{tetragonpb.EventType_PROCESS_EXEC},
+		Redactor: red, Spool: s, Dialer: &memCollector{}, BatchMaxEvents: 1000, BatchMaxAge: time.Hour,
+		MaxEventRate: limits.MaxCollectorEventRate, Clock: time.Now, Auditor: cfg.Auditor, Liveness: &fakeLiveness{},
+		BackoffMin: 10 * time.Millisecond, BackoffMax: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		raw, err := proto.Marshal(exec("/usr/bin/true", fmt.Sprintf("n=%d", i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !p.h.put(context.Background(), raw) {
+			t.Fatal("put")
+		}
+	}
+	<-p.h.ready() // consume the signal: only ctx.Done can wake the builder
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	p.build(ctx)
+	if _, backlog := p.HeartbeatStats(); backlog == 0 {
+		t.Fatal("the queued events were not spooled at shutdown")
+	}
+	if p.h.len() != 0 {
+		t.Fatalf("%d events left in the handoff", p.h.len())
 	}
 }

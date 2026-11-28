@@ -20,8 +20,6 @@ import (
 // E3 drop-in, so one E3 run can compare settings on the same machine:
 //
 //	RELAYD_E3_HANDOFF_CHUNK      telemetry.Config.HandoffChunk (1: per event)
-//	RELAYD_E3_TETRA_READ_BUFFER  tetra.Config.ReadBufferSize (bytes)
-//	RELAYD_E3_TETRA_WINDOW       tetra.Config.InitialWindowSize (bytes)
 //	RELAYD_E3_SOURCE_RATE        at most this many GetEvents messages per
 //	                             second are read from Tetragon (T-S6's
 //	                             slow client)
@@ -38,11 +36,7 @@ func e3Tuning(auditor agent.Auditor, tc tetra.Config) (tetra.Config, e3Knobs) {
 		return v
 	}
 	k := e3Knobs{handoffChunk: get("RELAYD_E3_HANDOFF_CHUNK"), sourceRate: get("RELAYD_E3_SOURCE_RATE")}
-	tc.ReadBufferSize = get("RELAYD_E3_TETRA_READ_BUFFER")
-	if w := get("RELAYD_E3_TETRA_WINDOW"); w <= 1<<30 {
-		tc.InitialWindowSize = int32(w) //nolint:gosec // G115: bounded above
-	}
-	auditor.Record(agent.AuditEvent{Step: "e3_tuning", Detail: fmt.Sprintf("handoff_chunk=%d tetra_read_buffer=%d tetra_window=%d source_rate=%d (0: default)", k.handoffChunk, tc.ReadBufferSize, tc.InitialWindowSize, k.sourceRate)})
+	auditor.Record(agent.AuditEvent{Step: "e3_tuning", Detail: fmt.Sprintf("handoff_chunk=%d source_rate=%d (0: default)", k.handoffChunk, k.sourceRate)})
 	return tc, k
 }
 

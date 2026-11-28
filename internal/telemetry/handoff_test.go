@@ -110,3 +110,23 @@ func TestHandoff_BackpressureAndCancel(t *testing.T) {
 		t.Fatalf("took %d after cancel, want 1", len(evs))
 	}
 }
+
+// step-07b-decisions-3.md F3: a partial chunk (fewer than chunk events)
+// is taken after the drain delay, and nothing queued is left behind.
+func TestHandoff_PartialChunk(t *testing.T) {
+	h := newHandoff(64, 1024, 5*time.Millisecond)
+	ctx := context.Background()
+	for i := 0; i < 63; i++ {
+		h.put(ctx, []byte{byte(i)})
+	}
+	<-h.ready() // the empty -> non-empty signal; 63 is not a full chunk
+	evs := h.take(ctx, nil)
+	if len(evs) != 63 || evs[62][0] != 62 {
+		t.Fatalf("took %d events, want all 63 in order", len(evs))
+	}
+	select {
+	case <-h.ready():
+		t.Fatal("a partial chunk signaled twice")
+	default:
+	}
+}
