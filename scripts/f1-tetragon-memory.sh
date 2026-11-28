@@ -133,17 +133,23 @@ POLICY
 	grep -E -- '--[a-z0-9-]*(queue|cache|buffer|rb-|ring|-size|limit|gc-|memory)[a-z0-9-]*' <<<"${help}" | sed 's/^/F1 HELP /'
 	# F2's question: can Tetragon serve its metrics on a unix socket?
 	grep -iE -- 'metrics|server-address|health-server' <<<"${help}" | sed 's/^/F2 METRICS HELP /'
-	# Integer flags with a default whose name says queue/cache/buffer size.
+	# Flags whose name is a queue, cache or buffer *size*, with a numeric
+	# default (int, uint, or a string such as "65535"); run 46144942599
+	# also tried two retry/delay flags, which bound nothing, and missed
+	# --event-queue-size (uint) and --rb-queue-size (string).
 	while IFS= read -r line; do
-		flag=$(sed -n 's/^ *\(--[a-z0-9-]*\) int .*/\1/p' <<<"${line}")
-		def=$(sed -n 's/.*(default \([0-9][0-9]*\)).*/\1/p' <<<"${line}")
+		flag=$(sed -nE 's/^ *(--[a-z0-9-]+) (int|uint|string) .*/\1/p' <<<"${line}")
+		def=$(sed -nE 's/.*\(default "?([0-9]+)"?\).*/\1/p' <<<"${line}")
 		[ -n "${flag}" ] && [ -n "${def}" ] && [ "${def}" -gt 0 ] || continue
 		flags+=("${flag}=$(((def / 16) > 64 ? def / 16 : 64))")
 		echo "F1 CANDIDATE ${flag} default=${def} tried=$(((def / 16) > 64 ? def / 16 : 64))"
-	done < <(grep -E -- '--[a-z0-9-]*(queue|cache|buffer)[a-z0-9-]*(-size)? int ' <<<"${help}")
+	done < <(grep -E -- '--[a-z0-9-]*(queue|cache|buffer)-size (int|uint|string) ' <<<"${help}" | grep -v -- '--deleted-pod-cache-size')
 
 	round baseline-slow-client 100
 	round baseline "${F1_CLIENT_RATE}"
+	# e3's Tetragon runs with environment collection on (V2); production
+	# won't (F4). One round shows what that costs in memory.
+	round env-collection-on "${F1_CLIENT_RATE}" --enable-process-environment-variables
 	local f
 	for f in "${flags[@]}"; do
 		round "${f}" "${F1_CLIENT_RATE}" "${f}"
