@@ -402,6 +402,26 @@ jobs:
           sudo chmod 2770 /etc/tetragon/tetragon.tp.d/relay
           sudo usermod -a -G tetragon-relay "$(id -un)"
 
+      # Step 7b V1: the flag that makes Tetragon populate
+      # process.environment_variables, read from the pinned binary's own
+      # --help rather than assumed. Exactly one flag naming "environment"
+      # must exist; it is passed to the daemon below (T-S1's secret-token
+      # proof, V2, needs Tetragon to send environments).
+      - name: "V1: tetragon --help, the process-environment flag"
+        run: |
+          set -euo pipefail
+          "${TETRAGON_BIN}" --help >/tmp/tetragon-help.txt 2>&1 || true
+          echo "== tetragon --help lines naming env (v${TETRAGON_VERSION#v}) =="
+          grep -inE 'env' /tmp/tetragon-help.txt || true
+          mapfile -t flags < <(grep -oE -- '--[a-z0-9-]*environment[a-z0-9-]*' /tmp/tetragon-help.txt | sort -u)
+          echo "flags naming environment: ${flags[*]:-none}"
+          if [ "${#flags[@]}" -ne 1 ]; then
+            echo "want exactly one environment flag in tetragon --help, got ${#flags[@]}" >&2
+            exit 1
+          fi
+          grep -E -- "${flags[0]}( |=|$)" /tmp/tetragon-help.txt
+          echo "TETRAGON_ENV_FLAG=${flags[0]}" >> "$GITHUB_ENV"
+
       - name: Start Tetragon (root, from a unit file) on the unix socket
         run: |
           # A real unit file, not a transient systemd-run unit: the relay
@@ -416,7 +436,7 @@ jobs:
 
           [Service]
           Type=simple
-          ExecStart=${TETRAGON_BIN} --server-address unix:///var/run/tetragon/tetragon.sock --tracing-policy-dir /etc/tetragon/tetragon.tp.d --bpf-lib ${TETRAGON_BPF_LIB}
+          ExecStart=${TETRAGON_BIN} --server-address unix:///var/run/tetragon/tetragon.sock --tracing-policy-dir /etc/tetragon/tetragon.tp.d --bpf-lib ${TETRAGON_BPF_LIB} ${TETRAGON_ENV_FLAG}
           EOF
           sudo systemctl daemon-reload
           sudo systemctl start tetragon.service

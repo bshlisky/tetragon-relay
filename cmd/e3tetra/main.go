@@ -24,7 +24,10 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/bshlisky/tetragon-relay/internal/tetra"
+	tetragonpb "github.com/bshlisky/tetragon-relay/third_party/tetragon/v1.8.0/api/v1/tetragon"
 )
 
 func main() {
@@ -39,10 +42,13 @@ func run(args []string) error {
 	socket := fs.String("socket", "/var/run/tetragon/tetragon.sock", "Tetragon gRPC unix socket")
 	tetragonBinary := fs.String("tetragon-binary", "", "path to the Tetragon daemon binary (for internal/tetra's own socket-peer verification)")
 	relayGroup := fs.String("relay-group", "tetragon-relay", "POSIX group the socket must be owned by")
-	mode := fs.String("mode", "", "preload | list | check | delete")
+	mode := fs.String("mode", "", "preload | list | check | delete | env-probe")
 	domain := fs.String("domain", "", "delete mode: the policy's domain (relayd loads its policies in domain \"relay-managed\")")
 	policyName := fs.String("policy-name", "e3-baseline", "preload mode: the TracingPolicy's metadata.name")
 	expectNames := fs.String("expect-names", "", "check mode: comma-separated list of policy names that must be exactly what is loaded (order-independent)")
+	probeBinary := fs.String("binary", "", "env-probe mode: the exec'd binary whose events to inspect")
+	probeEnv := fs.String("env-name", "", "env-probe mode: the environment variable name to look for (its value is never printed)")
+	probeFor := fs.Duration("duration", 20*time.Second, "env-probe mode: how long to watch")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -79,8 +85,10 @@ func run(args []string) error {
 		}
 		fmt.Printf("e3tetra: deleted policy %q (domain %q) out of band\n", *policyName, *domain)
 		return nil
+	case "env-probe":
+		return envProbe(client, *probeBinary, *probeEnv, *probeFor)
 	default:
-		return fmt.Errorf("--mode must be preload, list, check or delete, got %q", *mode)
+		return fmt.Errorf("--mode must be preload, list, check, delete or env-probe, got %q", *mode)
 	}
 }
 
@@ -165,4 +173,54 @@ spec:
         matchActions:
         - action: "Post"
 `, name)
+}
+
+// envProbe (step 7b V2) is the positive control for T-S1's secret-token
+// proof: it opens its own GetEvents stream for PROCESS_EXEC with no field
+// filter, the way any client would, and reports whether Tetragon sends
+// the environment of binary's exec events and whether it includes
+// envName. It prints variable names only, never values. It exits non-zero
+// if no exec event of binary was seen.
+func envProbe(client *tetra.Client, binary, envName string, d time.Duration) error {
+	if binary == "" || envName == "" {
+		return fmt.Errorf("env-probe needs --binary and --env-name")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	defer cancel()
+	var execs, withEnv, withName int
+	names := map[string]bool{}
+	err := client.StreamEvents(ctx, []tetragonpb.EventType{tetragonpb.EventType_PROCESS_EXEC}, nil, func(raw []byte) bool {
+		var ev tetragonpb.GetEventsResponse
+		if proto.Unmarshal(raw, &ev) != nil {
+			return true
+		}
+		p := ev.GetProcessExec().GetProcess()
+		if p.GetBinary() != binary {
+			return true
+		}
+		execs++
+		if env := p.GetEnvironmentVariables(); len(env) > 0 {
+			withEnv++
+			for _, kv := range env {
+				names[kv.GetKey()] = true
+				if kv.GetKey() == envName {
+					withName++
+				}
+			}
+		}
+		return true
+	})
+	if err != nil {
+		return fmt.Errorf("GetEvents: %w", err)
+	}
+	keys := make([]string, 0, len(names))
+	for k := range names {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	fmt.Printf("e3tetra: ENVPROBE binary=%s exec_events=%d with_env=%d with_%s=%d env_names=%v\n", binary, execs, withEnv, envName, withName, keys)
+	if execs == 0 {
+		return fmt.Errorf("no exec event of %s in %s", binary, d)
+	}
+	return nil
 }

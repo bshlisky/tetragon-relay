@@ -76,7 +76,7 @@ func main() {
 					}
 					next = next.Add(interval)
 				}
-				pid, err := syscall.ForkExec(*bin, argv, attr)
+				pid, err := syscall.ForkExec(*bin, argv, attr) //nolint:gosec // G204: a test generator; the binary is its own flag
 				if err != nil {
 					failed.Add(1)
 					continue

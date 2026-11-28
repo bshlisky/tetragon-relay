@@ -937,10 +937,31 @@ scenario_ts1() {
 	start_unit || ok=false
 	sleep 3
 	# The canary: cwd under ~/.ssh, a ~/.ssh path, a password and a token
-	# in argv, and a secret in the environment.
-	# (The environment variable is set without sudo/env, so the secret is
-	# in the process environment only, never in anyone's argv.)
-	E3_SECRET_ENV=e3-env-secret sh -c 'cd /home/e3canary/.ssh && /usr/bin/cat /home/e3canary/.ssh/id_e3 --password=hunter2 token=e3tok >/dev/null 2>&1' || true
+	# in argv, and secrets in the environment.
+	# (The environment variables are set without sudo/env, so the secrets
+	# are in the process environment only, never in anyone's argv.)
+	# Step 7b V2: Tetragon runs with V1's environment flag, and
+	# SECRET_TOKEN is fresh per run. e3tetra's env-probe, a separate
+	# GetEvents client with no field filter, is the positive control: it
+	# must see SECRET_TOKEN in the canary's exec event, so the absence
+	# checks below are not vacuous.
+	local secret_token probe_pid
+	secret_token=e3st-$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
+	"${BIN_DIR}/e3tetra" --mode=env-probe --tetragon-binary "${TETRAGON_BIN}" --binary /usr/bin/cat --env-name SECRET_TOKEN --duration 12s >/tmp/e3-ts1-envprobe.log 2>&1 &
+	probe_pid=$!
+	sleep 2
+	(set +x; SECRET_TOKEN="${secret_token}" E3_SECRET_ENV=e3-env-secret sh -c 'cd /home/e3canary/.ssh && /usr/bin/cat /home/e3canary/.ssh/id_e3 --password=hunter2 token=e3tok >/dev/null 2>&1') || true
+	wait "${probe_pid}" || ok=false
+	cat /tmp/e3-ts1-envprobe.log
+	grep -qE 'ENVPROBE .* with_SECRET_TOKEN=[1-9]' /tmp/e3-ts1-envprobe.log || { echo "V2 positive control: Tetragon did not send SECRET_TOKEN to a client without field filters" >&2; ok=false; }
+	# The spool before it drains: raw files (events payloads are zstd, so
+	# this alone proves little; the collector's decoded output below covers
+	# every spooled batch, since the chain is verified contiguous and the
+	# spool empties).
+	if sudo grep -rqF "${secret_token}" "${SPOOL_DIR}"; then
+		echo "V2: SECRET_TOKEN found in the spool" >&2
+		ok=false
+	fi
 	/tmp/e3-baseline-placeholder -c '/usr/bin/true; /usr/bin/true' || true
 	wait "${ctrl_pid}" || ok=false
 	cat /tmp/e3controller-ts1.log
@@ -955,6 +976,15 @@ scenario_ts1() {
 		echo "a secret or ~/.ssh path reached the collector" >&2
 		ok=false
 	fi
+	# V2: the fresh token, in the decoded events, the collector's raw
+	# store and relayd's journal.
+	if grep -qF "${secret_token}" <<<"${rep}" || grep -qF "${secret_token}" "${TS_STORE}" || grep -qF "${secret_token}" <<<"$(scenario_journal)"; then
+		echo "V2: SECRET_TOKEN reached the collector or relayd's log" >&2
+		ok=false
+	else
+		echo "V2: SECRET_TOKEN (fresh, ${#secret_token} chars) absent from the decoded events, the collector store, the spool and relayd's journal"
+	fi
+	grep -c 'binary="/usr/bin/cat"' <<<"${rep}" | sed 's/^/V2: canary events decoded at the collector: /'
 	if grep -E 'event .* env=[1-9]' <<<"${rep}"; then
 		echo "an event carries environment variables" >&2
 		ok=false
