@@ -1053,7 +1053,7 @@ scenario_p4_rss() {
 	c0=$(awk '{print $14 + $15}' "/proc/${pid}/stat")
 	t0=$(date +%s.%N)
 	flood_pids=()
-	flood 60 "${P4_LOOPS}" "${counts}"
+	flood_shell 60 "${P4_LOOPS}" "${counts}"
 	for i in $(seq 1 60); do
 		rss=$(awk '/^VmRSS:/ {print $2}' "/proc/${pid}/status" 2>/dev/null || echo 0)
 		[ "${rss:-0}" -gt "${maxrss}" ] && maxrss=${rss}
@@ -1152,7 +1152,7 @@ scenario_p4_gomaxprocs1() {
 	c0=$(awk '{print $14 + $15}' "/proc/${pid}/stat" 2>/dev/null || echo 0)
 	t0=$(date +%s.%N)
 	flood_pids=()
-	flood 60 "${P4_LOOPS}" "${counts}"
+	flood_shell 60 "${P4_LOOPS}" "${counts}"
 	wait "${flood_pids[@]}"
 	t1=$(date +%s.%N)
 	c1=$(awk '{print $14 + $15}' "/proc/${pid}/stat" 2>/dev/null || echo 0)
@@ -1170,99 +1170,160 @@ scenario_p4_gomaxprocs1() {
 	record_result P4-GOMAXPROCS1 INFO
 }
 
-# flood SECONDS LOOPS OUTFILE: LOOPS shell loops exec /usr/bin/true for
-# SECONDS (each exec is an exec and an exit event), with xtrace off (the
-# job runs under set -x). Each loop appends its iteration count to OUTFILE
-# when it ends; flood_events OUTFILE is the number of events generated.
-flood() {
+# flood_shell SECONDS LOOPS OUTFILE: LOOPS shell loops exec /usr/bin/true
+# for SECONDS (each exec is an exec and an exit event), with xtrace off (the
+# job runs under set -x). P4-RSS keeps this load so its numbers stay
+# comparable across step 7b. Each loop appends "generated=2n" to OUTFILE.
+flood_shell() {
 	local secs="$1" nloops="$2" out="$3"
 	: >"${out}"
 	for _ in $(seq 1 "${nloops}"); do
-		(set +x; n=0; end=$((SECONDS + secs)); while [ "${SECONDS}" -lt "${end}" ]; do /usr/bin/true; n=$((n + 1)); done; echo "${n}" >>"${out}") &
+		(set +x; n=0; end=$((SECONDS + secs)); while [ "${SECONDS}" -lt "${end}" ]; do /usr/bin/true; n=$((n + 1)); done; echo "shell generated=$((2 * n)) " >>"${out}") &
 		flood_pids+=($!)
 	done
 }
 
+# flood SECS WORKERS OUT [RATE]: cmd/e3execflood (decisions-2 E1.1), WORKERS
+# fork/execve loops of /usr/bin/true for SECS, in the background (its pid
+# appended to flood_pids). OUT gets its summary line. RATE caps the total
+# execs per second (0 or absent: as fast as the runner can).
+flood() {
+	local secs="$1" nworkers="$2" out="$3" rate="${4:-0}"
+	: >"${out}"
+	"${BIN_DIR}/e3execflood" --workers "${nworkers}" --duration "${secs}s" --rate "${rate}" >"${out}" &
+	flood_pids+=($!)
+}
+
+# flood_events OUT: the events (exec + exit) the generator produced.
 flood_events() {
-	awk '{s += 2 * $1} END {print s + 0}' "$1"
+	sed -n 's/.* generated=\([0-9]*\) .*/\1/p' "$1" | awk '{s += $1} END {print s + 0}'
+}
+
+# unit_cpu_stat [UNIT]: "usage_usec nr_throttled" of a unit's cgroup
+# (default: relayd's).
+unit_cpu_stat() {
+	local cg
+	cg=$(systemctl show "${1:-${UNIT}}" -p ControlGroup --value)
+	awk '$1 == "usage_usec" {u = $2} $1 == "nr_throttled" {t = $2} END {print u + 0, t + 0}' "/sys/fs/cgroup${cg}/cpu.stat" 2>/dev/null || echo "0 0"
 }
 
 # ---------------------------------------------------------------------
-# P5-CONTROL-UNDER-LOAD (docs/reviews/step-07b-decisions.md D0): the
-# control plane keeps its timing under the heaviest exec flood the runner
-# can generate. With relayd under the real unit (CPUQuota=25%) and the
-# default admission budget (2000 non_security events/s), P5_LOOPS shell
-# loops flood exec events for P5_SECS; during the flood the controller
-# delivers a monitor bundle (S7's canary policy, epoch 7). Pass:
-#   - no heartbeat gap above 20 s at the controller, from the connection
-#     to the ApplyResult;
-#   - APPLIED within the health window (the controller's apply timeout);
+# P5-CONTROL-UNDER-LOAD (docs/reviews/step-07b-decisions.md D0; the
+# binding gate since step-07b-decisions-2.md E1.1): the control plane keeps
+# its timing while relayd is at its CPU quota. With relayd under the real
+# unit (CPUQuota=25%) and the default admission budget (2000 non_security
+# events/s), cmd/e3execflood (P5_WORKERS fork/execve loops) floods exec
+# events from before the connection until the controller is done. During
+# the flood the controller delivers:
+#   1. a monitor bundle (S7's canary policy, epoch 7): APPLIED;
+#   2. an enforce bundle (S12's admin-path kill policy, epoch 8), whose
+#      health window sees the admin-path kill: ROLLED_BACK.
+# Pass:
+#   - relayd was at its quota during the flood: the unit cgroup's
+#     nr_throttled grew, or its usage was >= 23 % of one core. Otherwise
+#     the saturated case was not tested and P5 FAILs as "not evaluated";
+#   - no heartbeat gap above 20 s at the controller over the connection,
+#     both applies included;
+#   - APPLIED and ROLLED_BACK within the controller's apply timeout;
 #   - no "Watchdog timeout" and no restart;
 #   - rate_limited dropped records in the chain;
 #   - the canary's kprobe events (security) still delivered.
 # Runs after P4-RSS (unit and collector stopped).
 # ---------------------------------------------------------------------
-P5_LOOPS=${P5_LOOPS:-4}
-P5_SECS=${P5_SECS:-150}
+P5_WORKERS=${P5_WORKERS:-4}
+P5_MAX_SECS=${P5_MAX_SECS:-420}
 scenario_p5() {
-	log "P5-CONTROL-UNDER-LOAD: monitor bundle during a ${P5_LOOPS}-loop exec flood"
+	log "P5-CONTROL-UNDER-LOAD: monitor and enforce bundles during a ${P5_WORKERS}-worker exec flood"
 	write_dropins "e3.conf=$(e3_dropin)"
 	ok=true
-	local store=${COLLECTOR_DIR}/p5.jsonl counts=/tmp/e3-p5-counts pid t0 t1 c0 c1 clk gen n rc
+	local store=${COLLECTOR_DIR}/p5.jsonl counts=/tmp/e3-p5-counts pid t0 t1 u0 u1 th0 th1 tu0 tu1 gen n rc
+	local go_file=/tmp/e3-p5-go fifo=/tmp/e3-p5-fifo trigger_pid trigger_rc=0 sat
 	stop_collector
-	rm -f "${store}"
+	rm -f "${store}" "${go_file}" "${fifo}"
 	sudo find "${SPOOL_DIR}" -mindepth 1 -delete
 	sudo install -o root -g root -m 0755 /usr/bin/bash "${CANARY}"
 	canary_policy e3-canary "${CANARY}" >"${BUNDLE_DIR}/e3-canary.yaml"
 	sign_bundle "${BUNDLE_DIR}/p5-monitor.json" "${E3_KEYS}/v3/targets.key" 7 monitor "e3-canary=${BUNDLE_DIR}/e3-canary.yaml" || ok=false
+	# The enforce case's admin-path process, as in S12: builtins only
+	# until the go file exists, then an exec the enforce policy kills.
+	mkfifo "${fifo}"
+	/usr/bin/bash -c "exec 9<>'${fifo}'; until [ -e '${go_file}' ]; do read -r -t 1 -u 9 _ || :; done; /usr/bin/true; /usr/bin/true" &
+	trigger_pid=$!
+	admin_kill_policy "${trigger_pid}" >"${BUNDLE_DIR}/e3-p5-admin-kill.yaml"
+	sign_bundle "${BUNDLE_DIR}/p5-enforce.json" "${E3_KEYS}/v3/targets.key" 8 enforce "e3-admin-kill=${BUNDLE_DIR}/e3-p5-admin-kill.yaml" || ok=false
 	start_collector p5 "${store}"
-	# The bundle goes out 30 s after the connection: the flood is running
-	# by then, and keeps running through the 60 s health window.
-	start_controller p5 --mode bundles --overall-timeout 300s --apply-timeout 180s \
-		--bundle-delay 30s --max-heartbeat-gap 20s --min-heartbeats-during-apply 3 \
-		--bundle "${BUNDLE_DIR}/p5-monitor.json" --expect APPLIED
+	# Bundle 1 goes out 30 s after the connection, with the flood running.
+	start_controller p5 --mode bundles --overall-timeout 480s --apply-timeout 180s \
+		--bundle-delay 30s --max-heartbeat-gap 20s --min-heartbeats-during-apply 2 \
+		--bundle "${BUNDLE_DIR}/p5-monitor.json" --expect APPLIED \
+		--bundle "${BUNDLE_DIR}/p5-enforce.json" --expect ROLLED_BACK
 	SCENARIO_SINCE=$(date '+%Y-%m-%d %H:%M:%S')
 	start_unit || ok=false
 	sleep 3
 	pid=$(systemctl show "${UNIT}" -p MainPID --value)
-	clk=$(getconf CLK_TCK)
-	c0=$(awk '{print $14 + $15}' "/proc/${pid}/stat" 2>/dev/null || echo 0)
+	read -r u0 th0 < <(unit_cpu_stat)
+	read -r tu0 _ < <(unit_cpu_stat tetragon.service)
 	t0=$(date +%s.%N)
 	flood_pids=()
-	flood "${P5_SECS}" "${P5_LOOPS}" "${counts}"
+	flood "${P5_MAX_SECS}" "${P5_WORKERS}" "${counts}"
+	# The enforce bundle's health window: trigger the admin-path kill 35 s
+	# after it was sent (S12's timing: the policy is loaded by then).
+	for _ in $(seq 1 300); do
+		grep -q 'sent bundle 2' /tmp/e3controller-p5.log && break
+		sleep 1
+	done
+	sleep 35
+	touch "${go_file}"
+	wait "${trigger_pid}" || trigger_rc=$?
+	echo "P5 admin-path shell exit status: ${trigger_rc} (137 = SIGKILL)"
+	[ "${trigger_rc}" = 137 ] || { echo "the admin-path shell was not killed under load" >&2; ok=false; }
 	wait "${ctrl_pid}" || ok=false
 	cat /tmp/e3controller-p5.log
-	# Under the monitor bundle the canary's exec hook posts a kprobe event
-	# (actions rewritten to Post) instead of killing it.
+	# After the rollback the monitor bundle is loaded again: the canary's
+	# exec hook posts a kprobe event instead of killing it.
 	rc=$(run_canary)
 	echo "canary under the monitor bundle, during the flood: rc=${rc}"
 	[ "${rc}" = 0 ] || { echo "canary rc=${rc} under a monitor bundle (want 0)" >&2; ok=false; }
-	wait "${flood_pids[@]}"
+	read -r u1 th1 < <(unit_cpu_stat)
+	read -r tu1 _ < <(unit_cpu_stat tetragon.service)
 	t1=$(date +%s.%N)
-	c1=$(awk '{print $14 + $15}' "/proc/${pid}/stat" 2>/dev/null || echo 0)
+	awk -v a="${tu0}" -v b="${tu1}" -v t0="${t0}" -v t1="${t1}" 'BEGIN { printf "P5 tetragon.service CPU: %.2fs (%.1f%% of one core)\n", (b - a) / 1e6, 100 * (b - a) / 1e6 / (t1 - t0) }'
+	echo "P5 load average: $(cat /proc/loadavg); nproc=$(nproc)"
+	kill -TERM "${flood_pids[@]}" 2>/dev/null || true
+	wait "${flood_pids[@]}" || true
+	cat "${counts}"
 	gen=$(flood_events "${counts}")
 	wait_spool_empty 120 || ok=false
 	rep=$(collector_report "${store}" --decode) || ok=false
 	grep -E 'REPORT (chain|CLEAN)' <<<"${rep}"
 	n=$(grep -o '"kind":"events","class":"[a-z_]*","count":[0-9]*' <<<"${rep}" | awk -F: '{s += $NF} END {print s + 0}')
-	awk -v c0="${c0}" -v c1="${c1}" -v clk="${clk}" -v t0="${t0}" -v t1="${t1}" -v n="${n}" -v g="${gen}" 'BEGIN {
-		cpu = (c1 - c0) / clk; wall = t1 - t0
-		printf "P5 generated=%d (%.0f/s) received=%d (%.0f/s) wall=%.1fs relayd_cpu=%.2fs (%.2f%% of one core)\n", g, g / wall, n, n / wall, wall, cpu, 100 * cpu / wall
-	}'
+	read -r sat < <(awk -v u0="${u0}" -v u1="${u1}" -v th0="${th0}" -v th1="${th1}" -v t0="${t0}" -v t1="${t1}" -v n="${n}" -v g="${gen}" 'BEGIN {
+		wall = t1 - t0; cpu = (u1 - u0) / 1e6; pct = 100 * cpu / wall
+		printf "P5 generated=%d (%.0f/s) received=%d (%.0f/s) wall=%.1fs relayd_cpu=%.2fs (%.2f%% of one core) nr_throttled=+%d\n", g, g / wall, n, n / wall, wall, cpu, pct, th1 - th0 > "/dev/stderr"
+		print ((th1 > th0 || pct >= 23) ? "yes" : "no")
+	}')
+	if [ "${sat}" = yes ]; then
+		echo "P5 saturation: relayd was at its CPU quota during the flood"
+	else
+		echo "P5 not evaluated: relayd was not at its CPU quota during the flood (no throttling, usage < 23 % of one core)" >&2
+		ok=false
+	fi
 	grep -E 'reason=rate_limited' <<<"${rep}" | head -3
 	grep -q 'reason=rate_limited' <<<"${rep}" || { echo "no rate_limited dropped record in the chain" >&2; ok=false; }
 	grep -E "event .*ProcessKprobe binary=\"${CANARY}\"" <<<"${rep}" | head -2
 	grep -qE "event .*ProcessKprobe binary=\"${CANARY}\"" <<<"${rep}" || { echo "the canary's kprobe event was not delivered" >&2; ok=false; }
-	[ "$(flood_events "${counts}")" -gt $((5000 * P5_SECS)) ] || echo "P5 note: the flood generated <= 5k events/s on this runner" >&2
 	journal=$(scenario_journal)
 	if grep -i 'watchdog timeout' <<<"${journal}"; then
 		echo "systemd watchdog timeout during the flood" >&2
 		ok=false
 	fi
+	grep '"step":"health_window_failed"' <<<"${journal}" | grep -q 'admin_path_enforcement_event' || { echo "no admin-path health-window failure in the journal" >&2; ok=false; }
+	grep -q '"step":"rolled_back"' <<<"${journal}" || { echo "no rolled_back record in the journal" >&2; ok=false; }
 	grep -c '"step":"telemetry_rate_limited"' <<<"${journal}" || true
 	[ "$(systemctl show "${UNIT}" -p MainPID --value)" = "${pid}" ] || { echo "relayd restarted under load" >&2; ok=false; }
 	stop_unit
 	stop_collector
+	rm -f "${fifo}" "${go_file}"
 	record_result P5-CONTROL-UNDER-LOAD "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
 }
 
