@@ -18,12 +18,18 @@ import (
 // paired). Exits never seen can't be counted reliably (long-lived
 // processes), so they aren't. The count is therefore a lower bound.
 //
-// An exit never removes its exec: Tetragon does not track forks exactly,
-// and a fork-only child's exit carries its parent's exec data
-// (tetragon.proto, Process.flags `taskWalk`), so the parent's own exit
-// can follow with the same exec_id. E3 run 46149776060 counted those as
-// losses ("1 of 10" while idle) when the first exit deleted the entry.
-// Entries leave only by eviction, which raises the floor.
+// Fork-only children. Measured on the real v1.8.0
+// (TestIntegration_ForkOnlyChildExits, run 46156508611): a child that
+// forks and never execs exits with its own new exec_id, for which no exec
+// is ever sent, with flags "execve" and its parent's binary copied. E3
+// run 46149776060 counted those as losses ("1 of 10" while idle). So an
+// unpaired exit counts only when its binary differs from its parent's: a
+// fork-only child never does. Both binaries must be known (under load
+// Tetragon may send none); a real exec of the parent's own binary is then
+// missed. Both keep the count a lower bound.
+//
+// An exit never removes its exec either: entries leave only by eviction,
+// which raises the floor.
 //
 // The pairing runs in ingest, before admission, so execs that relayd's own
 // rate limit drops are still recorded as seen and never counted as
@@ -78,7 +84,7 @@ func (x *execPairing) reset(nowNs int64) {
 // observe records one raw GetEventsResponse (any event; only exec and exit
 // matter).
 func (x *execPairing) observe(raw []byte) {
-	event, execID, start, ok := peekProcess(raw)
+	event, execID, start, distinct, ok := peekProcess(raw)
 	if !ok {
 		return
 	}
@@ -96,7 +102,7 @@ func (x *execPairing) observe(raw []byte) {
 		if _, ok := x.seen[key]; ok {
 			return
 		}
-		if start > x.floor {
+		if start > x.floor && distinct {
 			x.mu.Lock()
 			x.missing++
 			x.mu.Unlock()
@@ -136,21 +142,23 @@ func (x *execPairing) putBack(missing uint64) {
 }
 
 // peekProcess reads, without copying, the event field (exec or exit), its
-// process's exec_id and start_time (unix nanoseconds) from a raw
-// GetEventsResponse. ok is false for any other event, a missing exec_id or
-// start_time, or malformed bytes.
-func peekProcess(raw []byte) (event protowire.Number, execID []byte, startNs int64, ok bool) {
+// process's exec_id and start_time (unix nanoseconds), and whether the
+// process's binary and its parent's are both known and differ (a
+// fork-only child's are equal), from a
+// raw GetEventsResponse. ok is false for any other event, a missing
+// exec_id or start_time, or malformed bytes.
+func peekProcess(raw []byte) (event protowire.Number, execID []byte, startNs int64, distinct, ok bool) {
 	var body []byte
 	for len(raw) > 0 {
 		num, typ, n := protowire.ConsumeTag(raw)
 		if n < 0 {
-			return 0, nil, 0, false
+			return 0, nil, 0, false, false
 		}
 		raw = raw[n:]
 		if (num == fieldProcessExec || num == fieldProcessExit) && typ == protowire.BytesType {
 			v, m := protowire.ConsumeBytes(raw)
 			if m < 0 || event != 0 {
-				return 0, nil, 0, false
+				return 0, nil, 0, false, false
 			}
 			event, body = num, v
 			raw = raw[m:]
@@ -158,38 +166,43 @@ func peekProcess(raw []byte) (event protowire.Number, execID []byte, startNs int
 		}
 		m := protowire.ConsumeFieldValue(num, typ, raw)
 		if m < 0 {
-			return 0, nil, 0, false
+			return 0, nil, 0, false, false
 		}
 		raw = raw[m:]
 	}
 	if event == 0 {
-		return 0, nil, 0, false
+		return 0, nil, 0, false, false
 	}
-	// ProcessExec.process and ProcessExit.process are both field 1.
+	// ProcessExec.process and .parent, ProcessExit.process and .parent,
+	// are fields 1 and 2.
 	proc, found := bytesField(body, 1)
 	if !found {
-		return 0, nil, 0, false
+		return 0, nil, 0, false, false
 	}
+	parent, _ := bytesField(body, 2)
+	bin, _ := bytesField(proc, 5) // Process.binary
+	pbin, pfound := bytesField(parent, 5)
+	distinct = pfound && len(bin) > 0 && len(pbin) > 0 && string(bin) != string(pbin)
 	// Process.exec_id is field 1, Process.start_time field 8.
 	execID, found = bytesField(proc, 1)
 	if !found || len(execID) == 0 {
-		return 0, nil, 0, false
+		return 0, nil, 0, false, false
 	}
 	ts, found := bytesField(proc, 8)
 	if !found {
-		return 0, nil, 0, false
+		return 0, nil, 0, false, false
 	}
 	var sec, nanos uint64
 	for len(ts) > 0 {
 		num, typ, n := protowire.ConsumeTag(ts)
 		if n < 0 {
-			return 0, nil, 0, false
+			return 0, nil, 0, false, false
 		}
 		ts = ts[n:]
 		if typ == protowire.VarintType && (num == 1 || num == 2) {
 			v, m := protowire.ConsumeVarint(ts)
 			if m < 0 {
-				return 0, nil, 0, false
+				return 0, nil, 0, false, false
 			}
 			if num == 1 {
 				sec = v
@@ -201,14 +214,14 @@ func peekProcess(raw []byte) (event protowire.Number, execID []byte, startNs int
 		}
 		m := protowire.ConsumeFieldValue(num, typ, ts)
 		if m < 0 {
-			return 0, nil, 0, false
+			return 0, nil, 0, false, false
 		}
 		ts = ts[m:]
 	}
 	if sec > 1<<40 || nanos >= 1e9 {
-		return 0, nil, 0, false
+		return 0, nil, 0, false, false
 	}
-	return event, execID, int64(sec)*1e9 + int64(nanos), true //nolint:gosec // G115: bounded above
+	return event, execID, int64(sec)*1e9 + int64(nanos), distinct, true //nolint:gosec // G115: bounded above
 }
 
 // bytesField returns the last occurrence of length-delimited field num in

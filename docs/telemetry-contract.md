@@ -120,6 +120,10 @@ part of the chain. **Check both hashes before you decompress anything.**
   - An exit whose exec the agent never received on the current stream counts as one
     dropped exec, for processes that started after the stream began (plus a 2 s
     grace).
+  - An unpaired exit counts only when its binary and its parent's are both known and
+    differ. On Tetragon v1.8.0, a child that forks and never execs exits with its own
+    `exec_id`, for which no exec is ever sent, carrying its parent's binary
+    (measured, `TestIntegration_ForkOnlyChildExits`).
   - Exits that never arrive are not counted, since long-lived processes make them
     unknowable. Processes older than the stream aren't counted either, and nor are
     execs the agent's own rate limit dropped: those are declared as `rate_limited`.

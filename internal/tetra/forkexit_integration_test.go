@@ -9,7 +9,10 @@
 // A private copy of bash runs `( : ); ( : ); /usr/bin/true`: two pure
 // forks (a builtin in a subshell never execs) and one exec. The test
 // prints every exec and exit whose process or parent is the marker, with
-// exec_id and flags. It fails only if the stream breaks.
+// exec_id and flags. Run 46156508611 showed each fork-only child exiting
+// with its own exec_id, no exec, and its parent's binary. relayd's rule
+// (count an unpaired exit only if both binaries are known and differ) is
+// asserted: it must count none of them.
 package tetra
 
 import (
@@ -48,6 +51,7 @@ func TestIntegration_ForkOnlyChildExits(t *testing.T) {
 	var mu sync.Mutex
 	var lines []string
 	exitsByID := map[string]int{}
+	ruleCounted := 0
 	execIDs := map[string]bool{}
 	go func() {
 		for {
@@ -78,6 +82,9 @@ func TestIntegration_ForkOnlyChildExits(t *testing.T) {
 				execIDs[p.GetExecId()] = true
 			} else {
 				exitsByID[p.GetExecId()]++
+				if !execIDs[p.GetExecId()] && p.GetBinary() != "" && parent.GetBinary() != "" && p.GetBinary() != parent.GetBinary() {
+					ruleCounted++
+				}
 			}
 			mu.Unlock()
 		}
@@ -101,7 +108,10 @@ func TestIntegration_ForkOnlyChildExits(t *testing.T) {
 			unpaired += n
 		}
 	}
-	t.Logf("FORKEXIT summary: %d exec, %d distinct exit exec_ids, %d exits with no exec on this stream", len(execIDs), len(exitsByID), unpaired)
+	t.Logf("FORKEXIT summary: %d exec, %d distinct exit exec_ids, %d exits with no exec on this stream, %d counted by relayd's rule", len(execIDs), len(exitsByID), unpaired, ruleCounted)
+	if ruleCounted != 0 {
+		t.Fatalf("relayd's pairing rule would count %d fork-only exits as Tetragon drops", ruleCounted)
+	}
 }
 
 func itoa(v uint32) string {

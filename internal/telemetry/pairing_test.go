@@ -15,12 +15,18 @@ import (
 
 func procEvent(t *testing.T, exit bool, execID string, start time.Time) []byte {
 	t.Helper()
-	p := &tetragonpb.Process{ExecId: execID, Binary: "/usr/bin/true", StartTime: timestamppb.New(start)}
+	return procEventBin(t, exit, execID, start, "/usr/bin/true", "/usr/bin/bash")
+}
+
+func procEventBin(t *testing.T, exit bool, execID string, start time.Time, binary, parentBinary string) []byte {
+	t.Helper()
+	p := &tetragonpb.Process{ExecId: execID, Binary: binary, StartTime: timestamppb.New(start)}
+	parent := &tetragonpb.Process{ExecId: "parent", Binary: parentBinary}
 	r := &tetragonpb.GetEventsResponse{Time: timestamppb.New(start)}
 	if exit {
-		r.Event = &tetragonpb.GetEventsResponse_ProcessExit{ProcessExit: &tetragonpb.ProcessExit{Process: p}}
+		r.Event = &tetragonpb.GetEventsResponse_ProcessExit{ProcessExit: &tetragonpb.ProcessExit{Process: p, Parent: parent}}
 	} else {
-		r.Event = &tetragonpb.GetEventsResponse_ProcessExec{ProcessExec: &tetragonpb.ProcessExec{Process: p}}
+		r.Event = &tetragonpb.GetEventsResponse_ProcessExec{ProcessExec: &tetragonpb.ProcessExec{Process: p, Parent: parent}}
 	}
 	raw, err := proto.Marshal(r)
 	if err != nil {
@@ -31,13 +37,22 @@ func procEvent(t *testing.T, exit bool, execID string, start time.Time) []byte {
 
 func TestPeekProcess(t *testing.T) {
 	start := time.Unix(1700000000, 123)
-	ev, id, ns, ok := peekProcess(procEvent(t, false, "abc", start))
-	if !ok || ev != fieldProcessExec || string(id) != "abc" || ns != start.UnixNano() {
-		t.Fatalf("exec: %v %q %d %t", ev, id, ns, ok)
+	ev, id, ns, distinct, ok := peekProcess(procEvent(t, false, "abc", start))
+	if !ok || ev != fieldProcessExec || string(id) != "abc" || ns != start.UnixNano() || !distinct {
+		t.Fatalf("exec: %v %q %d %t %t", ev, id, ns, distinct, ok)
 	}
-	ev, id, _, ok = peekProcess(procEvent(t, true, "abc", start))
-	if !ok || ev != fieldProcessExit || string(id) != "abc" {
-		t.Fatalf("exit: %v %q %t", ev, id, ok)
+	ev, id, _, distinct, ok = peekProcess(procEvent(t, true, "abc", start))
+	if !ok || ev != fieldProcessExit || string(id) != "abc" || !distinct {
+		t.Fatalf("exit: %v %q %t %t", ev, id, distinct, ok)
+	}
+	for name, bins := range map[string][2]string{
+		"fork-only child":  {"/usr/bin/bash", "/usr/bin/bash"},
+		"no binary":        {"", "/usr/bin/bash"},
+		"no parent binary": {"/usr/bin/true", ""},
+	} {
+		if _, _, _, distinct, ok := peekProcess(procEventBin(t, true, "f", start, bins[0], bins[1])); !ok || distinct {
+			t.Errorf("%s: distinct=%t ok=%t, want ok and not distinct", name, distinct, ok)
+		}
 	}
 	k, _ := proto.Marshal(kprobe("/x"))
 	noID, _ := proto.Marshal(&tetragonpb.GetEventsResponse{Event: &tetragonpb.GetEventsResponse_ProcessExec{ProcessExec: &tetragonpb.ProcessExec{Process: &tetragonpb.Process{StartTime: timestamppb.New(start)}}}})
@@ -48,7 +63,7 @@ func TestPeekProcess(t *testing.T) {
 		"truncated": good[:len(good)-3], "garbage": {0xff, 0xff, 0xff},
 		"two events": append(append([]byte(nil), good...), procEvent(t, true, "abc", start)...),
 	} {
-		if _, _, _, ok := peekProcess(raw); ok {
+		if _, _, _, _, ok := peekProcess(raw); ok {
 			t.Errorf("%s: accepted", name)
 		}
 	}
@@ -70,9 +85,12 @@ func TestExecPairing(t *testing.T) {
 	x.observe(procEvent(t, true, "c", after))
 	x.observe(procEvent(t, true, "c", after)) // a second exit for c (a fork-only child's): paired, not counted
 	x.observe([]byte{0xff})                   // ignored
+	// A fork-only child: its own exec_id, no exec, its parent's binary
+	// (measured on v1.8.0, run 46156508611). Never counted.
+	x.observe(procEventBin(t, true, "forked", after, "/usr/bin/bash", "/usr/bin/bash"))
 	missing, received := x.take()
-	if missing != 1 || received != 9 {
-		t.Fatalf("missing=%d received=%d, want 1 and 9", missing, received)
+	if missing != 1 || received != 10 {
+		t.Fatalf("missing=%d received=%d, want 1 and 10", missing, received)
 	}
 	if m, r := x.take(); m != 0 || r != 0 {
 		t.Fatalf("take did not clear: %d %d", m, r)
