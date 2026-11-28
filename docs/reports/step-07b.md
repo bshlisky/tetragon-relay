@@ -708,9 +708,11 @@ Base: `da61669`. Decisions: `docs/reviews/step-07b-decisions-2.md` (committed ve
 
 ## S3.1 Summary
 
-**Boundary:** items 1–4 are done, plus V1, V2 and T-S6 as an observation. ci, bench
-and integration are green. **e3 is red on P5-CONTROL-UNDER-LOAD's new enforce case,
-which found a real enforcement-safety problem (S3.9 Q1).** The gate was not relaxed.
+**Boundary:** items 1–4 are done, plus V1, V2 and T-S6 as an observation. On the final
+commit (run 46131312207) ci, bench and integration are green, and every e3 scenario
+passes, T-S1 with V2 included, **except P5-CONTROL-UNDER-LOAD's new enforce case. It
+failed the same way in three runs, and it found a real enforcement-safety problem
+(S3.9 Q1).** The gate was not relaxed.
 
 - **e3 went green first, as asked** (run 46113949265 on `2d634ab`). P4-RSS's CPU line is
   now report-only, and RSS fails at ≥ 96 MiB and warns at ≥ 64 MiB (E1.2, E2).
@@ -1065,3 +1067,4 @@ One dated line per push: commit, what changed, the CI result observed.
 - 2026-11-28 `dd4f3a3` (V1 picks the boolean --enable-* flag; progress line for `2d634ab`): run 46119904742: ci ✓, bench ✓, integration ✗ (E1.5: one aggregated round got 19 exec / 20 exit), e3 skipped.
 - 2026-11-28 `9457c24` (E1.5 alternates aggregated and control rounds): run 46121973985: ci ✓, bench ✓, integration ✓ (6 rounds, all 20/20), e3 ✗: **T-S1 FAIL** (harness: the token in my own grep's argv), **P5 FAIL** (at saturation, 10,363 generated/s, relayd 23.22 %, nr_throttled +1,271: the enforce bundle was APPLIED, not ROLLED_BACK; the kill event never reached the health window). Everything else PASS; T-S6 INFO (12,017 of 120,004 received at 100 msgs/s; `tetragon_notify_overflowed_events_total` 145 → 167,801; no RateLimitInfo).
 - 2026-11-28 `940b9d5` (T-S1 token in a pattern file; P5 Tetragon counters; P4-TUNING first): run 46126491257: ci ✓, bench ✓, integration ✓, e3 ✗: **T-S1 FAIL** (V2's absence checks pass; the positive-control probe hit a deadline race), **P5 FAIL** (same as before: APPLIED, not ROLLED_BACK; Tetragon's drop counters flat, RSS 1.76 → 6.97 GB; 0 kprobe events delivered during the flood). Everything else PASS. P4-TUNING: per-event 4,953 vs chunked 4,812 ns per delivered message in the comparable pair.
+- 2026-11-28 `b4955a0`, `8c8ac74` (env-probe cancel; report; ADR 0041 E1.1/E1.3): run 46131312207: ci ✓, bench ✓, integration ✓, e3 ✗ **only on P5** (third time: APPLIED, not ROLLED_BACK, at 9,746 generated/s, relayd 23.02 %, nr_throttled +1,251; Tetragon 1.05 cores, drop counters flat, RSS 3.20 → 7.02 GB). **T-S1 PASS with V2**: positive control `with_SECRET_TOKEN=1`; the token was absent from the decoded events, collector store, spool and journal. S1–S13, T-S2–T-S5, P4-RSS (61.9 MiB), NO_SIGSYS PASS; P4-TUNING and T-S6 INFO. **Session 3 stops here, for the architect's decision on S3.9 Q1, Q2 and Q4.**
