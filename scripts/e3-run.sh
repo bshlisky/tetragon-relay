@@ -1018,7 +1018,7 @@ scenario_ts3() {
 # P4-RSS (step 7b P4/Z4): relayd under the real unit at a sustained event
 # rate. P4_LOOPS (3; 2 gave about 5.6k events/s in session 1) shell loops exec /usr/bin/true for 60 s (each exec is an
 # exec and an exit event). Records relayd's VmRSS every second (max must stay
-# < 64 MiB with the unit's MemoryMax untouched), relayd's own CPU per event
+# < 96 MiB, warning at 64 MiB, with the unit's MemoryMax untouched), relayd's own CPU per event
 # (utime+stime from /proc, so this includes gRPC decode and TLS, which the
 # benchmark does not), the events the collector received, and the
 # compression ratio on these real events. It runs after T-S5, which leaves
@@ -1080,17 +1080,15 @@ scenario_p4_rss() {
 		printf "P4-RSS generated=%d (%.0f/s) events=%d wall=%.1fs rate=%.0f/s relayd_cpu=%.2fs (%.2f%% of one core) cpu_per_event=%.0fns cpu_per_generated=%.0fns max_vmrss=%.1fMiB\n", g, g / wall, n, wall, n / wall, cpu, 100 * cpu / wall, (n > 0 ? 1e9 * cpu / n : 0), (g > 0 ? 1e9 * cpu / g : 0), m / 1024
 		if (s > 0) printf "P4-RSS payload sent=%d decoded=%d ratio=%.2f zstd_batches=%d sent_B/event=%.0f decoded_B/event=%.0f\n", s, d, d / s, z, s / n, d / n
 	}'
-	# Step 7b D1's E3 gate (ADR 0041): at >= 5k generated events/s, the
-	# whole relayd uses <= 15 % of one core (admission control may drop
-	# non_security events to get there: that is the budget's job).
-	read -r gen_rate cpu_pct < <(awk -v c0="${c0}" -v c1="${c1}" -v clk="${clk}" -v t0="${t0}" -v t1="${t1}" -v g="${gen}" 'BEGIN { w = t1 - t0; printf "%.0f %.2f\n", g / w, 100 * (c1 - c0) / clk / w }')
-	if [ "${gen_rate}" -ge 5000 ]; then
-		awk -v p="${cpu_pct}" 'BEGIN { exit !(p <= 15) }' || { echo "E3 CPU gate: relayd used ${cpu_pct}% of one core at ${gen_rate} events/s (> 15%)" >&2; ok=false; }
-		echo "P4-RSS E3 CPU gate: ${cpu_pct}% of one core at ${gen_rate} generated events/s (limit 15%)"
-	else
-		echo "P4-RSS E3 CPU gate not evaluated: the runner generated ${gen_rate} events/s (< 5000)" >&2
-		ok=false
-	fi
+	# Step 7b decisions-2 E1.2 (ADR 0041 section 9): relayd's CPU here is
+	# report-only. At the unit's quota relayd uses ~25 % of a core whatever
+	# the code does, so cpu_per_generated is about quota / generator rate:
+	# identical code measured 51.2 us (4.7k/s) and 35.5 us (6.8k/s) in two
+	# runs, a 1.44x swing that a 1.25x regression gate would flag. The
+	# binding gate for D0 is P5 at saturation. The 15 % gate is retired.
+	read -r gen_rate cpu_pct cpg < <(awk -v c0="${c0}" -v c1="${c1}" -v clk="${clk}" -v t0="${t0}" -v t1="${t1}" -v g="${gen}" 'BEGIN { w = t1 - t0; c = (c1 - c0) / clk; printf "%.0f %.2f %.0f\n", g / w, 100 * c / w, (g > 0 ? 1e9 * c / g : 0) }')
+	echo "P4-RSS CPU (report only): ${cpu_pct}% of one core at ${gen_rate} generated events/s, cpu_per_generated=${cpg}ns"
+	[ "${gen_rate}" -ge 5000 ] || echo "P4-RSS note: the runner generated ${gen_rate} events/s (< 5000)"
 	# The relayd CPU profile (D1), for the artifact and a summary here.
 	mkdir -p "${E3_OUT}"
 	if sudo cp /run/tetragon-relay/e3-cpu.pprof "${E3_OUT}/relayd-cpu.pprof" 2>/dev/null; then
@@ -1103,7 +1101,15 @@ scenario_p4_rss() {
 		scenario_journal | grep e3_cpu_profile >&2 || true
 	fi
 	[ "${n1}" -gt 10000 ] || { echo "too few events (${n1}) for a sustained-rate measurement" >&2; ok=false; }
-	[ "${maxrss}" -lt $((64 * 1024)) ] || { echo "relayd VmRSS reached ${maxrss} KiB (>= 64 MiB)" >&2; ok=false; }
+	# E2 (ADR 0041): fail at >= 96 MiB, warn at >= 64 MiB; MemoryMax=256M
+	# stays the hard bound. The peak is in the report line either way.
+	awk -v m="${maxrss}" 'BEGIN { printf "P4-RSS peak VmRSS=%.1fMiB (fail >= 96, warn >= 64)\n", m / 1024 }'
+	if [ "${maxrss}" -ge $((96 * 1024)) ]; then
+		echo "relayd VmRSS reached ${maxrss} KiB (>= 96 MiB)" >&2
+		ok=false
+	elif [ "${maxrss}" -ge $((64 * 1024)) ]; then
+		echo "P4-RSS WARN: relayd VmRSS reached ${maxrss} KiB (>= 64 MiB, < 96 MiB)"
+	fi
 	[ "$(systemctl show "${UNIT}" -p MainPID --value)" = "${pid}" ] || { echo "relayd restarted under load" >&2; ok=false; }
 	# Observation for T-S6 (not a pass criterion): does Tetragon still
 	# deliver events to this relayd 10 s after the flood, and to a fresh

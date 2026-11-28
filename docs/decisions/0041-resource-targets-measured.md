@@ -3,10 +3,10 @@
 ## Status
 
 Proposed (docs/prompts/step-07b.md P4 and Z4; docs/reviews/step-07b-decisions.md D0,
-D1, D2). Amends architecture doc 8.13. The decisions replaced the 6 µs gate with two
-gates (section 7). **The benchmark gate passes. The E3 gate fails (section 8): most of
-relayd's CPU at a high event rate is spent receiving from Tetragon, before admission
-control can drop anything.** That finding goes back to the architect.
+D1, D2; docs/reviews/step-07b-decisions-2.md E1–E3). Amends architecture doc 8.13. The
+first decisions replaced the 6 µs gate with two gates (section 7). The second decisions
+retired the 15 % E3 gate: P5-CONTROL-UNDER-LOAD at saturation is the binding gate, and
+relayd's E3 CPU is report-only (section 9).
 
 ## Context
 
@@ -272,24 +272,57 @@ options, for the architect:
    the measured whole-relayd value at 5k generated/s. The quota still caps relayd at
    25 %, and P5 shows the control plane keeps its timing at that cap.
 
+### 9. Step 7b session 3: E1.2, E2, E3 (docs/reviews/step-07b-decisions-2.md)
+
+**E1.2: relayd's E3 CPU is report-only, not a regression gate.** The decision asked for
+`cpu_per_generated` ≤ 1.25 × the value on the commit that lands E1, measured on the same
+run or by a ratio robust across runners, or report-only if that is too expensive. It is
+report-only, for a reason stronger than cost: under the unit's `CPUQuota=25%` relayd
+sits at its quota during P4-RSS's flood (24.0–24.8 % in every run in section 8), so
+`cpu_per_generated` ≈ 0.25 core / generator rate. It measures the generator, not relayd:
+
+| Run | Commit | Generated | relayd CPU | cpu_per_generated |
+| --- | --- | --- | --- | --- |
+| 46083840295 | `c817fb1` | 4,689/s | 24.01 % | 51.2 µs |
+| 46088223116 | `da61669` (docs only after `c817fb1`) | 6,800/s | 24.11 % | 35.5 µs |
+
+The same code moved 1.44×, past a 1.25× gate, in both directions depending on the
+runner. A same-run history build would cancel the runner difference, but not the quota:
+both builds would read about 25 %. A regression gate needs relayd below its quota,
+which means a load below what P4-RSS is for. P4-RSS prints relayd's CPU %, the generated
+rate and `cpu_per_generated` on every run (`P4-RSS CPU (report only): ...`). E1.3
+(chunked handoff, gRPC buffers) is measured by the CPU profile's shares and by the
+admitted rate at the quota, not by this ratio.
+
+**E2: RSS.** The target is < 96 MiB at the admission budget. P4-RSS fails at ≥ 96 MiB,
+warns at ≥ 64 MiB, and prints its peak on every run (`P4-RSS peak VmRSS=...`).
+`MemoryMax=256M` stays the hard bound. `GOMEMLIMIT` is not set: it would trade memory for
+GC CPU, the scarcer resource.
+
+**E3: spool.** 2 GiB stays the default, stated as a measured range (2.5–25 h at 1k
+events/s, section 6 and the table below). The per-host disk budget comes from the
+customer; the contract's sizing formula covers the rest.
+
 ## Decision (proposed)
 
 8.13's table becomes:
 
 | Metric | Target |
 | --- | --- |
-| RSS steady state | < 64 MiB, unchanged (`MemoryMax=256M` untouched). relayd measured 61.5–63.2 MiB max under load (E3 P4-RSS) |
+| RSS steady state | < 96 MiB at the admission budget (E2); P4-RSS fails at ≥ 96 MiB and warns at ≥ 64 MiB. `MemoryMax=256M` untouched, `GOMEMLIMIT` unset. relayd measured 61.5–63.5 MiB max under load (E3 P4-RSS) |
 | CPU, pipeline | Regression gate: ≤ 1.25 × `f80fcf4`'s CPU per event on the same runner (`bench`). Measured 9.7 µs per event, 4.9 % of one core at 5k/s, on an Intel Xeon 6975P-C |
-| CPU, whole relayd | E3 gate: ≤ 15 % of one core at ≥ 5k generated events/s, admission control included. **Not met**: 24.76 % (at its quota) at 5.6k generated / 2.0k admitted events/s; the receive from Tetragon dominates (section 8). Open, for the architect |
-| Control plane under load | E3 `P5-CONTROL-UNDER-LOAD`: no heartbeat gap above 20 s, applies complete in their health window, no watchdog timeout, at the heaviest flood the runner generates. Met |
+| CPU, whole relayd | Capped by the unit's `CPUQuota=25%`. Reported, not gated, in P4-RSS (section 9): relayd reaches its quota at ≥ 4k generated events/s, admitting 2.0k/s. The 15 % gate is retired (E1) |
+| Control plane under load | **Binding gate (E1.1):** E3 `P5-CONTROL-UNDER-LOAD`, with relayd shown to be at its quota during the flood: no heartbeat gap above 20 s, applies complete in their health window, an enforce bundle rolls back with heartbeats continuing, no watchdog timeout |
 | Event budget | `collector.max_event_rate` non_security events/s, default 2000, hard maximum 5000. Security events are not rate-limited. 5k/s of non_security events is above the default budget |
 | Apply latency, reconnect | unchanged |
-| Spool capacity (D2) | 2 GiB, configurable. Stated as hours per GiB at a rate and ratio: on disk an event takes 23 B (E3's repetitive load, 21.5×) to 243 B (varied corpus, 4.5×), so 2 GiB holds **0.49–5.0 h at 5k events/s** and **2.5–25 h at 1k events/s** (2 GiB / (243 B × 1000/s) = 2.45 h). D2's "at least 4 h at 1k/s even with the pessimistic ratio" does not hold at 243 B per event: 4 h at 1k/s needs ≤ 149 B per event (flagged in the step 7b report). With the default budget, sustained non_security traffic is at most 2k/s (1.2–12.6 h per 2 GiB), about 2.5× the 5k/s figures. Overflow drops non_security batches first. Operators size the spool per site from the observed rate (contract formula, step 7b item 8) |
+| Spool capacity (D2, E3) | 2 GiB default, configurable. Stated as hours per GiB at a rate and ratio: on disk an event takes 23 B (E3's repetitive load, 21.5×) to 243 B (varied corpus, 4.5×), so 2 GiB holds **0.49–5.0 h at 5k events/s** and **2.5–25 h at 1k events/s** (2 GiB / (243 B × 1000/s) = 2.45 h). With the default budget, sustained non_security traffic is at most 2k/s (1.2–12.6 h per 2 GiB). Overflow drops non_security batches first. The per-host disk budget is the customer's; operators size the spool from the observed rate (contract formula) |
 
 ## Consequences
 
 - The `bench` job blocks on a regression against D1's commit, measured on the same
   machine, not on an absolute number.
-- `P4-RSS`'s E3 gate fails until the architect decides section 8's options. The e3 job
-  is red on that one scenario. Every other scenario, P5 included, passes.
+- P4-RSS fails only on RSS ≥ 96 MiB, too few events, or a relayd restart. Its CPU line
+  is data for this ADR.
+- P5 carries D0's guarantee; it fails as "not evaluated" if relayd never reached its
+  quota during the flood (E1.1).
 - `BENCH_HISTORY` keeps the same-machine comparison reproducible.
