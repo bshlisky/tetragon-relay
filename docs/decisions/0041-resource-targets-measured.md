@@ -294,6 +294,21 @@ rate and `cpu_per_generated` on every run (`P4-RSS CPU (report only): ...`). E1.
 (chunked handoff, gRPC buffers) is measured by the CPU profile's shares and by the
 admitted rate at the quota, not by this ratio.
 
+**E1.1: P5 at saturation.** `cmd/e3execflood` generates about 10k events/s on the
+runner. relayd sits at its quota (23 %, `nr_throttled` > 1,200), and heartbeats keep a
+15 s cadence. **The enforce case fails** (runs 46121973985, 46126491257): Tetragon
+itself saturates, no kprobe event reaches relayd during the flood, and the health
+window passes an enforce bundle that should roll back. That is a finding for the
+architect (step 7b report S3.9 Q1), not a resource target. P5 stays red until it is
+decided.
+
+**E1.3: chunked handoff and gRPC buffers.** No meaningful E3 gain. In the one
+comparable pair, CPU per delivered message was 4,953 ns per-event against 4,812 ns
+chunked. A 1 MiB window measured 4,191 ns and a 256 KiB read buffer 4,951 ns, one round
+each, with relayd below its quota because Tetragon saturates first. In the local
+benchmark the handoff is about 25 % cheaper. Keep or drop: report S3.9 Q4. P4-RSS and
+P4-TUNING print `cpu_per_delivered`.
+
 **E2: RSS.** The target is < 96 MiB at the admission budget. P4-RSS fails at ≥ 96 MiB,
 warns at ≥ 64 MiB, and prints its peak on every run (`P4-RSS peak VmRSS=...`).
 `MemoryMax=256M` stays the hard bound. `GOMEMLIMIT` is not set: it would trade memory for
