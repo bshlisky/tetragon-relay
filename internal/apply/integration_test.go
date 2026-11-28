@@ -378,8 +378,16 @@ func TestIntegration_RollbackOnAdminPathKill(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTracingPolicies: %v", err)
 	}
-	if len(statuses) != 0 {
-		t.Errorf("relay-managed policies still loaded after rollback: %v", statuses)
+	// The freshness sentinel (ADR 0042) stays loaded by design; it is
+	// relay-managed but not part of LKG.
+	var left []string
+	for _, st := range statuses {
+		if !isSentinelPolicy(st.Name, st.Domain, RelayDomain) {
+			left = append(left, st.Name)
+		}
+	}
+	if len(left) != 0 {
+		t.Errorf("relay-managed policies still loaded after rollback: %v", left)
 	}
 }
 
