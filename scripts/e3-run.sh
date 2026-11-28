@@ -945,8 +945,12 @@ scenario_ts1() {
 	# GetEvents client with no field filter, is the positive control: it
 	# must see SECRET_TOKEN in the canary's exec event, so the absence
 	# checks below are not vacuous.
-	local secret_token probe_pid
+	# The token never appears in any argv (the harness's own greps would
+	# otherwise be exec events carrying it: run 46121973985): it lives in
+	# a 0600 pattern file, and every search uses grep -f.
+	local secret_token probe_pid tokfile=/tmp/e3-ts1-token
 	secret_token=e3st-$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
+	(umask 077; printf '%s\n' "${secret_token}" >"${tokfile}")
 	"${BIN_DIR}/e3tetra" --mode=env-probe --tetragon-binary "${TETRAGON_BIN}" --binary /usr/bin/cat --env-name SECRET_TOKEN --duration 12s >/tmp/e3-ts1-envprobe.log 2>&1 &
 	probe_pid=$!
 	sleep 2
@@ -958,7 +962,7 @@ scenario_ts1() {
 	# this alone proves little; the collector's decoded output below covers
 	# every spooled batch, since the chain is verified contiguous and the
 	# spool empties).
-	if sudo grep -rqF "${secret_token}" "${SPOOL_DIR}"; then
+	if sudo grep -rqFf "${tokfile}" "${SPOOL_DIR}"; then
 		echo "V2: SECRET_TOKEN found in the spool" >&2
 		ok=false
 	fi
@@ -978,7 +982,7 @@ scenario_ts1() {
 	fi
 	# V2: the fresh token, in the decoded events, the collector's raw
 	# store and relayd's journal.
-	if grep -qF "${secret_token}" <<<"${rep}" || grep -qF "${secret_token}" "${TS_STORE}" || grep -qF "${secret_token}" <<<"$(scenario_journal)"; then
+	if grep -qFf "${tokfile}" <<<"${rep}" || grep -qFf "${tokfile}" "${TS_STORE}" || grep -qFf "${tokfile}" <<<"$(scenario_journal)"; then
 		echo "V2: SECRET_TOKEN reached the collector or relayd's log" >&2
 		ok=false
 	else
@@ -1235,10 +1239,13 @@ scenario_ts6() {
 # cpu_per_generated only tracks the generator. Not a pass criterion.
 # (P4-GOMAXPROCS1 is retired: GOMAXPROCS=1 was not a lever, ADR 0041
 # section 8.)
-P4_TUNING=${P4_TUNING:-"per-event=RELAYD_E3_HANDOFF_CHUNK=1 chunked=RELAYD_E3_HANDOFF_CHUNK=64 chunked+rb256k=RELAYD_E3_TETRA_READ_BUFFER=262144 chunked+win1m=RELAYD_E3_TETRA_WINDOW=1048576"}
+# Rounds alternate, and P4-TUNING runs before the other floods: in run
+# 46121973985, run after P4-RSS, Tetragon itself became the bottleneck
+# from the second round on (relayd ~1 % CPU), which confounded the A/B.
+P4_TUNING=${P4_TUNING:-"per-event=RELAYD_E3_HANDOFF_CHUNK=1 chunked=RELAYD_E3_HANDOFF_CHUNK=64 per-event=RELAYD_E3_HANDOFF_CHUNK=1 chunked=RELAYD_E3_HANDOFF_CHUNK=64 chunked+win1m=RELAYD_E3_TETRA_WINDOW=1048576 chunked+rb256k=RELAYD_E3_TETRA_READ_BUFFER=262144"}
 scenario_p4_tuning() {
 	log "P4-TUNING: P4-RSS's load per setting (report only): ${P4_TUNING}"
-	local setting label envs store counts=/tmp/e3-p4t-counts u0 u1 th0 th1 t0 t1 gen n rl rep
+	local setting label envs store counts=/tmp/e3-p4t-counts u0 u1 th0 th1 tu0 tu1 t0 t1 gen n rl rep
 	for setting in ${P4_TUNING}; do
 		label=${setting%%=*}
 		envs=${setting#*=}
@@ -1252,13 +1259,16 @@ scenario_p4_tuning() {
 		sleep 5
 		scenario_journal | grep -o 'handoff_chunk=[^"]*' | head -1
 		read -r u0 th0 < <(unit_cpu_stat)
+		read -r tu0 _ < <(unit_cpu_stat tetragon.service)
 		t0=$(date +%s.%N)
 		flood_pids=()
 		flood_shell 60 "${P4_LOOPS}" "${counts}"
 		wait "${flood_pids[@]}"
 		t1=$(date +%s.%N)
 		read -r u1 th1 < <(unit_cpu_stat)
+		read -r tu1 _ < <(unit_cpu_stat tetragon.service)
 		gen=$(flood_events "${counts}")
+		awk -v l="${label}" -v a="${tu0}" -v b="${tu1}" -v t0="${t0}" -v t1="${t1}" 'BEGIN { printf "P4-TUNING %s tetragon.service CPU: %.1f%% of one core\n", l, 100 * (b - a) / 1e6 / (t1 - t0) }'
 		wait_spool_empty 120 || true
 		rep=$(collector_report "${store}" --decode)
 		n=$(grep -o '"kind":"events","class":"[a-z_]*","count":[0-9]*' <<<"${rep}" | awk -F: '{s += $NF} END {print s + 0}')
@@ -1367,6 +1377,7 @@ scenario_p5() {
 	pid=$(systemctl show "${UNIT}" -p MainPID --value)
 	read -r u0 th0 < <(unit_cpu_stat)
 	read -r tu0 _ < <(unit_cpu_stat tetragon.service)
+	echo "P5 tetragon before: VmRSS=$(tetragon_rss) KiB $(tetragon_metrics | grep -E 'notify_overflowed|ringbuf_events_lost|ringbuf_queue_events_lost' | tr '\n' ' ')"
 	t0=$(date +%s.%N)
 	flood_pids=()
 	flood "${P5_MAX_SECS}" "${P5_WORKERS}" "${counts}"
@@ -1393,6 +1404,7 @@ scenario_p5() {
 	t1=$(date +%s.%N)
 	awk -v a="${tu0}" -v b="${tu1}" -v t0="${t0}" -v t1="${t1}" 'BEGIN { printf "P5 tetragon.service CPU: %.2fs (%.1f%% of one core)\n", (b - a) / 1e6, 100 * (b - a) / 1e6 / (t1 - t0) }'
 	echo "P5 load average: $(cat /proc/loadavg); nproc=$(nproc)"
+	echo "P5 tetragon after: VmRSS=$(tetragon_rss) KiB $(tetragon_metrics | grep -E 'notify_overflowed|ringbuf_events_lost|ringbuf_queue_events_lost' | tr '\n' ' ')"
 	kill -TERM "${flood_pids[@]}" 2>/dev/null || true
 	wait "${flood_pids[@]}" || true
 	cat "${counts}"
@@ -1590,8 +1602,8 @@ main() {
 			scenario_ts5
 			# Last of the telemetry scenarios: after its flood, Tetragon
 			# delivered no events to T-S4/T-S5 (run 46051067160).
+			scenario_p4_tuning # report only (E1.3), first of the floods
 			scenario_p4_rss
-			scenario_p4_tuning # report only (E1.3)
 			scenario_ts6 # observation (V3)
 			scenario_p5  # after P4-RSS: its own bundle at epoch 7
 			scenario_s13 # needs S10's root-v2.json and S12's bundle; restores the index
