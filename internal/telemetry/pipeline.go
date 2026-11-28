@@ -61,8 +61,8 @@ const (
 // is declared in the chain regardless).
 const rateLimitAuditEvery = time.Minute
 
-// eventQueueDepth bounds the ingest -> builder channel. When it is full,
-// ingest blocks inside GetEvents' deliver, so Tetragon is read no faster
+// eventQueueDepth bounds the ingest -> builder queue (handoff.go). When it
+// is full, ingest blocks inside GetEvents' deliver, so Tetragon is read no faster
 // than the pipeline spools.
 const eventQueueDepth = 1024
 
@@ -124,13 +124,17 @@ type Config struct {
 	// collector stream. Zero values mean 20 s and 10 s; both must stay
 	// well under the 60 s liveness bound.
 	SendTimeout, DialTimeout time.Duration
+	// HandoffChunk is how many admitted events ingest hands the builder
+	// per wake-up at most (handoff.go). Zero means defaultHandoffChunk;
+	// 1 is one wake-up per event (the E3 A/B baseline).
+	HandoffChunk int
 }
 
 // Pipeline runs the telemetry goroutines.
 type Pipeline struct {
-	cfg    Config
-	events chan []byte
-	drops  rateDrops
+	cfg   Config
+	h     *handoff
+	drops rateDrops
 	// admitRate is cfg.MaxEventRate; the benchmark sets it to +Inf.
 	admitRate float64
 	rw        *wireRewriter
@@ -175,7 +179,11 @@ func New(cfg Config) (*Pipeline, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Pipeline{cfg: cfg, events: make(chan []byte, eventQueueDepth), admitRate: float64(cfg.MaxEventRate), rw: rw}, nil
+	if cfg.HandoffChunk <= 0 {
+		cfg.HandoffChunk = defaultHandoffChunk
+	}
+	h := newHandoff(min(cfg.HandoffChunk, eventQueueDepth), eventQueueDepth, handoffDrainDelay)
+	return &Pipeline{cfg: cfg, h: h, admitRate: float64(cfg.MaxEventRate), rw: rw}, nil
 }
 
 // HeartbeatStats is the heartbeat's view (Heartbeat.telemetry_last_seq and
@@ -260,12 +268,7 @@ func (p *Pipeline) ingest(ctx context.Context) {
 						return true
 					}
 				}
-				select {
-				case p.events <- raw:
-					return true
-				case <-ctx.Done():
-					return false
-				}
+				return p.h.put(ctx, raw)
 			})
 		}()
 		tick := time.NewTicker(touchEvery)
@@ -340,6 +343,58 @@ func (p *Pipeline) build(ctx context.Context) {
 			p.cfg.Auditor.Record("telemetry_rate_limited", fmt.Sprintf("%d non_security events over collector.max_event_rate (%d/s) dropped before decode; declared in the chain", n, p.cfg.MaxEventRate), nil)
 		}
 	}
+	handle := func(raw []byte) {
+		// One pass over Tetragon's bytes: validated, redacted and
+		// re-encoded (step 7b D1, wire.go).
+		var meta wireMeta
+		var err error
+		scratch, meta, err = p.rw.rewrite(scratch[:0], raw)
+		if err != nil {
+			p.malformed.Add(1)
+			return
+		}
+		if meta.event == fieldRateLimitInfo {
+			var rl tetragonpb.RateLimitInfo
+			if proto.Unmarshal(meta.rateLimitRaw, &rl) == nil {
+				p.tetragonDropped.Add(rl.GetNumberOfDroppedProcessEvents())
+				p.cfg.Auditor.Record("telemetry_tetragon_rate_limited", fmt.Sprintf("Tetragon reports %d process events dropped by its rate limit", rl.GetNumberOfDroppedProcessEvents()), nil)
+			}
+			return
+		}
+		class, ok := classOfField(meta.event)
+		if !ok {
+			p.unclassified.Add(1)
+			return
+		}
+		if meta.unknown > 0 {
+			p.unknownFields.Add(1)
+		}
+		if len(scratch) == 0 || len(scratch) > limits.MaxTelemetryEventBytes {
+			p.oversized.Add(1)
+			return
+		}
+		ts := p.cfg.Clock().UnixNano()
+		if meta.hasTime {
+			ts = time.Unix(meta.timeSec, int64(meta.timeNanos)).UnixNano()
+		}
+		b := &cur[1]
+		if class == batch.ClassSecurity {
+			b = &cur[0]
+		}
+		if b.count > 0 && len(b.payload)+len(scratch)+batch.RecordOverhead > limits.MaxTelemetryPayloadBytes {
+			flush(b)
+		}
+		if b.count == 0 {
+			b.first, b.last, b.started = ts, ts, p.cfg.Clock()
+		}
+		b.first, b.last = min(b.first, ts), max(b.last, ts)
+		b.payload = batch.AppendRecord(b.payload, scratch)
+		b.count++
+		if b.count >= uint64(p.cfg.BatchMaxEvents) {
+			flush(b)
+		}
+	}
+	var spare [][]byte
 	for {
 		select {
 		case <-ctx.Done():
@@ -347,56 +402,13 @@ func (p *Pipeline) build(ctx context.Context) {
 			flush(&cur[1])
 			declare(p.cfg.Clock())
 			return
-		case raw := <-p.events:
-			// One pass over Tetragon's bytes: validated, redacted and
-			// re-encoded (step 7b D1, wire.go).
-			var meta wireMeta
-			var err error
-			scratch, meta, err = p.rw.rewrite(scratch[:0], raw)
-			if err != nil {
-				p.malformed.Add(1)
-				continue
+		case <-p.h.ready():
+			evs := p.h.take(ctx, spare)
+			for _, raw := range evs {
+				handle(raw)
 			}
-			if meta.event == fieldRateLimitInfo {
-				var rl tetragonpb.RateLimitInfo
-				if proto.Unmarshal(meta.rateLimitRaw, &rl) == nil {
-					p.tetragonDropped.Add(rl.GetNumberOfDroppedProcessEvents())
-					p.cfg.Auditor.Record("telemetry_tetragon_rate_limited", fmt.Sprintf("Tetragon reports %d process events dropped by its rate limit", rl.GetNumberOfDroppedProcessEvents()), nil)
-				}
-				continue
-			}
-			class, ok := classOfField(meta.event)
-			if !ok {
-				p.unclassified.Add(1)
-				continue
-			}
-			if meta.unknown > 0 {
-				p.unknownFields.Add(1)
-			}
-			if len(scratch) == 0 || len(scratch) > limits.MaxTelemetryEventBytes {
-				p.oversized.Add(1)
-				continue
-			}
-			ts := p.cfg.Clock().UnixNano()
-			if meta.hasTime {
-				ts = time.Unix(meta.timeSec, int64(meta.timeNanos)).UnixNano()
-			}
-			b := &cur[1]
-			if class == batch.ClassSecurity {
-				b = &cur[0]
-			}
-			if b.count > 0 && len(b.payload)+len(scratch)+batch.RecordOverhead > limits.MaxTelemetryPayloadBytes {
-				flush(b)
-			}
-			if b.count == 0 {
-				b.first, b.last, b.started = ts, ts, p.cfg.Clock()
-			}
-			b.first, b.last = min(b.first, ts), max(b.last, ts)
-			b.payload = batch.AppendRecord(b.payload, scratch)
-			b.count++
-			if b.count >= uint64(p.cfg.BatchMaxEvents) {
-				flush(b)
-			}
+			clear(evs) // the builder does not keep Tetragon's bytes
+			spare = evs
 		case <-tick.C:
 			p.cfg.Liveness.Touch(LivenessBuilder)
 			now := p.cfg.Clock()

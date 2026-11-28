@@ -50,11 +50,7 @@ func Dial(_ context.Context, cfg Config) (*Client, error) {
 		return conn, nil
 	}
 
-	conn, err := grpc.NewClient("passthrough:///"+cfg.SocketPath,
-		grpc.WithContextDialer(dialer),
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(limits.MaxGetEventsResponseBytes)),
-	)
+	conn, err := grpc.NewClient("passthrough:///"+cfg.SocketPath, cfg.dialOptions(dialer)...)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
@@ -343,4 +339,22 @@ func verifyPeerCredAndTetragon(cfg Config, uc *net.UnixConn) error {
 		return fmt.Errorf("%w: cgroup v2 is unavailable on this host and the SO_PEERSEC check did not actively pass; cannot verify socket peer %d", ErrSocketVerification, pid)
 	}
 	return nil
+}
+
+// dialOptions are Dial's grpc options: the verifying dialer, no transport
+// security (a local unix socket whose peer Dial verifies), the response
+// size limit, and the optional buffer sizes.
+func (c Config) dialOptions(dialer func(context.Context, string) (net.Conn, error)) []grpc.DialOption {
+	opts := []grpc.DialOption{
+		grpc.WithContextDialer(dialer),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(limits.MaxGetEventsResponseBytes)),
+	}
+	if c.ReadBufferSize > 0 {
+		opts = append(opts, grpc.WithReadBufferSize(c.ReadBufferSize))
+	}
+	if c.InitialWindowSize > 0 {
+		opts = append(opts, grpc.WithInitialWindowSize(c.InitialWindowSize), grpc.WithInitialConnWindowSize(c.InitialWindowSize))
+	}
+	return opts
 }

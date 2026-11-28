@@ -1088,6 +1088,11 @@ scenario_p4_rss() {
 	# binding gate for D0 is P5 at saturation. The 15 % gate is retired.
 	read -r gen_rate cpu_pct cpg < <(awk -v c0="${c0}" -v c1="${c1}" -v clk="${clk}" -v t0="${t0}" -v t1="${t1}" -v g="${gen}" 'BEGIN { w = t1 - t0; c = (c1 - c0) / clk; printf "%.0f %.2f %.0f\n", g / w, 100 * c / w, (g > 0 ? 1e9 * c / g : 0) }')
 	echo "P4-RSS CPU (report only): ${cpu_pct}% of one core at ${gen_rate} generated events/s, cpu_per_generated=${cpg}ns"
+	# The cost of one message Tetragon delivered (admitted + rate_limited):
+	# the number E1.3 is measured by (P4-TUNING).
+	local rl
+	rl=$(grep -o '"reason":"rate_limited","events":[0-9]*' <<<"${rep}" | awk -F: '{s += $NF} END {print s + 0}')
+	awk -v c0="${c0}" -v c1="${c1}" -v clk="${clk}" -v n="${n1}" -v rl="${rl}" 'BEGIN { d = n + rl; printf "P4-RSS delivered=%d (admitted %d, rate_limited %d) cpu_per_delivered=%.0fns\n", d, n, rl, (d > 0 ? 1e9 * (c1 - c0) / clk / d : 0) }'
 	[ "${gen_rate}" -ge 5000 ] || echo "P4-RSS note: the runner generated ${gen_rate} events/s (< 5000)"
 	# The relayd CPU profile (D1), for the artifact and a summary here.
 	mkdir -p "${E3_OUT}"
@@ -1132,42 +1137,53 @@ scenario_p4_rss() {
 	record_result P4-RSS "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
 }
 
-# P4-GOMAXPROCS1 (report only, step 7b D1 data for ADR 0041): the E3
-# relayd profile puts most of relayd's CPU in the gRPC reader's syscalls
-# and the Go scheduler, before admission. Same load as P4-RSS, with
-# GOMAXPROCS=1 set by a test drop-in (an environment variable, no
-# privilege), to measure the scheduler's share. Not a pass criterion.
-scenario_p4_gomaxprocs1() {
-	log "P4-GOMAXPROCS1: P4-RSS's load with GOMAXPROCS=1 (report only)"
-	local store=${COLLECTOR_DIR}/p4g.jsonl counts=/tmp/e3-p4g-counts pid clk t0 t1 c0 c1 gen n
-	write_dropins "e3.conf=$(e3_dropin)" "gmp.conf=$(printf '[Service]\nEnvironment=GOMAXPROCS=1')"
-	rm -f "${store}"
-	sudo find "${SPOOL_DIR}" -mindepth 1 -delete
-	start_collector p4g "${store}"
-	SCENARIO_SINCE=$(date '+%Y-%m-%d %H:%M:%S')
-	start_unit || true
-	sleep 5
-	pid=$(systemctl show "${UNIT}" -p MainPID --value)
-	clk=$(getconf CLK_TCK)
-	c0=$(awk '{print $14 + $15}' "/proc/${pid}/stat" 2>/dev/null || echo 0)
-	t0=$(date +%s.%N)
-	flood_pids=()
-	flood_shell 60 "${P4_LOOPS}" "${counts}"
-	wait "${flood_pids[@]}"
-	t1=$(date +%s.%N)
-	c1=$(awk '{print $14 + $15}' "/proc/${pid}/stat" 2>/dev/null || echo 0)
-	gen=$(flood_events "${counts}")
-	wait_spool_empty 120 || true
-	n=$(collector_report "${store}" | grep -o '"kind":"events","class":"[a-z_]*","count":[0-9]*' | awk -F: '{s += $NF} END {print s + 0}')
-	scenario_journal | grep -o 'GOMAXPROCS [0-9]*' | head -1
-	awk -v c0="${c0}" -v c1="${c1}" -v clk="${clk}" -v t0="${t0}" -v t1="${t1}" -v n="${n}" -v g="${gen}" 'BEGIN {
-		cpu = (c1 - c0) / clk; wall = t1 - t0
-		printf "P4-GOMAXPROCS1 generated=%d (%.0f/s) received=%d (%.0f/s) relayd_cpu=%.2fs (%.2f%% of one core) cpu_per_generated=%.0fns\n", g, g / wall, n, n / wall, cpu, 100 * cpu / wall, (g > 0 ? 1e9 * cpu / g : 0)
-	}'
-	stop_unit
-	stop_collector
+# P4-TUNING (report only; step-07b-decisions-2.md E1.3, ADR 0041): P4-RSS's
+# load, once per setting, back to back on the same runner. Each setting is
+# testca-only environment (cmd/relayd/e3tuning_testca.go) in a test
+# drop-in: no privilege. Per setting it prints relayd's CPU (its unit
+# cgroup), the messages Tetragon delivered (admitted + rate_limited) and
+# cpu_per_delivered, the cost of one message from Tetragon: at the quota
+# that is the number that falls when relayd gets cheaper, where
+# cpu_per_generated only tracks the generator. Not a pass criterion.
+# (P4-GOMAXPROCS1 is retired: GOMAXPROCS=1 was not a lever, ADR 0041
+# section 8.)
+P4_TUNING=${P4_TUNING:-"per-event=RELAYD_E3_HANDOFF_CHUNK=1 chunked=RELAYD_E3_HANDOFF_CHUNK=64 chunked+rb256k=RELAYD_E3_TETRA_READ_BUFFER=262144 chunked+win1m=RELAYD_E3_TETRA_WINDOW=1048576"}
+scenario_p4_tuning() {
+	log "P4-TUNING: P4-RSS's load per setting (report only): ${P4_TUNING}"
+	local setting label envs store counts=/tmp/e3-p4t-counts u0 u1 th0 th1 t0 t1 gen n rl rep
+	for setting in ${P4_TUNING}; do
+		label=${setting%%=*}
+		envs=${setting#*=}
+		store=${COLLECTOR_DIR}/p4t-${label}.jsonl
+		write_dropins "e3.conf=$(e3_dropin)" "tuning.conf=$(printf '[Service]\nEnvironment=%s' "${envs//,/ }")"
+		rm -f "${store}"
+		sudo find "${SPOOL_DIR}" -mindepth 1 -delete
+		start_collector p4t "${store}"
+		SCENARIO_SINCE=$(date '+%Y-%m-%d %H:%M:%S')
+		start_unit || true
+		sleep 5
+		scenario_journal | grep -o 'handoff_chunk=[^"]*' | head -1
+		read -r u0 th0 < <(unit_cpu_stat)
+		t0=$(date +%s.%N)
+		flood_pids=()
+		flood_shell 60 "${P4_LOOPS}" "${counts}"
+		wait "${flood_pids[@]}"
+		t1=$(date +%s.%N)
+		read -r u1 th1 < <(unit_cpu_stat)
+		gen=$(flood_events "${counts}")
+		wait_spool_empty 120 || true
+		rep=$(collector_report "${store}" --decode)
+		n=$(grep -o '"kind":"events","class":"[a-z_]*","count":[0-9]*' <<<"${rep}" | awk -F: '{s += $NF} END {print s + 0}')
+		rl=$(grep -o '"reason":"rate_limited","events":[0-9]*' <<<"${rep}" | awk -F: '{s += $NF} END {print s + 0}')
+		awk -v l="${label}" -v u0="${u0}" -v u1="${u1}" -v th="$((th1 - th0))" -v t0="${t0}" -v t1="${t1}" -v n="${n}" -v rl="${rl}" -v g="${gen}" 'BEGIN {
+			wall = t1 - t0; cpu = (u1 - u0) / 1e6; d = n + rl
+			printf "P4-TUNING %s generated=%d (%.0f/s) delivered=%d (%.0f/s) admitted=%d rate_limited=%d relayd_cpu=%.2fs (%.2f%% of one core) nr_throttled=+%d cpu_per_delivered=%.0fns\n", l, g, g / wall, d, d / wall, n, rl, cpu, 100 * cpu / wall, th, (d > 0 ? 1e9 * cpu / d : 0)
+		}'
+		stop_unit
+		stop_collector
+	done
 	write_dropins "e3.conf=$(e3_dropin)"
-	record_result P4-GOMAXPROCS1 INFO
+	record_result P4-TUNING INFO
 }
 
 # flood_shell SECONDS LOOPS OUTFILE: LOOPS shell loops exec /usr/bin/true
@@ -1487,7 +1503,7 @@ main() {
 			# Last of the telemetry scenarios: after its flood, Tetragon
 			# delivered no events to T-S4/T-S5 (run 46051067160).
 			scenario_p4_rss
-			scenario_p4_gomaxprocs1 # report only
+			scenario_p4_tuning # report only (E1.3)
 			scenario_p5  # after P4-RSS: its own bundle at epoch 7
 			scenario_s13 # needs S10's root-v2.json and S12's bundle; restores the index
 			scenario_s4  # last: revocation is terminal for this store (ADR 0035)

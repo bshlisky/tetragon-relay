@@ -113,6 +113,14 @@ type Config struct {
 	// Logger receives the "SELinux disabled, continuing" notice Part B2
 	// requires to be logged once. Defaults to slog.Default() if nil.
 	Logger *slog.Logger
+	// ReadBufferSize and InitialWindowSize, when positive, are the gRPC
+	// connection's grpc.WithReadBufferSize and grpc.WithInitialWindowSize
+	// (also the connection window). Zero keeps grpc's defaults (32 KiB
+	// read buffer; a 64 KiB window grown by BDP estimation, which a fixed
+	// window turns off). step-07b-decisions-2.md E1.3: measured in E3
+	// before any production value is chosen.
+	ReadBufferSize    int
+	InitialWindowSize int32
 }
 
 func (c Config) logger() *slog.Logger {
