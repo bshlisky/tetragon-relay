@@ -3,6 +3,9 @@ package apply
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/bshlisky/tetragon-relay/internal/limits"
@@ -22,6 +25,18 @@ type HealthWindowConfig struct {
 	// PollInterval is how often GetHealth/process-start-time are
 	// re-checked during the window.
 	PollInterval time.Duration
+	// MaxWindow bounds how far the window may extend while its
+	// observation path is unverifiable (default
+	// limits.MaxApplyHealthWindow; never less than Window).
+	MaxWindow time.Duration
+	// SentinelInterval, SentinelMaxLatency and SettleMargin default to
+	// the limits package's values (ADR 0042); tests shorten them.
+	SentinelInterval   time.Duration
+	SentinelMaxLatency time.Duration
+	SettleMargin       time.Duration
+	// CPUStat, if set, returns relayd's own cgroup usage_usec and
+	// nr_throttled; the window records the delta (F0.2).
+	CPUStat func() (usageUsec, nrThrottled uint64, err error)
 }
 
 // window returns the configured window, or limits.DefaultApplyHealthWindow
@@ -64,6 +79,36 @@ func (c HealthWindowConfig) surgeThreshold() int {
 	return c.SurgeThreshold
 }
 
+func (c HealthWindowConfig) maxWindow() time.Duration {
+	m := c.MaxWindow
+	if m <= 0 {
+		m = limits.MaxApplyHealthWindow
+	}
+	if w := c.window(); m < w {
+		m = w
+	}
+	return m
+}
+
+func (c HealthWindowConfig) sentinelInterval() time.Duration {
+	return orDefault(c.SentinelInterval, limits.SentinelInterval)
+}
+
+func (c HealthWindowConfig) sentinelMaxLatency() time.Duration {
+	return orDefault(c.SentinelMaxLatency, limits.SentinelMaxLatency)
+}
+
+func (c HealthWindowConfig) settleMargin() time.Duration {
+	return orDefault(c.SettleMargin, limits.SentinelSettleMargin)
+}
+
+func orDefault(d, def time.Duration) time.Duration {
+	if d <= 0 {
+		return def
+	}
+	return d
+}
+
 func (c HealthWindowConfig) pollInterval() time.Duration {
 	if c.PollInterval <= 0 {
 		return 2 * time.Second
@@ -81,73 +126,156 @@ const (
 	reasonControlPlaneDown  healthFailureReason = "control_plane_unreachable_entire_window"
 	reasonAdminPathEnforced healthFailureReason = "admin_path_enforcement_event"
 	reasonEnforcementSurge  healthFailureReason = "enforcement_event_surge"
-	// reasonEventStreamClosed means GetEvents' events channel closed
-	// (cleanly, with no error) before windowCtx's own deadline — i.e.
-	// Tetragon ended the event stream early, not as a side effect of the
-	// window itself ending (step-03a-review.md R3-4).
+	// reasonEventStreamClosed means GetEvents' stream ended (closed, or
+	// an error) before the window reached a verdict. The window never
+	// sets a deadline on its own stream (it cancels it after deciding),
+	// so any end before that is Tetragon's doing and a failure
+	// (step-03a-review.md R3-4; ADR 0042 removed the deadline races).
 	reasonEventStreamClosed healthFailureReason = "event_stream_closed_early"
+	// reasonUnverifiable means the observation path was never proven
+	// current for a full nominal window before MaxWindow (ADR 0042):
+	// freshness sentinels were late or missing. ROLLED_BACK_UNVERIFIABLE.
+	reasonUnverifiable healthFailureReason = "health_unverifiable"
+	// reasonCanceled means the caller's context ended mid-window (relayd
+	// shutting down): never a pass.
+	reasonCanceled healthFailureReason = "health_window_canceled"
 )
 
-// runHealthWindow implements step 3 prompt Part D5. policyNames bounds the
-// GetEvents subscription to the policies this apply just loaded (Part D5
-// only cares about enforcement events from this bundle, not the whole
-// fleet's pre-existing policies). It returns ("", true) if the window
-// passed, or (reason, false) on the first failure condition observed
-// (health window returns as soon as a failure is detected, it does not
-// wait out the rest of the window once failed).
-// pendingErrIsTimeout does a non-blocking check of errc for an
-// already-available value and reports whether it is (or wraps)
-// tetra.ErrTimeout. It exists for the events-closed branch of
-// runHealthWindow's select: internal/tetra.GetEvents closes both events
-// and errc together, so select can land on events' closed case before
-// ever reading an already-buffered tetra.ErrTimeout value out of errc,
-// even though windowCtx.Err() has not been observed non-nil yet (the same
-// race documented on the errc branch itself). A nil or not-yet-ready errc
-// (ok == false, including "nothing sent") is not a timeout.
-func pendingErrIsTimeout(errc <-chan error) bool {
-	select {
-	case err, ok := <-errc:
-		return ok && errors.Is(err, tetra.ErrTimeout)
-	default:
-		return false
+// maxRecordedLatencies bounds windowStats.Latencies (MaxWindow /
+// SentinelInterval is 300 with the defaults).
+const maxRecordedLatencies = 512
+
+// windowStats is what the window measured (F0.1, F0.2): every sentinel's
+// latency, how often the clean span restarted, the stream's receive rate,
+// and relayd's own CPU throttling during the window.
+type windowStats struct {
+	Nominal    time.Duration
+	Elapsed    time.Duration
+	Fired      int
+	FireErrors int
+	Arrived    int
+	Late       int // exceeded SentinelMaxLatency (arrived late or never)
+	Restarts   int // clean-span restarts (extensions)
+	MaxLatency time.Duration
+	Latencies  []time.Duration // arrival order, bounded
+	Received   int             // events on the window stream, sentinels included
+	CPUOK      bool
+	CPUUsec    uint64
+	Throttled  uint64
+}
+
+// Summary is one bounded line for the audit log, ApplyResult.detail and
+// the HEALTH_UNVERIFIABLE alert.
+func (s windowStats) Summary() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "nominal=%s elapsed=%s sentinels fired=%d arrived=%d late=%d fire_errors=%d restarts=%d max_latency_ms=%d",
+		s.Nominal, s.Elapsed.Round(time.Millisecond), s.Fired, s.Arrived, s.Late, s.FireErrors, s.Restarts, s.MaxLatency.Milliseconds())
+	if len(s.Latencies) > 0 {
+		sorted := append([]time.Duration(nil), s.Latencies...)
+		sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+		p := func(q float64) int64 { return sorted[int(q*float64(len(sorted)-1))].Milliseconds() }
+		fmt.Fprintf(&b, " p50_ms=%d p90_ms=%d", p(0.5), p(0.9))
+		// The last (most recent) latencies, so a reader sees the trend.
+		tail := s.Latencies
+		if len(tail) > 24 {
+			tail = tail[len(tail)-24:]
+		}
+		b.WriteString(" last_ms=[")
+		for i, l := range tail {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			fmt.Fprintf(&b, "%d", l.Milliseconds())
+		}
+		b.WriteByte(']')
 	}
+	secs := s.Elapsed.Seconds()
+	if secs <= 0 {
+		secs = 1
+	}
+	fmt.Fprintf(&b, " received=%d rate=%.0f/s", s.Received, float64(s.Received)/secs)
+	if s.CPUOK {
+		fmt.Fprintf(&b, " relayd_cpu=%.1f%% nr_throttled=+%d", 100*float64(s.CPUUsec)/1e6/secs, s.Throttled)
+	}
+	return b.String()
 }
 
-// withinHealthWindowDeadlineTolerance implements step-03a-review.md R3B-2:
-// a stream timeout is only ever the window's own GetEvents(windowCtx, ...)
-// deadline (as opposed to some earlier, independent timeout a Tetragon or
-// anything else at the other end of the socket chose to return) if the
-// window has at most limits.HealthWindowDeadlineTolerance left to run.
-func withinHealthWindowDeadlineTolerance(windowDeadline time.Time) bool {
-	return time.Until(windowDeadline) <= limits.HealthWindowDeadlineTolerance
+// windowOutcome is runHealthWindow's verdict.
+type windowOutcome struct {
+	passed bool
+	reason healthFailureReason // set when !passed
+	stats  windowStats
 }
 
+// sentinelShot is one fired sentinel.
+type sentinelShot struct {
+	fired   time.Time
+	arrived time.Time // zero until seen
+	late    bool      // exceeded max latency (arrived late, or still missing)
+}
+
+// runHealthWindow implements step 3 Part D5 with ADR 0042's fail-closed
+// rule (step-07b-decisions-3.md F0.1): the absence of failure events is
+// evidence only while the observation path is proven current.
+//
+//   - The stream subscribes to policyNames plus the sentinel's policy.
+//   - A sentinel fires at the start and every SentinelInterval; each must
+//     arrive within SentinelMaxLatency.
+//   - The window passes only once a sentinel fired at or after
+//     cleanStart+Window has arrived, every sentinel fired since
+//     cleanStart arrived in time, SettleMargin has passed since that
+//     arrival, GetHealth stayed serving and the control plane was
+//     reachable at least once.
+//   - A late or missing sentinel restarts the clean span at the next
+//     firing (the window extends), up to MaxWindow from the start; then
+//     the window is unverifiable.
+//   - Admin-path enforcement events, a surge, GetHealth not serving, or
+//     the stream ending fail the window at any point, extension included.
+//
+// With no sentinel the window can never pass: it ends unverifiable.
 func runHealthWindow(
 	ctx context.Context,
 	client TetragonClient,
 	reachability ReachabilityChecker,
+	sentinel Sentinel,
 	cfg HealthWindowConfig,
 	policyNames []string,
-) (healthFailureReason, bool) {
-	windowCtx, cancel := context.WithTimeout(ctx, cfg.window())
-	defer cancel()
-	// windowDeadline is fixed at construction (context.WithTimeout sets
-	// it once); reading it back here, rather than recomputing
-	// time.Now().Add(cfg.window()), guarantees withinHealthWindowDeadlineTolerance
-	// below measures against the exact same deadline windowCtx itself
-	// expires at.
-	windowDeadline, _ := windowCtx.Deadline()
+) windowOutcome {
+	nominal := cfg.window()
+	maxLatency := cfg.sentinelMaxLatency()
+	settle := cfg.settleMargin()
+	interval := cfg.sentinelInterval()
+	start := time.Now()
+	st := windowStats{Nominal: nominal}
 
-	events, errc := client.GetEvents(windowCtx, policyNames)
+	var cpu0, thr0 uint64
+	cpuOK := false
+	if cfg.CPUStat != nil {
+		if u, t, err := cfg.CPUStat(); err == nil {
+			cpu0, thr0, cpuOK = u, t, true
+		}
+	}
+	finish := func(passed bool, reason healthFailureReason) windowOutcome {
+		st.Elapsed = time.Since(start)
+		if cpuOK {
+			if u, t, err := cfg.CPUStat(); err == nil && u >= cpu0 && t >= thr0 {
+				st.CPUOK, st.CPUUsec, st.Throttled = true, u-cpu0, t-thr0
+			}
+		}
+		return windowOutcome{passed: passed, reason: reason, stats: st}
+	}
+
+	if sentinel == nil {
+		return finish(false, reasonUnverifiable)
+	}
+
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+	names := append(append([]string(nil), policyNames...), sentinel.PolicyName())
+	events, errc := client.GetEvents(streamCtx, names)
 	eventTimes := newSlidingEventCounter(time.Minute)
 
-	// Each poll (GetHealth, reachability) below gets its own fixed-size
-	// timeout derived from ctx (the caller's context, for cancellation
-	// propagation) rather than windowCtx directly: windowCtx's deadline
-	// shrinks to zero as the window elapses, so a poll issued near the
-	// very end of an otherwise-healthy window could otherwise be starved
-	// of time to complete and be misread as "not serving" purely due to
-	// the window's own countdown, not any real Tetragon health problem.
+	// Each poll gets its own fixed-size timeout derived from ctx.
 	pollTimeout := cfg.pollInterval() * 5
 	if pollTimeout < time.Second {
 		pollTimeout = time.Second
@@ -155,151 +283,181 @@ func runHealthWindow(
 	pollCtx := func() (context.Context, context.CancelFunc) {
 		return context.WithTimeout(ctx, pollTimeout)
 	}
-
 	everReachable := false
-	if ok := func() bool {
+	pollOnce := func() bool {
 		c, cancel := pollCtx()
-		defer cancel()
 		_, ok := checkHealthServing(c, client)
-		return ok
-	}(); !ok {
-		return reasonHealthNotServing, false
+		cancel()
+		if !ok {
+			return false
+		}
+		c2, cancel2 := pollCtx()
+		if reachability.Reachable(c2) {
+			everReachable = true
+		}
+		cancel2()
+		return true
 	}
-	if func() bool {
-		c, cancel := pollCtx()
-		defer cancel()
-		return reachability.Reachable(c)
-	}() {
-		everReachable = true
+	if !pollOnce() {
+		return finish(false, reasonHealthNotServing)
 	}
 
-	ticker := time.NewTicker(cfg.pollInterval())
-	defer ticker.Stop()
+	shots := make(map[string]*sentinelShot)
+	var order []*sentinelShot
+	var cleanStart time.Time // zero: the clean span starts at the next firing
+	restart := func() {
+		if !cleanStart.IsZero() {
+			st.Restarts++
+		}
+		cleanStart = time.Time{}
+	}
+	fire := func() {
+		now := time.Now()
+		nonce, err := newNonce()
+		if err == nil {
+			// Recorded before firing: the event can only follow the open.
+			shots[nonce] = &sentinelShot{fired: now}
+			err = sentinel.Fire(nonce)
+			if err != nil {
+				delete(shots, nonce)
+			}
+		}
+		if err != nil {
+			st.FireErrors++
+			restart()
+			return
+		}
+		st.Fired++
+		order = append(order, shots[nonce])
+		if cleanStart.IsZero() {
+			cleanStart = now
+		}
+	}
+	markLate := func(s *sentinelShot) {
+		if s.late {
+			return
+		}
+		s.late = true
+		st.Late++
+		if !cleanStart.IsZero() && !s.fired.Before(cleanStart) {
+			restart()
+		}
+	}
+	// verdict reports whether the clean span is proven and settled.
+	verdict := func(now time.Time) bool {
+		if cleanStart.IsZero() {
+			return false
+		}
+		end := cleanStart.Add(nominal)
+		for _, s := range order {
+			if s.fired.Before(cleanStart) {
+				continue
+			}
+			if s.late || s.arrived.IsZero() {
+				return false // an outstanding sentinel inside the span
+			}
+			if !s.fired.Before(end) {
+				return !now.Before(s.arrived.Add(settle))
+			}
+		}
+		return false
+	}
+
+	fire()
+	deadline := time.NewTimer(cfg.maxWindow())
+	defer deadline.Stop()
+	fireTicker := time.NewTicker(interval)
+	defer fireTicker.Stop()
+	tick := min(interval, maxLatency, settle) / 4
+	if tick < time.Millisecond {
+		tick = time.Millisecond
+	}
+	checkTicker := time.NewTicker(tick)
+	defer checkTicker.Stop()
+	pollTicker := time.NewTicker(cfg.pollInterval())
+	defer pollTicker.Stop()
 
 	for {
 		select {
-		case <-windowCtx.Done():
-			// The window elapsed naturally: fail only if the control
-			// plane was unreachable at every single poll across the
-			// entire window (Part D5: "unreachable for the whole
-			// window"), not merely at some point within it.
-			if !everReachable {
-				return reasonControlPlaneDown, false
-			}
-			return "", true
+		case <-ctx.Done():
+			return finish(false, reasonCanceled)
+
+		case <-deadline.C:
+			return finish(false, reasonUnverifiable)
 
 		case ev, ok := <-events:
 			if !ok {
-				// Every path below returns: events closing always ends
-				// the window one way or another, so there is no
-				// "disable this case and keep looping" branch left to
-				// reach (unlike errc below, which tolerates a closed
-				// channel by itself).
-				if windowCtx.Err() != nil || pendingErrIsTimeout(errc) {
-					// step-03a-review.md R3-4: events closing races
-					// windowCtx.Done() at the window's own deadline
-					// (internal/tetra.GetEvents closes it, without
-					// sending, exactly when ctx ends) — handle it
-					// identically to that branch rather than looping
-					// back around only to pick Done() up next time.
-					// pendingErrIsTimeout additionally covers the same
-					// race as errc's own branch below: both channels
-					// close together, and select can land on this case
-					// before ever reading errc's already-buffered
-					// tetra.ErrTimeout value, even though
-					// windowCtx.Err() has not flipped non-nil yet.
-					//
-					// step-03b-review.md R3B-2: windowCtx.Err() != nil
-					// means the deadline has truly already passed
-					// locally (time.Until would be <= 0, always within
-					// tolerance), but pendingErrIsTimeout(errc) alone
-					// does not — only accept it as "the window ended"
-					// if the window had at most
-					// limits.HealthWindowDeadlineTolerance left to run;
-					// otherwise an independent early timeout from
-					// Tetragon must not be read as a healthy, completed
-					// window.
-					if !withinHealthWindowDeadlineTolerance(windowDeadline) {
-						return reasonHealthNotServing, false
-					}
-					if !everReachable {
-						return reasonControlPlaneDown, false
-					}
-					return "", true
+				if ctx.Err() != nil {
+					return finish(false, reasonCanceled)
 				}
-				// The window has not ended: Tetragon closed the event
-				// stream of its own accord, which is itself a health
-				// failure, not something to silently ignore.
-				return reasonEventStreamClosed, false
+				return finish(false, reasonEventStreamClosed)
+			}
+			now := time.Now()
+			st.Received++
+			if nonce, isSentinel := sentinel.Nonce(ev); isSentinel {
+				s, known := shots[nonce]
+				if !known || !s.arrived.IsZero() {
+					continue // not ours, or a duplicate
+				}
+				s.arrived = now
+				lat := now.Sub(s.fired)
+				st.Arrived++
+				if lat > st.MaxLatency {
+					st.MaxLatency = lat
+				}
+				if len(st.Latencies) < maxRecordedLatencies {
+					st.Latencies = append(st.Latencies, lat)
+				}
+				if lat > maxLatency {
+					markLate(s)
+				}
+				continue
 			}
 			if reason, failed := evaluateEvent(ev); failed {
-				return reason, false
+				return finish(false, reason)
 			}
-			eventTimes.add(time.Now())
-			if eventTimes.count(time.Now()) > cfg.surgeThreshold() {
-				return reasonEnforcementSurge, false
+			eventTimes.add(now)
+			if eventTimes.count(now) > cfg.surgeThreshold() {
+				return finish(false, reasonEnforcementSurge)
 			}
 
 		case err, ok := <-errc:
 			if !ok {
-				errc = nil // channel closed; disable this case (avoid a
-				// busy loop reading a closed channel's zero value
-				// forever) and keep watching the ticker/windowCtx.Done()
+				errc = nil
 				continue
 			}
 			if err != nil {
-				if windowCtx.Err() != nil || errors.Is(err, tetra.ErrTimeout) {
-					// step-03a-review.md R3-4: a timeout racing
-					// windowCtx.Done() at the exact deadline must not
-					// fail a window that actually completed healthily.
-					// windowCtx.Err() != nil is the common case;
-					// errors.Is(err, tetra.ErrTimeout) additionally
-					// covers a real timing gap observed under load
-					// (-count=200 -race stress): internal/tetra.GetEvents
-					// never applies a shorter timeout of its own to this
-					// call (unlike every other RPC method, it uses
-					// windowCtx directly, Part B3), so a DeadlineExceeded
-					// gRPC status for it can only ever mean windowCtx's
-					// own deadline — including when it arrives from the
-					// server's grpc-timeout-propagated deadline slightly
-					// before this goroutine's local windowCtx.Err() has
-					// been set (a scheduling race, not a real Tetragon
-					// problem). internal/tetra.GetEvents no longer sends
-					// this once ctx.Err() is locally observed non-nil
-					// either, but this closes the remaining gap.
-					//
-					// step-03b-review.md R3B-2: that reasoning only
-					// holds this close to the window's own deadline.
-					// errors.Is(err, tetra.ErrTimeout) alone, far from
-					// windowDeadline, means something else returned
-					// DeadlineExceeded early (a misbehaving or
-					// compromised Tetragon, or a shorter deadline
-					// introduced upstream later) — a real health failure,
-					// not a scheduling race, so it must not shorten the
-					// window's effective safety margin silently.
-					if !withinHealthWindowDeadlineTolerance(windowDeadline) {
-						return reasonHealthNotServing, false
-					}
-					if !everReachable {
-						return reasonControlPlaneDown, false
-					}
-					return "", true
+				if ctx.Err() != nil {
+					return finish(false, reasonCanceled)
 				}
-				return reasonHealthNotServing, false
+				// No deadline is ever set on this stream, so a timeout is
+				// never "the window ending" (ADR 0042).
+				if errors.Is(err, tetra.ErrTimeout) {
+					return finish(false, reasonHealthNotServing)
+				}
+				return finish(false, reasonEventStreamClosed)
 			}
 
-		case <-ticker.C:
-			c, cancel := pollCtx()
-			_, ok := checkHealthServing(c, client)
-			cancel()
-			if !ok {
-				return reasonHealthNotServing, false
+		case <-fireTicker.C:
+			fire()
+
+		case <-pollTicker.C:
+			if !pollOnce() {
+				return finish(false, reasonHealthNotServing)
 			}
-			c2, cancel2 := pollCtx()
-			reachable := reachability.Reachable(c2)
-			cancel2()
-			if reachable {
-				everReachable = true
+
+		case <-checkTicker.C:
+			now := time.Now()
+			for _, s := range order {
+				if s.arrived.IsZero() && now.Sub(s.fired) > maxLatency {
+					markLate(s)
+				}
+			}
+			if verdict(now) {
+				if !everReachable {
+					return finish(false, reasonControlPlaneDown)
+				}
+				return finish(true, "")
 			}
 		}
 	}

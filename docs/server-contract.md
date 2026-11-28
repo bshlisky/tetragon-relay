@@ -73,7 +73,7 @@ while the stream is down is sent after the next HelloAck. `status` is one of:
 STATUS_UNSPECIFIED(0) REJECTED_SIGNATURE(1) REJECTED_TARGET(2) REJECTED_EPOCH(3)
 REJECTED_EXPIRED(4) REJECTED_SCHEMA(5) REJECTED_GUARDRAIL(6) APPLY_FAILED(7)
 ROLLED_BACK(8) REJECTED_CAPABILITY(9) APPLIED(10) SUPERSEDED(11) REJECTED_TAMPERED(12)
-REJECTED_AGENT_STATE(13) ROLLBACK_FAILED(14)
+REJECTED_AGENT_STATE(13) ROLLBACK_FAILED(14) ROLLED_BACK_UNVERIFIABLE(15)
 ```
 
 **Only `APPLIED` means applied.** Treat `STATUS_UNSPECIFIED`, and any status number
@@ -212,6 +212,7 @@ reference since `ApplyResult.Status` is part of this step's proto contract.)
 | `REJECTED_TAMPERED` | The agent's store is TAMPERED; no bundle is applied until operator re-enrollment. |
 | `REJECTED_AGENT_STATE` | Verified, but the agent's state (e.g. `DEGRADED`, `DRIFT`) does not allow `APPLYING`. Resend after the host returns to steady state. |
 | `ROLLBACK_FAILED` | The health window failed and re-asserting LKG also failed; the agent is `DEGRADED` (section 10.3). |
+| `ROLLED_BACK_UNVERIFIABLE` | Applied, but the health window could not prove that its view of Tetragon's events was current (freshness sentinels late or missing) for a full nominal window before its maximum (600 s), so the bundle was rolled back and LKG re-asserted (ADR 0042). Not a verdict on the bundle: retry when the host is less loaded. |
 | any other number | Unknown to you: treat as not applied. |
 
 ## 7. What the agent trusts the server for, and what it does not
@@ -344,6 +345,7 @@ Status refinements:
 | Agent not in `STEADY`/`SYNCING` (e.g. `DEGRADED`, `DRIFT`) | `REJECTED_AGENT_STATE` | `not applied: agent state <STATE> does not allow APPLYING` — resend after the host returns to steady state |
 | Tetragon loaded the bundle but the store commit failed | `APPLY_FAILED` | `loaded in Tetragon but the store commit failed; ...` — the host's epoch did not move; reconcile re-asserts the previous LKG |
 | Health window failed and the previous LKG was re-asserted | `ROLLED_BACK` | `rolled back: <reason>` — halt the rollout wave (architecture 7.7 step 8) |
+| Health window could not verify its observation path before its maximum; LKG re-asserted | `ROLLED_BACK_UNVERIFIABLE` | `rolled back: health_unverifiable: nominal=… elapsed=… sentinels fired=… arrived=… late=… max_latency_ms=… p50_ms=… p90_ms=… last_ms=[…] received=… rate=…/s [relayd_cpu=… nr_throttled=+…]`; the agent raises `Alert{HEALTH_UNVERIFIABLE}`. Halt the wave as for `ROLLED_BACK`; the host stays `STEADY` |
 | Health window failed and re-asserting LKG also failed | `ROLLBACK_FAILED` | the rollback's reason; the agent enters `DEGRADED` and raises `Alert{ROLLBACK_FAILED}` and `Alert{DRIFT}` |
 
 ### 10.4 Alerts
@@ -359,6 +361,7 @@ Status refinements:
 | `GUARDRAIL_REJECT` | A bundle was rejected `REJECTED_GUARDRAIL` or `REJECTED_CAPABILITY` by a guardrail. `detail`: the bundle digest and the reason, which names the rule (`guardrail rejection: G5`). | Fix the bundle; the agent's guardrails are compiled in. |
 | `TRUST_UPDATE_REJECTED` | A `TrustUpdate` (or a step of it) was not adopted (section 10.5). | Check the root chain you sent. |
 | `ROLLBACK_FAILED` | A health-window rollback could not re-assert LKG (`ApplyResult.ROLLBACK_FAILED`). The agent is `DEGRADED`; Tetragon's loaded set may differ from LKG. | Treat as drift that the agent could not repair; architecture 10.4. |
+| `HEALTH_UNVERIFIABLE` | A health window ended `ROLLED_BACK_UNVERIFIABLE` (ADR 0042). `detail`: `bundle <digest> epoch <n>: ` and the `ApplyResult.detail` above, with the measured sentinel latencies. | The host's event path is behind (an exec flood, or Tetragon's own backlog). Investigate the host's load; an enforce rollout to it is delayed, not lost. |
 | `KIND_UNSPECIFIED` or any other number | Never sent by this agent. | Log and keep it as an alert of unknown kind; never drop it. |
 
 **Rate limit.** At most one alert of each kind per 5 minutes; the first of each kind is

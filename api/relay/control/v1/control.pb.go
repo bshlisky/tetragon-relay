@@ -62,6 +62,10 @@ const (
 	ApplyResult_REJECTED_AGENT_STATE ApplyResult_Status = 13
 	// The health window failed and re-asserting LKG also failed.
 	ApplyResult_ROLLBACK_FAILED ApplyResult_Status = 14
+	// The health window could not prove its observation path
+	// current (freshness sentinels late or missing) before its
+	// maximum; LKG was re-asserted (ADR 0042).
+	ApplyResult_ROLLED_BACK_UNVERIFIABLE ApplyResult_Status = 15
 )
 
 // Enum value maps for ApplyResult_Status.
@@ -82,23 +86,25 @@ var (
 		12: "REJECTED_TAMPERED",
 		13: "REJECTED_AGENT_STATE",
 		14: "ROLLBACK_FAILED",
+		15: "ROLLED_BACK_UNVERIFIABLE",
 	}
 	ApplyResult_Status_value = map[string]int32{
-		"STATUS_UNSPECIFIED":   0,
-		"REJECTED_SIGNATURE":   1,
-		"REJECTED_TARGET":      2,
-		"REJECTED_EPOCH":       3,
-		"REJECTED_EXPIRED":     4,
-		"REJECTED_SCHEMA":      5,
-		"REJECTED_GUARDRAIL":   6,
-		"APPLY_FAILED":         7,
-		"ROLLED_BACK":          8,
-		"REJECTED_CAPABILITY":  9,
-		"APPLIED":              10,
-		"SUPERSEDED":           11,
-		"REJECTED_TAMPERED":    12,
-		"REJECTED_AGENT_STATE": 13,
-		"ROLLBACK_FAILED":      14,
+		"STATUS_UNSPECIFIED":       0,
+		"REJECTED_SIGNATURE":       1,
+		"REJECTED_TARGET":          2,
+		"REJECTED_EPOCH":           3,
+		"REJECTED_EXPIRED":         4,
+		"REJECTED_SCHEMA":          5,
+		"REJECTED_GUARDRAIL":       6,
+		"APPLY_FAILED":             7,
+		"ROLLED_BACK":              8,
+		"REJECTED_CAPABILITY":      9,
+		"APPLIED":                  10,
+		"SUPERSEDED":               11,
+		"REJECTED_TAMPERED":        12,
+		"REJECTED_AGENT_STATE":     13,
+		"ROLLBACK_FAILED":          14,
+		"ROLLED_BACK_UNVERIFIABLE": 15,
 	}
 )
 
@@ -142,6 +148,9 @@ const (
 	Alert_TRUST_UPDATE_REJECTED Alert_Kind = 6
 	// A health-window rollback could not re-assert LKG (ADR 0037).
 	Alert_ROLLBACK_FAILED Alert_Kind = 7
+	// A health window ended unverifiable; detail carries the measured
+	// sentinel latencies (ADR 0042).
+	Alert_HEALTH_UNVERIFIABLE Alert_Kind = 8
 )
 
 // Enum value maps for Alert_Kind.
@@ -155,6 +164,7 @@ var (
 		5: "GUARDRAIL_REJECT",
 		6: "TRUST_UPDATE_REJECTED",
 		7: "ROLLBACK_FAILED",
+		8: "HEALTH_UNVERIFIABLE",
 	}
 	Alert_Kind_value = map[string]int32{
 		"KIND_UNSPECIFIED":      0,
@@ -165,6 +175,7 @@ var (
 		"GUARDRAIL_REJECT":      5,
 		"TRUST_UPDATE_REJECTED": 6,
 		"ROLLBACK_FAILED":       7,
+		"HEALTH_UNVERIFIABLE":   8,
 	}
 )
 
@@ -1469,13 +1480,13 @@ const file_relay_control_v1_control_proto_rawDesc = "" +
 	"\x11telemetry_backlog\x18\x05 \x01(\rR\x10telemetryBacklog\x1a9\n" +
 	"\vEpochsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\x94\x04\n" +
+	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\xb2\x04\n" +
 	"\vApplyResult\x12#\n" +
 	"\rbundle_digest\x18\x01 \x01(\fR\fbundleDigest\x12\x14\n" +
 	"\x05epoch\x18\x02 \x01(\x04R\x05epoch\x12<\n" +
 	"\x06status\x18\x03 \x01(\x0e2$.relay.control.v1.ApplyResult.StatusR\x06status\x12\x16\n" +
 	"\x06detail\x18\x04 \x01(\tR\x06detail\x12.\n" +
-	"\x13loaded_digest_after\x18\x05 \x01(\fR\x11loadedDigestAfter\"\xc3\x02\n" +
+	"\x13loaded_digest_after\x18\x05 \x01(\fR\x11loadedDigestAfter\"\xe1\x02\n" +
 	"\x06Status\x12\x16\n" +
 	"\x12STATUS_UNSPECIFIED\x10\x00\x12\x16\n" +
 	"\x12REJECTED_SIGNATURE\x10\x01\x12\x13\n" +
@@ -1493,7 +1504,8 @@ const file_relay_control_v1_control_proto_rawDesc = "" +
 	"SUPERSEDED\x10\v\x12\x15\n" +
 	"\x11REJECTED_TAMPERED\x10\f\x12\x18\n" +
 	"\x14REJECTED_AGENT_STATE\x10\r\x12\x13\n" +
-	"\x0fROLLBACK_FAILED\x10\x0e\"\xc3\x01\n" +
+	"\x0fROLLBACK_FAILED\x10\x0e\x12\x1c\n" +
+	"\x18ROLLED_BACK_UNVERIFIABLE\x10\x0f\"\xc3\x01\n" +
 	"\x0eTetragonHealth\x12\x18\n" +
 	"\aserving\x18\x01 \x01(\bR\aserving\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\x125\n" +
@@ -1514,11 +1526,11 @@ const file_relay_control_v1_control_proto_rawDesc = "" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05state\x18\x02 \x01(\tR\x05state\x12\x18\n" +
 	"\aenabled\x18\x03 \x01(\bR\aenabled\x12)\n" +
-	"\x10canonical_sha256\x18\x04 \x01(\fR\x0fcanonicalSha256\"\x95\x02\n" +
+	"\x10canonical_sha256\x18\x04 \x01(\fR\x0fcanonicalSha256\"\xae\x02\n" +
 	"\x05Alert\x120\n" +
 	"\x04kind\x18\x01 \x01(\x0e2\x1c.relay.control.v1.Alert.KindR\x04kind\x12\x16\n" +
 	"\x06detail\x18\x02 \x01(\tR\x06detail\x12\x1b\n" +
-	"\tunix_time\x18\x03 \x01(\x03R\bunixTime\"\xa4\x01\n" +
+	"\tunix_time\x18\x03 \x01(\x03R\bunixTime\"\xbd\x01\n" +
 	"\x04Kind\x12\x14\n" +
 	"\x10KIND_UNSPECIFIED\x10\x00\x12\t\n" +
 	"\x05DRIFT\x10\x01\x12\x16\n" +
@@ -1528,7 +1540,8 @@ const file_relay_control_v1_control_proto_rawDesc = "" +
 	"\x06TAMPER\x10\x04\x12\x14\n" +
 	"\x10GUARDRAIL_REJECT\x10\x05\x12\x19\n" +
 	"\x15TRUST_UPDATE_REJECTED\x10\x06\x12\x13\n" +
-	"\x0fROLLBACK_FAILED\x10\a\"^\n" +
+	"\x0fROLLBACK_FAILED\x10\a\x12\x17\n" +
+	"\x13HEALTH_UNVERIFIABLE\x10\b\"^\n" +
 	"\bHelloAck\x12\x14\n" +
 	"\x05nonce\x18\x01 \x01(\fR\x05nonce\x12<\n" +
 	"\x1aheartbeat_interval_seconds\x18\x02 \x01(\rR\x18heartbeatIntervalSeconds\"*\n" +

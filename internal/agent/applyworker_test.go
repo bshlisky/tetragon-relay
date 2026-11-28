@@ -477,6 +477,35 @@ func TestApplyWorker_OutcomeMapping(t *testing.T) {
 	}
 }
 
+// ADR 0042: an unverifiable health window reports ROLLED_BACK_UNVERIFIABLE,
+// leaves APPLYING to STEADY like ROLLED_BACK, persists no epoch, and raises
+// Alert HEALTH_UNVERIFIABLE (queued before the deferred ApplyResult).
+func TestApplyWorker_RolledBackUnverifiable(t *testing.T) {
+	p := newPipeline(t, pipelineOpts{enforceAllowed: true, status: apply.StatusRolledBackUnverifiable})
+	p.worker.SubmitBundle(p.bundle("enforce", 1, "a"))
+	var r *controlv1.ApplyResult
+	var alert *controlv1.Alert
+	for r == nil {
+		m := p.next()
+		if a := m.GetAlert(); a != nil {
+			alert = a
+		}
+		r = m.GetApplyResult()
+	}
+	if r.GetStatus() != controlv1.ApplyResult_ROLLED_BACK_UNVERIFIABLE {
+		t.Fatalf("status = %s (%s)", r.GetStatus(), r.GetDetail())
+	}
+	if alert == nil || alert.GetKind() != controlv1.Alert_HEALTH_UNVERIFIABLE {
+		t.Fatalf("alert = %v, want HEALTH_UNVERIFIABLE", alert)
+	}
+	if got := p.sm.Current(); got != agent.StateSteady {
+		t.Fatalf("state = %s, want STEADY", got)
+	}
+	if e, _ := p.st.Current("prod"); e != 0 {
+		t.Fatalf("epoch persisted: %d", e)
+	}
+}
+
 func TestApplyWorker_CommitFailureIsNotReportedApplied(t *testing.T) {
 	p := newPipeline(t, pipelineOpts{enforceAllowed: true, status: apply.StatusApplied, failCommit: true})
 	p.worker.SubmitBundle(p.bundle("monitor", 1, "a"))

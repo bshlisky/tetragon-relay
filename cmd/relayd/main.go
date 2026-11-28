@@ -201,13 +201,31 @@ func run(configPath string, auditor *agentAuditor) error {
 	// the LKG together with the epoch and monitor history the apply
 	// worker armed, in one store generation.
 	commit := &agent.CommitOnPut{Store: startupResult.Store}
+	// ADR 0042 (step-07b-decisions-3.md F0.1): the health window's
+	// freshness sentinel. Without one, Apply refuses every bundle
+	// (APPLY_FAILED) rather than read silence as health.
+	var sentinel apply.Sentinel
+	if s, serr := apply.NewSelfSentinel(storeDir + "/sentinel"); serr != nil {
+		auditor.Record(agent.AuditEvent{Step: "sentinel_unavailable", Detail: "no freshness sentinel; every bundle will be APPLY_FAILED", Err: serr})
+	} else {
+		sentinel = s
+	}
 	engine := apply.NewEngine(tetraClient, apply.RealPolicyParser{}, commit, link, &engineAuditorAdapter{auditor.inner}, apply.Config{
 		PersistDir: cfg.PersistDir,
 		HealthWindow: apply.HealthWindowConfig{
 			Window:         cfg.HealthWindow,
 			SurgeThreshold: cfg.EnforcementSurgeThreshold,
+			CPUStat:        ownCPUStat,
 		},
+		Sentinel: sentinel,
 	})
+	if sentinel != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if serr := engine.EnsureSentinel(ctx); serr != nil {
+			auditor.Record(agent.AuditEvent{Step: "sentinel_load_failed", Detail: "reconcile and the next apply retry it", Err: serr})
+		}
+		cancel()
+	}
 
 	// Part D1: the state machine starts in UNENROLLED (architecture doc
 	// 8.4) on every boot; it is only advanced by a running control loop

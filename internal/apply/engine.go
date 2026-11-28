@@ -28,6 +28,10 @@ const (
 	// StatusRollbackFailed is ROLLBACK_FAILED (Part D6): the health
 	// window failed AND re-asserting LKG itself failed.
 	StatusRollbackFailed
+	// StatusRolledBackUnverifiable is ROLLED_BACK_UNVERIFIABLE (ADR
+	// 0042): the health window could not prove its observation path
+	// current before its maximum, and LKG was re-asserted.
+	StatusRolledBackUnverifiable
 )
 
 func (s Status) String() string {
@@ -40,6 +44,8 @@ func (s Status) String() string {
 		return "APPLY_FAILED"
 	case StatusRollbackFailed:
 		return "ROLLBACK_FAILED"
+	case StatusRolledBackUnverifiable:
+		return "ROLLED_BACK_UNVERIFIABLE"
 	default:
 		return "UNKNOWN"
 	}
@@ -69,6 +75,10 @@ type Config struct {
 	// defaults to "/etc/tetragon/tetragon.tp.d/relay" if empty.
 	PersistDir   string
 	HealthWindow HealthWindowConfig
+	// Sentinel is the health window's freshness probe (ADR 0042). With
+	// none, Apply refuses to load anything (APPLY_FAILED): no window
+	// could ever pass.
+	Sentinel Sentinel
 }
 
 func (c Config) domain() string {
@@ -197,6 +207,14 @@ func (e *Engine) Apply(ctx context.Context, result *verify.Result) (*Result, err
 		return nil, err
 	}
 
+	// ADR 0042: the health window can only pass with a loaded sentinel.
+	// Make sure of it before changing anything, so a failure here leaves
+	// Tetragon exactly as it was.
+	if err := e.EnsureSentinel(ctx); err != nil {
+		e.audit("apply_sentinel_failed", err.Error(), err, "")
+		return &Result{Status: StatusApplyFailed, Detail: "freshness sentinel unavailable: " + err.Error()}, ErrApplyFailed
+	}
+
 	existing, err := e.existingManaged(ctx)
 	if err != nil {
 		return nil, err
@@ -248,10 +266,21 @@ func (e *Engine) Apply(ctx context.Context, result *verify.Result) (*Result, err
 	for _, r := range resolved {
 		loadedNames = append(loadedNames, r.loadedName)
 	}
-	reason, healthy := runHealthWindow(ctx, e.client, e.reachability, e.cfg.HealthWindow, loadedNames)
-	if !healthy {
-		e.audit("health_window_failed", string(reason), nil, "")
-		return e.rollback(ctx, string(reason))
+	out := runHealthWindow(ctx, e.client, e.reachability, e.cfg.Sentinel, e.cfg.HealthWindow, loadedNames)
+	summary := out.stats.Summary()
+	e.audit("health_window_stats", fmt.Sprintf("passed=%t reason=%s %s", out.passed, out.reason, summary), nil, "")
+	if !out.passed {
+		if out.reason == reasonUnverifiable {
+			e.audit("health_window_unverifiable", summary, nil, "")
+			res, rerr := e.rollback(ctx, string(reasonUnverifiable)+": "+summary)
+			if res != nil && res.Status == StatusRolledBack {
+				res.Status = StatusRolledBackUnverifiable
+				return res, ErrRolledBackUnverifiable
+			}
+			return res, rerr
+		}
+		e.audit("health_window_failed", string(out.reason), nil, "")
+		return e.rollback(ctx, string(out.reason))
 	}
 
 	if err := e.lkg.Put(e.cfg.domain(), bundleToLKG(result, resolved)); err != nil {

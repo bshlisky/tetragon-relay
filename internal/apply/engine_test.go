@@ -33,7 +33,15 @@ func fastHealthWindow() HealthWindowConfig {
 	// keeping these tests from depending on several extra real RPC round
 	// trips completing within a sub-second window on a loaded/
 	// race-detector-instrumented CI machine.
-	return HealthWindowConfig{Window: 4 * time.Second, PollInterval: 30 * time.Second, SurgeThreshold: 1000}
+	//
+	// ADR 0042: the window passes only on freshness sentinels, which the
+	// fake sentinel delivers through the fake server's live stream; they
+	// fire every 100 ms and may take up to 2 s (generous for -race).
+	return HealthWindowConfig{
+		Window: time.Second, PollInterval: 30 * time.Second, SurgeThreshold: 1000,
+		SentinelInterval: 100 * time.Millisecond, SentinelMaxLatency: 2 * time.Second,
+		SettleMargin: 20 * time.Millisecond, MaxWindow: 10 * time.Second,
+	}
 }
 
 func newTestEngine(t *testing.T, f *fakeServer, parser *fakePolicyParser) (*Engine, *FakeAuditor, *FakeLKGStore) {
@@ -47,6 +55,7 @@ func newTestEngine(t *testing.T, f *fakeServer, parser *fakePolicyParser) (*Engi
 	e := NewEngine(client, parser, lkg, reach, auditor, Config{
 		PersistDir:   dir,
 		HealthWindow: fastHealthWindow(),
+		Sentinel:     newFakeSentinel(t, f.pushLive),
 	})
 	return e, auditor, lkg
 }

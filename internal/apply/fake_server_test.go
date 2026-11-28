@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -59,6 +60,11 @@ type fakeServer struct {
 	confirmAsState tetragonpb.TracingPolicyState
 
 	events []*tetragonpb.GetEventsResponse
+	// subs receive live events (pushLive) on every open GetEvents stream.
+	subs map[chan *tetragonpb.GetEventsResponse]bool
+	// sentinels holds relay-sentinel policies apart from domain, so the
+	// tests' len(f.domain) and no-gap timeline see bundle policies only.
+	sentinels map[string]string // name -> domain
 
 	timeline []fakeState
 }
@@ -69,6 +75,8 @@ func newFakeServer() *fakeServer {
 		domain:         map[string]string{},
 		yaml:           map[string]string{},
 		failDelete:     map[string]bool{},
+		subs:           map[chan *tetragonpb.GetEventsResponse]bool{},
+		sentinels:      map[string]string{},
 		healthRunning:  true,
 		confirmAsState: tetragonpb.TracingPolicyState_TP_STATE_ENABLED,
 	}
@@ -107,6 +115,11 @@ func (f *fakeServer) AddTracingPolicy(_ context.Context, req *tetragonpb.AddTrac
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
+	if strings.HasPrefix(name, SentinelPolicyPrefix) {
+		f.sentinels[name] = req.GetDomain()
+		return &tetragonpb.AddTracingPolicyResponse{}, nil
+	}
+
 	f.addCount++
 	if f.failAllAdds || (f.failAddAfterN > 0 && f.addCount > f.failAddAfterN) {
 		return nil, status.Error(codes.Internal, fmt.Sprintf("fake: forced add failure on add #%d", f.addCount))
@@ -123,6 +136,10 @@ func (f *fakeServer) DeleteTracingPolicy(_ context.Context, req *tetragonpb.Dele
 	defer f.mu.Unlock()
 	if f.failDelete[req.GetName()] {
 		return nil, status.Error(codes.Internal, "fake: forced delete failure")
+	}
+	if _, ok := f.sentinels[req.GetName()]; ok {
+		delete(f.sentinels, req.GetName())
+		return &tetragonpb.DeleteTracingPolicyResponse{}, nil
 	}
 	delete(f.domain, req.GetName())
 	delete(f.yaml, req.GetName())
@@ -145,6 +162,12 @@ func (f *fakeServer) ListTracingPolicies(_ context.Context, req *tetragonpb.List
 		return nil, f.listErr
 	}
 	var out []*tetragonpb.TracingPolicyStatus
+	for name, domain := range f.sentinels {
+		if req.GetDomain() != "" && domain != req.GetDomain() {
+			continue
+		}
+		out = append(out, &tetragonpb.TracingPolicyStatus{Name: name, Domain: domain, State: tetragonpb.TracingPolicyState_TP_STATE_ENABLED})
+	}
 	for name, domain := range f.domain {
 		if req.GetDomain() != "" && domain != req.GetDomain() {
 			continue
@@ -161,16 +184,50 @@ func (f *fakeServer) ListTracingPolicies(_ context.Context, req *tetragonpb.List
 }
 
 func (f *fakeServer) GetEvents(_ *tetragonpb.GetEventsRequest, stream grpc.ServerStreamingServer[tetragonpb.GetEventsResponse]) error {
+	live := make(chan *tetragonpb.GetEventsResponse, 1024)
 	f.mu.Lock()
 	events := append([]*tetragonpb.GetEventsResponse(nil), f.events...)
+	f.subs[live] = true
 	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		delete(f.subs, live)
+		f.mu.Unlock()
+	}()
 	for _, e := range events {
 		if err := stream.Send(e); err != nil {
 			return err
 		}
 	}
-	<-stream.Context().Done()
-	return stream.Context().Err()
+	for {
+		select {
+		case e := <-live:
+			if err := stream.Send(e); err != nil {
+				return err
+			}
+		case <-stream.Context().Done():
+			return stream.Context().Err()
+		}
+	}
+}
+
+// pushLive sends ev to every open GetEvents stream.
+func (f *fakeServer) pushLive(ev tetra.Event) {
+	resp := &tetragonpb.GetEventsResponse{}
+	switch {
+	case ev.Kprobe != nil:
+		resp.Event = &tetragonpb.GetEventsResponse_ProcessKprobe{ProcessKprobe: ev.Kprobe}
+	default:
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for ch := range f.subs {
+		select {
+		case ch <- resp:
+		default:
+		}
+	}
 }
 
 // startFakeServer starts f on a real unix socket in a fresh temp dir and

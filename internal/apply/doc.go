@@ -34,6 +34,17 @@ var (
 	// than APPLIED.
 	ErrRolledBack = errors.New("apply: ROLLED_BACK (health window failed; LKG re-asserted)")
 
+	// ErrRolledBackUnverifiable is ROLLED_BACK_UNVERIFIABLE
+	// (step-07b-decisions-3.md F0.1; ADR 0042): the health window could
+	// not prove its observation path current (freshness sentinels late or
+	// missing) for a full nominal window before the maximum, so the
+	// bundle was rolled back and LKG re-asserted.
+	ErrRolledBackUnverifiable = errors.New("apply: ROLLED_BACK_UNVERIFIABLE (health window unverifiable; LKG re-asserted)")
+
+	// ErrNoSentinel means the engine has no freshness sentinel configured;
+	// its health window can never pass (ADR 0042).
+	ErrNoSentinel = errors.New("apply: no freshness sentinel configured")
+
 	// ErrRollbackFailed is ROLLBACK_FAILED (Part D6): the health window
 	// failed AND re-asserting the LKG set itself failed. The engine
 	// leaves whatever is currently loaded in place (it never deletes the

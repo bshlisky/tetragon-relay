@@ -34,7 +34,7 @@ func TestReconcileAndRollback_RefuseOnTamperedLKG(t *testing.T) {
 	client, cleanup := startFakeServer(t, f)
 	t.Cleanup(cleanup)
 	lkg := &tamperingLKG{FakeLKGStore: NewFakeLKGStore()}
-	e := NewEngine(client, parser, lkg, &FakeReachabilityChecker{ReachableValue: true}, &FakeAuditor{}, Config{PersistDir: t.TempDir(), HealthWindow: fastHealthWindow()})
+	e := NewEngine(client, parser, lkg, &FakeReachabilityChecker{ReachableValue: true}, &FakeAuditor{}, Config{PersistDir: t.TempDir(), HealthWindow: fastHealthWindow(), Sentinel: newFakeSentinel(t, f.pushLive)})
 	if _, err := e.Apply(context.Background(), acceptedBundle("enforce", verify.Policy{Name: "p1", Version: 1, YAML: "unused"})); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}

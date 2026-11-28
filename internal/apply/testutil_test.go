@@ -3,8 +3,12 @@ package apply
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/bshlisky/tetragon-relay/internal/tetra"
+	tetragonpb "github.com/bshlisky/tetragon-relay/third_party/tetragon/v1.8.0/api/v1/tetragon"
 )
 
 // yamlMetadataName extracts metadata.name from a YAML (or, since canonical
@@ -73,4 +77,70 @@ func policyJSON(name, action string) []byte {
 		`{"apiVersion":"cilium.io/v1alpha1","kind":"TracingPolicy","metadata":{"name":%q},"spec":{"kprobes":[{"call":"security_bprm_check","selectors":[{"matchActions":[{"action":%q}],"matchBinaries":[{"operator":"In","values":["/usr/bin/x"]}]}]}]}}`,
 		name, action,
 	))
+}
+
+// fakeSentinel is a Sentinel whose Fire hands the matching Tetragon event
+// to deliver (instead of a kernel hook), after plan(n) says how: n is the
+// 1-based firing count; delay is how long the "pipeline" takes, drop
+// loses it. Policy name and Nonce parsing are the real FileSentinel's.
+type fakeSentinel struct {
+	real    *FileSentinel
+	deliver func(tetra.Event)
+
+	mu      sync.Mutex
+	n       int
+	plan    func(n int) (delay time.Duration, drop bool)
+	fireErr error
+}
+
+func newFakeSentinel(t interface{ Fatalf(string, ...any) }, deliver func(tetra.Event)) *fakeSentinel {
+	fs, err := NewFileSentinel("/usr/libexec/tetragon-relay/relayd", "/var/lib/tetragon-relay/sentinel")
+	if err != nil {
+		t.Fatalf("NewFileSentinel: %v", err)
+	}
+	return &fakeSentinel{real: fs, deliver: deliver}
+}
+
+func (s *fakeSentinel) PolicyName() string                  { return s.real.PolicyName() }
+func (s *fakeSentinel) PolicyJSON() []byte                  { return s.real.PolicyJSON() }
+func (s *fakeSentinel) Nonce(ev tetra.Event) (string, bool) { return s.real.Nonce(ev) }
+
+func (s *fakeSentinel) setPlan(plan func(n int) (time.Duration, bool)) {
+	s.mu.Lock()
+	s.plan = plan
+	s.mu.Unlock()
+}
+
+func (s *fakeSentinel) Fire(nonce string) error {
+	s.mu.Lock()
+	s.n++
+	n, plan, ferr := s.n, s.plan, s.fireErr
+	s.mu.Unlock()
+	if ferr != nil {
+		return ferr
+	}
+	var delay time.Duration
+	if plan != nil {
+		var drop bool
+		if delay, drop = plan(n); drop {
+			return nil
+		}
+	}
+	ev := sentinelEvent(s.real.PolicyName(), s.real.dir+"/"+nonce)
+	if delay <= 0 {
+		go s.deliver(ev)
+		return nil
+	}
+	time.AfterFunc(delay, func() { s.deliver(ev) })
+	return nil
+}
+
+func sentinelEvent(policy, path string) tetra.Event {
+	return tetra.Event{Kprobe: &tetragonpb.ProcessKprobe{
+		PolicyName:   policy,
+		FunctionName: "security_file_open",
+		Process:      &tetragonpb.Process{Binary: "/usr/libexec/tetragon-relay/relayd"},
+		Args:         []*tetragonpb.KprobeArgument{{Arg: &tetragonpb.KprobeArgument_FileArg{FileArg: &tetragonpb.KprobeFile{Path: path}}}},
+		Action:       tetragonpb.KprobeAction_KPROBE_ACTION_POST,
+	}}
 }

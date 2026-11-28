@@ -67,6 +67,14 @@ func (e *Engine) Reconcile(ctx context.Context, reassertOnDrift bool) (*DriftRep
 		e.audit("reconcile_refused", err.Error(), err, "")
 		return nil, err
 	}
+	// ADR 0042: the freshness sentinel is re-asserted like LKG, but is
+	// not part of it (nor of the drift comparison below). A failure is
+	// audited; the next Apply refuses to start without it.
+	if e.cfg.Sentinel != nil {
+		if err := e.EnsureSentinel(ctx); err != nil {
+			e.audit("reconcile_sentinel_failed", err.Error(), err, "")
+		}
+	}
 	desired := make(map[string]bool, len(lkgSet.Policies))
 	for _, p := range lkgSet.Policies {
 		loadedName, err := LoadedName(p.Name, p.Version, p.CanonicalJSON)

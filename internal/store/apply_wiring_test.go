@@ -57,15 +57,42 @@ var errSimulatedCounterFailure = errors.New("simulated monotonic counter failure
 
 // wiringFakeTetragonClient is a minimal apply.TetragonClient: every
 // addition succeeds and immediately reports as loaded/enabled, health is
-// always serving, and GetEvents blocks (never sends, never errors) until
-// its context ends, matching a real, healthy Tetragon closely enough for
-// Apply's health window to pass without actually dialing anything.
+// always serving, and GetEvents forwards only what live carries (the
+// wiring sentinel's events) until its context ends. Since ADR 0042 a
+// silent stream no longer passes a health window: the sentinel's events
+// are what prove the observation path current.
 type wiringFakeTetragonClient struct {
 	loaded map[string]bool
+	live   chan tetra.Event
 }
 
 func newWiringFakeTetragonClient() *wiringFakeTetragonClient {
-	return &wiringFakeTetragonClient{loaded: map[string]bool{}}
+	return &wiringFakeTetragonClient{loaded: map[string]bool{}, live: make(chan tetra.Event, 1024)}
+}
+
+// wiringSentinel is an apply.Sentinel whose Fire puts the matching event
+// straight on the fake client's stream (the real FileSentinel builds the
+// policy and parses the nonce).
+type wiringSentinel struct {
+	*apply.FileSentinel
+	client *wiringFakeTetragonClient
+}
+
+func newWiringSentinel(t *testing.T, c *wiringFakeTetragonClient) *wiringSentinel {
+	t.Helper()
+	fs, err := apply.NewFileSentinel("/usr/libexec/tetragon-relay/relayd", "/var/lib/tetragon-relay/sentinel")
+	if err != nil {
+		t.Fatalf("NewFileSentinel: %v", err)
+	}
+	return &wiringSentinel{FileSentinel: fs, client: c}
+}
+
+func (s *wiringSentinel) Fire(nonce string) error {
+	s.client.live <- tetra.Event{Kprobe: &tetragonpb.ProcessKprobe{
+		PolicyName: s.PolicyName(),
+		Args:       []*tetragonpb.KprobeArgument{{Arg: &tetragonpb.KprobeArgument_FileArg{FileArg: &tetragonpb.KprobeFile{Path: "/var/lib/tetragon-relay/sentinel/" + nonce}}}},
+	}}
+	return nil
 }
 
 func (f *wiringFakeTetragonClient) AddTracingPolicy(_ context.Context, doc string, _ string) error {
@@ -102,9 +129,20 @@ func (f *wiringFakeTetragonClient) GetEvents(ctx context.Context, _ []string) (<
 	events := make(chan tetra.Event)
 	errc := make(chan error)
 	go func() {
-		<-ctx.Done()
-		close(events)
-		close(errc)
+		defer close(errc)
+		defer close(events)
+		for {
+			select {
+			case ev := <-f.live:
+				select {
+				case events <- ev:
+				case <-ctx.Done():
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
 	}()
 	return events, errc
 }
@@ -155,10 +193,14 @@ func TestApplyEngine_LKGStorePutErrorDoesNotRollBackTetragon(t *testing.T) {
 	engine := apply.NewEngine(client, wiringFakeParser{}, s, reach, auditor, apply.Config{
 		PersistDir: t.TempDir(),
 		HealthWindow: apply.HealthWindowConfig{
-			Window:         200 * time.Millisecond,
-			PollInterval:   2 * time.Second, // longer than Window: no mid-window poll fires
-			SurgeThreshold: 1000,
+			Window:             200 * time.Millisecond,
+			PollInterval:       2 * time.Second, // longer than Window: no mid-window poll fires
+			SurgeThreshold:     1000,
+			SentinelInterval:   20 * time.Millisecond,
+			SentinelMaxLatency: time.Second,
+			SettleMargin:       10 * time.Millisecond,
 		},
+		Sentinel: newWiringSentinel(t, client),
 	})
 
 	bundle := &verify.Result{

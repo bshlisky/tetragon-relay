@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,14 +15,30 @@ import (
 
 // inProcessClient is a lightweight, in-memory TetragonClient for
 // runHealthWindow's own unit tests: deterministic and fast (no real
-// network I/O), so tests that need the ticker to actually fire several
-// times within a short window (surge threshold, admin-path mid-window)
-// are not flaky the way a real gRPC round trip under the race detector
-// can be.
+// network I/O). events are sent first; then anything handed to live (the
+// fake sentinel's deliveries) is forwarded until ctx ends. A nil live
+// channel is a stub stream that delivers nothing after events.
 type inProcessClient struct {
 	healthy      bool
 	events       []tetra.Event
 	getEventsErr error
+	// closeAfterEvents ends the stream (closes both channels) once events
+	// were sent.
+	closeAfterEvents bool
+	live             chan tetra.Event
+
+	mu    sync.Mutex
+	names []string
+}
+
+func newInProcessClient(healthy bool) *inProcessClient {
+	return &inProcessClient{healthy: healthy, live: make(chan tetra.Event, 1024)}
+}
+
+func (c *inProcessClient) deliver(ev tetra.Event) {
+	if c.live != nil {
+		c.live <- ev
+	}
 }
 
 func (c *inProcessClient) AddTracingPolicy(context.Context, string, string) error    { return nil }
@@ -38,7 +56,10 @@ func (c *inProcessClient) GetHealth(context.Context) ([]*tetragonpb.HealthStatus
 	return []*tetragonpb.HealthStatus{{Status: status}}, nil
 }
 
-func (c *inProcessClient) GetEvents(ctx context.Context, _ []string) (<-chan tetra.Event, <-chan error) {
+func (c *inProcessClient) GetEvents(ctx context.Context, names []string) (<-chan tetra.Event, <-chan error) {
+	c.mu.Lock()
+	c.names = append([]string(nil), names...)
+	c.mu.Unlock()
 	events := make(chan tetra.Event)
 	errc := make(chan error, 1)
 	go func() {
@@ -55,342 +76,320 @@ func (c *inProcessClient) GetEvents(ctx context.Context, _ []string) (<-chan tet
 				return
 			}
 		}
-		<-ctx.Done()
+		if c.closeAfterEvents {
+			return
+		}
+		for {
+			select {
+			case ev := <-c.live: // nil live blocks forever: the stub stream
+				select {
+				case events <- ev:
+				case <-ctx.Done():
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
 	}()
 	return events, errc
 }
 
 var _ TetragonClient = (*inProcessClient)(nil)
 
+// fastWindow: a 100 ms nominal window, sentinels every 10 ms that must
+// arrive within 40 ms, 5 ms settle, at most 600 ms in all.
+func fastWindow() HealthWindowConfig {
+	return HealthWindowConfig{
+		Window: 100 * time.Millisecond, PollInterval: 20 * time.Millisecond,
+		SentinelInterval: 10 * time.Millisecond, SentinelMaxLatency: 40 * time.Millisecond,
+		SettleMargin: 5 * time.Millisecond, MaxWindow: 600 * time.Millisecond,
+	}
+}
+
+func run(t *testing.T, c *inProcessClient, s Sentinel, reachable bool, cfg HealthWindowConfig) windowOutcome {
+	t.Helper()
+	return runHealthWindow(context.Background(), c, &FakeReachabilityChecker{ReachableValue: reachable}, s, cfg, []string{"p1-v1-00000000"})
+}
+
 func TestRunHealthWindow_Pass(t *testing.T) {
-	c := &inProcessClient{healthy: true}
-	reach := &FakeReachabilityChecker{ReachableValue: true}
-	reason, ok := runHealthWindow(context.Background(), c, reach, HealthWindowConfig{Window: 100 * time.Millisecond, PollInterval: 20 * time.Millisecond}, nil)
-	if !ok {
-		t.Fatalf("runHealthWindow failed: %s", reason)
+	c := newInProcessClient(true)
+	s := newFakeSentinel(t, c.deliver)
+	start := time.Now()
+	out := run(t, c, s, true, fastWindow())
+	if !out.passed {
+		t.Fatalf("window failed: %s (%s)", out.reason, out.stats.Summary())
+	}
+	if el := time.Since(start); el < 100*time.Millisecond {
+		t.Fatalf("passed after %s, before the nominal 100ms", el)
+	}
+	if out.stats.Arrived == 0 || out.stats.Late != 0 || out.stats.Restarts != 0 {
+		t.Fatalf("stats = %s", out.stats.Summary())
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.names) != 2 || c.names[1] != s.PolicyName() {
+		t.Fatalf("GetEvents names = %v, want the bundle's policies plus %s", c.names, s.PolicyName())
+	}
+}
+
+// TestRunHealthWindow_StubStreamDeliversNothing_NeverPasses is F0.3's unit
+// mutation test: the exact P5 failure (silence read as health). A stream
+// that delivers nothing, sentinels included, must end unverifiable.
+func TestRunHealthWindow_StubStreamDeliversNothing_NeverPasses(t *testing.T) {
+	c := &inProcessClient{healthy: true} // live == nil: delivers nothing
+	s := newFakeSentinel(t, func(tetra.Event) {})
+	start := time.Now()
+	out := run(t, c, s, true, fastWindow())
+	if out.passed || out.reason != reasonUnverifiable {
+		t.Fatalf("passed=%t reason=%s, want unverifiable", out.passed, out.reason)
+	}
+	if el := time.Since(start); el < 600*time.Millisecond {
+		t.Fatalf("gave up after %s, before MaxWindow", el)
+	}
+	if out.stats.Arrived != 0 || out.stats.Fired == 0 || out.stats.Late == 0 {
+		t.Fatalf("stats = %s", out.stats.Summary())
+	}
+}
+
+func TestRunHealthWindow_NoSentinel_NeverPasses(t *testing.T) {
+	c := newInProcessClient(true)
+	out := run(t, c, nil, true, fastWindow())
+	if out.passed || out.reason != reasonUnverifiable {
+		t.Fatalf("passed=%t reason=%s, want unverifiable", out.passed, out.reason)
+	}
+}
+
+func TestRunHealthWindow_FireErrors_NeverPasses(t *testing.T) {
+	c := newInProcessClient(true)
+	s := newFakeSentinel(t, c.deliver)
+	s.fireErr = errors.New("EACCES")
+	out := run(t, c, s, true, fastWindow())
+	if out.passed || out.reason != reasonUnverifiable || out.stats.FireErrors == 0 {
+		t.Fatalf("passed=%t reason=%s stats=%s, want unverifiable with fire errors", out.passed, out.reason, out.stats.Summary())
+	}
+}
+
+// Late for the first 150 ms, then current: the window extends and passes
+// a full nominal window after recovery.
+func TestRunHealthWindow_LateThenRecovers_ExtendsAndPasses(t *testing.T) {
+	c := newInProcessClient(true)
+	s := newFakeSentinel(t, c.deliver)
+	t0 := time.Now()
+	s.setPlan(func(int) (time.Duration, bool) {
+		if time.Since(t0) < 150*time.Millisecond {
+			return 80 * time.Millisecond, false // over the 40 ms limit
+		}
+		return 0, false
+	})
+	out := run(t, c, s, true, fastWindow())
+	if !out.passed {
+		t.Fatalf("window failed: %s (%s)", out.reason, out.stats.Summary())
+	}
+	if out.stats.Late == 0 || out.stats.Restarts == 0 {
+		t.Fatalf("expected late sentinels and a restart: %s", out.stats.Summary())
+	}
+	if el := time.Since(t0); el < 250*time.Millisecond {
+		t.Fatalf("passed after %s; want at least 150ms late + 100ms clean", el)
+	}
+}
+
+func TestRunHealthWindow_AlwaysLate_Unverifiable(t *testing.T) {
+	c := newInProcessClient(true)
+	s := newFakeSentinel(t, c.deliver)
+	s.setPlan(func(int) (time.Duration, bool) { return 60 * time.Millisecond, false })
+	out := run(t, c, s, true, fastWindow())
+	if out.passed || out.reason != reasonUnverifiable {
+		t.Fatalf("passed=%t reason=%s, want unverifiable", out.passed, out.reason)
+	}
+	if out.stats.Arrived == 0 || out.stats.MaxLatency < 40*time.Millisecond || len(out.stats.Latencies) == 0 {
+		t.Fatalf("latencies not recorded: %s", out.stats.Summary())
+	}
+	if !strings.Contains(out.stats.Summary(), "last_ms=[") {
+		t.Fatalf("summary lacks latencies: %s", out.stats.Summary())
+	}
+}
+
+// Every other sentinel is lost: never a clean span, never a pass.
+func TestRunHealthWindow_IntermittentLoss_Unverifiable(t *testing.T) {
+	c := newInProcessClient(true)
+	s := newFakeSentinel(t, c.deliver)
+	s.setPlan(func(n int) (time.Duration, bool) { return 0, n%2 == 0 })
+	out := run(t, c, s, true, fastWindow())
+	if out.passed || out.reason != reasonUnverifiable {
+		t.Fatalf("passed=%t reason=%s, want unverifiable", out.passed, out.reason)
+	}
+}
+
+// Reordering: the closing sentinel arrives while an earlier one in the
+// span is still outstanding (within its latency). The window must wait for
+// it, and passes once it arrives.
+func TestRunHealthWindow_WaitsForOutstandingEarlierSentinel(t *testing.T) {
+	c := newInProcessClient(true)
+	s := newFakeSentinel(t, c.deliver)
+	s.setPlan(func(n int) (time.Duration, bool) {
+		if n == 9 {
+			return 35 * time.Millisecond, false // late-ish but within 40 ms
+		}
+		return 0, false
+	})
+	out := run(t, c, s, true, fastWindow())
+	if !out.passed {
+		t.Fatalf("window failed: %s (%s)", out.reason, out.stats.Summary())
 	}
 }
 
 func TestRunHealthWindow_NotServing(t *testing.T) {
-	c := &inProcessClient{healthy: false}
-	reach := &FakeReachabilityChecker{ReachableValue: true}
-	reason, ok := runHealthWindow(context.Background(), c, reach, HealthWindowConfig{Window: 200 * time.Millisecond, PollInterval: 20 * time.Millisecond}, nil)
-	if ok || reason != reasonHealthNotServing {
-		t.Fatalf("reason=%s ok=%v, want reasonHealthNotServing/false", reason, ok)
+	c := newInProcessClient(false)
+	out := run(t, c, newFakeSentinel(t, c.deliver), true, fastWindow())
+	if out.passed || out.reason != reasonHealthNotServing {
+		t.Fatalf("passed=%t reason=%s, want reasonHealthNotServing", out.passed, out.reason)
 	}
 }
 
 func TestRunHealthWindow_ControlPlaneDownEntireWindow(t *testing.T) {
-	c := &inProcessClient{healthy: true}
-	reach := &FakeReachabilityChecker{ReachableValue: false}
-	reason, ok := runHealthWindow(context.Background(), c, reach, HealthWindowConfig{Window: 100 * time.Millisecond, PollInterval: 20 * time.Millisecond}, nil)
-	if ok || reason != reasonControlPlaneDown {
-		t.Fatalf("reason=%s ok=%v, want reasonControlPlaneDown/false", reason, ok)
+	c := newInProcessClient(true)
+	out := run(t, c, newFakeSentinel(t, c.deliver), false, fastWindow())
+	if out.passed || out.reason != reasonControlPlaneDown {
+		t.Fatalf("passed=%t reason=%s, want reasonControlPlaneDown", out.passed, out.reason)
 	}
 }
 
+func adminKill() tetra.Event {
+	return tetra.Event{Kprobe: &tetragonpb.ProcessKprobe{Process: &tetragonpb.Process{Binary: "/usr/sbin/sshd"}, Action: tetragonpb.KprobeAction_KPROBE_ACTION_SIGKILL}}
+}
+
 func TestRunHealthWindow_AdminPathEvent(t *testing.T) {
-	c := &inProcessClient{
-		healthy: true,
-		events: []tetra.Event{
-			{Kprobe: &tetragonpb.ProcessKprobe{Process: &tetragonpb.Process{Binary: "/usr/sbin/sshd"}, Action: tetragonpb.KprobeAction_KPROBE_ACTION_SIGKILL}},
-		},
+	c := newInProcessClient(true)
+	c.events = []tetra.Event{adminKill()}
+	out := run(t, c, newFakeSentinel(t, c.deliver), true, fastWindow())
+	if out.passed || out.reason != reasonAdminPathEnforced {
+		t.Fatalf("passed=%t reason=%s, want reasonAdminPathEnforced", out.passed, out.reason)
 	}
-	reach := &FakeReachabilityChecker{ReachableValue: true}
-	reason, ok := runHealthWindow(context.Background(), c, reach, HealthWindowConfig{Window: 500 * time.Millisecond, PollInterval: 50 * time.Millisecond}, nil)
-	if ok || reason != reasonAdminPathEnforced {
-		t.Fatalf("reason=%s ok=%v, want reasonAdminPathEnforced/false", reason, ok)
+}
+
+// The P5 shape: sentinels late (the path is behind), then the kill event
+// arrives during the extension. The window must fail on it, not end
+// unverifiable and not pass.
+func TestRunHealthWindow_AdminPathEventDuringExtension(t *testing.T) {
+	c := newInProcessClient(true)
+	s := newFakeSentinel(t, c.deliver)
+	s.setPlan(func(int) (time.Duration, bool) { return 0, true }) // path stalled
+	time.AfterFunc(200*time.Millisecond, func() { c.deliver(adminKill()) })
+	out := run(t, c, s, true, fastWindow())
+	if out.passed || out.reason != reasonAdminPathEnforced {
+		t.Fatalf("passed=%t reason=%s, want reasonAdminPathEnforced", out.passed, out.reason)
 	}
 }
 
 func TestRunHealthWindow_Surge(t *testing.T) {
-	var events []tetra.Event
+	c := newInProcessClient(true)
 	for i := 0; i < 10; i++ {
-		events = append(events, tetra.Event{Kprobe: &tetragonpb.ProcessKprobe{Process: &tetragonpb.Process{Binary: "/usr/bin/other"}, Action: tetragonpb.KprobeAction_KPROBE_ACTION_SIGKILL}})
+		c.events = append(c.events, tetra.Event{Kprobe: &tetragonpb.ProcessKprobe{Process: &tetragonpb.Process{Binary: "/usr/bin/other"}, Action: tetragonpb.KprobeAction_KPROBE_ACTION_SIGKILL}})
 	}
-	c := &inProcessClient{healthy: true, events: events}
-	reach := &FakeReachabilityChecker{ReachableValue: true}
-	reason, ok := runHealthWindow(context.Background(), c, reach, HealthWindowConfig{Window: 500 * time.Millisecond, PollInterval: 50 * time.Millisecond, SurgeThreshold: 3}, nil)
-	if ok || reason != reasonEnforcementSurge {
-		t.Fatalf("reason=%s ok=%v, want reasonEnforcementSurge/false", reason, ok)
+	cfg := fastWindow()
+	cfg.SurgeThreshold = 3
+	out := run(t, c, newFakeSentinel(t, c.deliver), true, cfg)
+	if out.passed || out.reason != reasonEnforcementSurge {
+		t.Fatalf("passed=%t reason=%s, want reasonEnforcementSurge", out.passed, out.reason)
 	}
 }
 
-// TestRunHealthWindow_GetEventsError's fake (inProcessClient.GetEvents)
-// sends the error to errc and then closes both errc and events together
-// (mirroring internal/tetra.GetEvents' own defer close(events)/close(errc)
-// pattern), well before the 200ms window ends. Which of the two closed/
-// ready channels select picks first is a genuine, harmless race (the same
-// one TestRunHealthWindow_ErrorBeforeDeadline_Fails documents): either the
-// errc branch (err != nil, windowCtx still open -> reasonHealthNotServing)
-// or the events branch (closed, windowCtx still open -> an early,
-// otherwise-unexplained stream close -> reasonEventStreamClosed) is
-// correct here, since the window is nowhere near its own deadline in
-// either case. Only these two named reasons are accepted — not "any
-// error" — so a real regression that produced some other reason, or
-// ok=true, would still fail this test.
+// Sentinel events never count toward the surge or the admin-path rule.
+func TestRunHealthWindow_SentinelsAreNotEnforcementEvents(t *testing.T) {
+	c := newInProcessClient(true)
+	cfg := fastWindow()
+	cfg.SurgeThreshold = 1
+	out := run(t, c, newFakeSentinel(t, c.deliver), true, cfg)
+	if !out.passed {
+		t.Fatalf("window failed: %s (%s)", out.reason, out.stats.Summary())
+	}
+}
+
+// A sentinel-shaped event with an unknown nonce, or from another policy,
+// proves nothing.
+func TestRunHealthWindow_ForeignSentinelEventsIgnored(t *testing.T) {
+	c := &inProcessClient{healthy: true}
+	s := newFakeSentinel(t, func(tetra.Event) {})
+	c.events = []tetra.Event{
+		sentinelEvent(s.PolicyName(), "/var/lib/tetragon-relay/sentinel/"+strings.Repeat("a", 32)),
+		sentinelEvent("someone-else", "/var/lib/tetragon-relay/sentinel/"+strings.Repeat("b", 32)),
+	}
+	out := run(t, c, s, true, fastWindow())
+	if out.passed || out.reason != reasonUnverifiable || out.stats.Arrived != 0 {
+		t.Fatalf("passed=%t reason=%s stats=%s, want unverifiable with nothing arrived", out.passed, out.reason, out.stats.Summary())
+	}
+}
+
 func TestRunHealthWindow_GetEventsError(t *testing.T) {
-	c := &inProcessClient{healthy: true, getEventsErr: errors.New("stream broke")}
-	reach := &FakeReachabilityChecker{ReachableValue: true}
-	reason, ok := runHealthWindow(context.Background(), c, reach, HealthWindowConfig{Window: 200 * time.Millisecond, PollInterval: 20 * time.Millisecond}, nil)
-	if ok || (reason != reasonHealthNotServing && reason != reasonEventStreamClosed) {
-		t.Fatalf("reason=%s ok=%v, want false with reasonHealthNotServing or reasonEventStreamClosed", reason, ok)
+	c := newInProcessClient(true)
+	c.getEventsErr = errors.New("stream broke")
+	out := run(t, c, newFakeSentinel(t, c.deliver), true, fastWindow())
+	if out.passed || (out.reason != reasonEventStreamClosed && out.reason != reasonHealthNotServing) {
+		t.Fatalf("passed=%t reason=%s", out.passed, out.reason)
 	}
 }
 
-// ctxControlledClient is a TetragonClient whose GetEvents lets a test
-// control exactly when, relative to ctx's own cancellation, the stream
-// errors or closes — step-03a-review.md R3-4's deterministic, no-sleep
-// tests of the windowCtx/errc/events race at runHealthWindow's deadline.
-type ctxControlledClient struct {
-	healthy   bool
-	getEvents func(ctx context.Context) (<-chan tetra.Event, <-chan error)
-}
-
-func (c *ctxControlledClient) AddTracingPolicy(context.Context, string, string) error    { return nil }
-func (c *ctxControlledClient) DeleteTracingPolicy(context.Context, string, string) error { return nil }
-func (c *ctxControlledClient) ListTracingPolicies(context.Context, string) ([]tetra.TracingPolicyStatus, error) {
-	return nil, nil
-}
-func (c *ctxControlledClient) RequireVersion(context.Context) (string, error) { return "v1.8.0", nil }
-
-func (c *ctxControlledClient) GetHealth(context.Context) ([]*tetragonpb.HealthStatus, error) {
-	status := tetragonpb.HealthStatusResult_HEALTH_STATUS_RUNNING
-	if !c.healthy {
-		status = tetragonpb.HealthStatusResult_HEALTH_STATUS_ERROR
-	}
-	return []*tetragonpb.HealthStatus{{Status: status}}, nil
-}
-
-func (c *ctxControlledClient) GetEvents(ctx context.Context, _ []string) (<-chan tetra.Event, <-chan error) {
-	return c.getEvents(ctx)
-}
-
-var _ TetragonClient = (*ctxControlledClient)(nil)
-
-// TestRunHealthWindow_ErrorExactlyAtDeadline_Passes is the R3-4
-// regression: a stream error that is only ever sent strictly after
-// windowCtx has already ended (synchronized via <-ctx.Done(), not a
-// sleep) must never fail an otherwise-healthy window, regardless of
-// which select branch (windowCtx.Done() or errc) happens to run first.
-func TestRunHealthWindow_ErrorExactlyAtDeadline_Passes(t *testing.T) {
-	c := &ctxControlledClient{
-		healthy: true,
-		getEvents: func(ctx context.Context) (<-chan tetra.Event, <-chan error) {
-			events := make(chan tetra.Event)
-			errc := make(chan error, 1)
-			go func() {
-				defer close(events)
-				defer close(errc)
-				<-ctx.Done() // only send once windowCtx has actually ended
-				errc <- errors.New("stream error racing the deadline")
-			}()
-			return events, errc
-		},
-	}
-	reach := &FakeReachabilityChecker{ReachableValue: true}
-	reason, ok := runHealthWindow(context.Background(), c, reach, HealthWindowConfig{Window: 50 * time.Millisecond, PollInterval: 10 * time.Millisecond}, nil)
-	if !ok {
-		t.Fatalf("reason=%s ok=%v, want ok=true (an error strictly after the deadline must not fail an otherwise-healthy window)", reason, ok)
+// No deadline is ever set on the window's stream, so a timeout from it is
+// never "the window ended" (ADR 0042 retired the deadline-tolerance rule).
+func TestRunHealthWindow_StreamTimeout_Fails(t *testing.T) {
+	c := newInProcessClient(true)
+	c.getEventsErr = fmt.Errorf("x: %w", tetra.ErrTimeout)
+	out := run(t, c, newFakeSentinel(t, c.deliver), true, fastWindow())
+	if out.passed {
+		t.Fatalf("a stream timeout passed the window")
 	}
 }
 
-// TestRunHealthWindow_ErrorBeforeDeadline_Fails covers the same error
-// path when the window is nowhere near its deadline: it must still fail
-// health. The window is deliberately far longer than this test could
-// possibly run (no sleep is used; the error is sent synchronously,
-// essentially immediately), so "before the deadline" is structural, not
-// timing-dependent. The fake closes events right after sending the
-// error (mirroring internal/tetra.GetEvents' own defer close(events)),
-// so either select branch (errc's error, or events closing first) is a
-// legitimate, race-free outcome here — both are a failure before the
-// deadline; this only asserts that the window fails, not which of the
-// two "before the deadline" reasons is observed.
-func TestRunHealthWindow_ErrorBeforeDeadline_Fails(t *testing.T) {
-	c := &ctxControlledClient{
-		healthy: true,
-		getEvents: func(context.Context) (<-chan tetra.Event, <-chan error) {
-			events := make(chan tetra.Event)
-			errc := make(chan error, 1)
-			go func() {
-				defer close(events)
-				defer close(errc)
-				errc <- errors.New("stream error well before the deadline")
-			}()
-			return events, errc
-		},
-	}
-	reach := &FakeReachabilityChecker{ReachableValue: true}
-	reason, ok := runHealthWindow(context.Background(), c, reach, HealthWindowConfig{Window: time.Hour, PollInterval: time.Hour}, nil)
-	if ok || (reason != reasonHealthNotServing && reason != reasonEventStreamClosed) {
-		t.Fatalf("reason=%s ok=%v, want false with reasonHealthNotServing or reasonEventStreamClosed", reason, ok)
-	}
-}
-
-// TestRunHealthWindow_StreamClosesEarly_Fails covers R3-4's other
-// required case: the events channel closing cleanly (no error at all)
-// well before the window's deadline must also fail health — Tetragon
-// ending the event stream early is itself a health signal, not something
-// to silently ignore.
 func TestRunHealthWindow_StreamClosesEarly_Fails(t *testing.T) {
-	c := &ctxControlledClient{
-		healthy: true,
-		getEvents: func(context.Context) (<-chan tetra.Event, <-chan error) {
-			events := make(chan tetra.Event)
-			errc := make(chan error, 1)
-			close(events)
-			close(errc)
-			return events, errc
-		},
-	}
-	reach := &FakeReachabilityChecker{ReachableValue: true}
-	reason, ok := runHealthWindow(context.Background(), c, reach, HealthWindowConfig{Window: time.Hour, PollInterval: time.Hour}, nil)
-	if ok || reason != reasonEventStreamClosed {
-		t.Fatalf("reason=%s ok=%v, want reasonEventStreamClosed/false", reason, ok)
+	c := newInProcessClient(true)
+	c.closeAfterEvents = true
+	out := run(t, c, newFakeSentinel(t, c.deliver), true, fastWindow())
+	if out.passed || out.reason != reasonEventStreamClosed {
+		t.Fatalf("passed=%t reason=%s, want reasonEventStreamClosed", out.passed, out.reason)
 	}
 }
 
-// TestRunHealthWindow_ErrTimeoutNearDeadline_Passes covers a real race
-// found running TestApply_HappyPath_Enforce -count=200 -race
-// (step-03a-review.md R3-4's required stress run): internal/tetra.
-// GetEvents has no timeout of its own separate from windowCtx (Part B3;
-// unlike every other RPC method), so a gRPC DeadlineExceeded status for
-// it — even one that arrives, under scheduling load, before this
-// goroutine's own windowCtx.Err() happens to have been set yet — can only
-// ever mean windowCtx's own deadline, PROVIDED the window actually has
-// little time left (step-03b-review.md R3B-2: within
-// limits.HealthWindowDeadlineTolerance). The window here is short enough
-// that "immediately" is within tolerance, confirming the window still
-// passes without relying on windowCtx.Err() being observably non-nil yet.
-func TestRunHealthWindow_ErrTimeoutNearDeadline_Passes(t *testing.T) {
-	c := &ctxControlledClient{
-		healthy: true,
-		getEvents: func(context.Context) (<-chan tetra.Event, <-chan error) {
-			events := make(chan tetra.Event)
-			errc := make(chan error, 1)
-			go func() {
-				defer close(events)
-				defer close(errc)
-				errc <- fmt.Errorf("%w: GetEvents", tetra.ErrTimeout)
-			}()
-			return events, errc
-		},
-	}
-	reach := &FakeReachabilityChecker{ReachableValue: true}
-	reason, ok := runHealthWindow(context.Background(), c, reach, HealthWindowConfig{Window: time.Second, PollInterval: time.Hour}, nil)
-	if !ok {
-		t.Fatalf("reason=%s ok=%v, want ok=true (a tetra.ErrTimeout from GetEvents within HealthWindowDeadlineTolerance of the deadline can only mean windowCtx's own deadline)", reason, ok)
+func TestRunHealthWindow_Canceled_NeverPasses(t *testing.T) {
+	c := newInProcessClient(true)
+	s := newFakeSentinel(t, c.deliver)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	out := runHealthWindow(ctx, c, &FakeReachabilityChecker{ReachableValue: true}, s, fastWindow(), nil)
+	if out.passed || out.reason != reasonCanceled {
+		t.Fatalf("passed=%t reason=%s, want reasonCanceled", out.passed, out.reason)
 	}
 }
 
-// TestRunHealthWindow_ErrTimeoutWellBeforeDeadline_Fails is
-// step-03b-review.md R3B-2's required deterministic test: a
-// tetra.ErrTimeout arriving when the window has far more than
-// limits.HealthWindowDeadlineTolerance left to run must never be read as
-// "the window completed healthily" — a Tetragon (or anything else at the
-// other end of the socket) returning DeadlineExceeded early must not be
-// able to shorten a long health window to a fraction of its configured
-// length without the agent noticing.
-func TestRunHealthWindow_ErrTimeoutWellBeforeDeadline_Fails(t *testing.T) {
-	c := &ctxControlledClient{
-		healthy: true,
-		getEvents: func(context.Context) (<-chan tetra.Event, <-chan error) {
-			events := make(chan tetra.Event)
-			errc := make(chan error, 1)
-			go func() {
-				defer close(events)
-				defer close(errc)
-				errc <- fmt.Errorf("%w: GetEvents", tetra.ErrTimeout)
-			}()
-			return events, errc
-		},
+func TestRunHealthWindow_CPUStatDelta(t *testing.T) {
+	c := newInProcessClient(true)
+	cfg := fastWindow()
+	var calls int
+	cfg.CPUStat = func() (uint64, uint64, error) {
+		calls++
+		return uint64(calls) * 50_000, uint64(calls) * 3, nil
 	}
-	reach := &FakeReachabilityChecker{ReachableValue: true}
-	reason, ok := runHealthWindow(context.Background(), c, reach, HealthWindowConfig{Window: time.Hour, PollInterval: time.Hour}, nil)
-	if ok || reason != reasonHealthNotServing {
-		t.Fatalf("reason=%s ok=%v, want reasonHealthNotServing/false (a tetra.ErrTimeout 1 hour before the deadline must not shorten the window)", reason, ok)
+	out := run(t, c, newFakeSentinel(t, c.deliver), true, cfg)
+	if !out.passed || !out.stats.CPUOK || out.stats.CPUUsec != 50_000 || out.stats.Throttled != 3 {
+		t.Fatalf("passed=%t stats=%+v", out.passed, out.stats)
+	}
+	if !strings.Contains(out.stats.Summary(), "nr_throttled=+3") {
+		t.Fatalf("summary: %s", out.stats.Summary())
 	}
 }
 
-// TestRunHealthWindow_EventsClosedPendingTimeoutNearDeadline_Passes
-// exercises the events-closed branch's pendingErrIsTimeout path (R3-4's
-// second race instance) under step-03b-review.md R3B-2's same tolerance
-// rule: events closes (ok=false) with an already-buffered tetra.ErrTimeout
-// sitting in errc, and the window is short enough that this is within
-// tolerance of its own deadline.
-func TestRunHealthWindow_EventsClosedPendingTimeoutNearDeadline_Passes(t *testing.T) {
-	c := &ctxControlledClient{
-		healthy: true,
-		getEvents: func(context.Context) (<-chan tetra.Event, <-chan error) {
-			events := make(chan tetra.Event)
-			errc := make(chan error, 1)
-			errc <- fmt.Errorf("%w: GetEvents", tetra.ErrTimeout)
-			close(events)
-			close(errc)
-			return events, errc
-		},
+func TestHealthWindowConfig_MaxWindowNeverBelowWindow(t *testing.T) {
+	cfg := HealthWindowConfig{Window: time.Hour, MaxWindow: time.Minute}
+	if cfg.maxWindow() != time.Hour {
+		t.Fatalf("maxWindow = %s", cfg.maxWindow())
 	}
-	reach := &FakeReachabilityChecker{ReachableValue: true}
-	reason, ok := runHealthWindow(context.Background(), c, reach, HealthWindowConfig{Window: time.Second, PollInterval: time.Hour}, nil)
-	if !ok {
-		t.Fatalf("reason=%s ok=%v, want ok=true (events closed with a pending tetra.ErrTimeout within tolerance of the deadline)", reason, ok)
-	}
-}
-
-// TestRunHealthWindow_EventsClosedPendingTimeoutWellBeforeDeadline_Fails
-// is the events-closed branch's counterpart to
-// TestRunHealthWindow_ErrTimeoutWellBeforeDeadline_Fails: the same
-// already-buffered tetra.ErrTimeout, but with the window far from its
-// deadline, must fail health rather than pass it.
-func TestRunHealthWindow_EventsClosedPendingTimeoutWellBeforeDeadline_Fails(t *testing.T) {
-	c := &ctxControlledClient{
-		healthy: true,
-		getEvents: func(context.Context) (<-chan tetra.Event, <-chan error) {
-			events := make(chan tetra.Event)
-			errc := make(chan error, 1)
-			errc <- fmt.Errorf("%w: GetEvents", tetra.ErrTimeout)
-			close(events)
-			close(errc)
-			return events, errc
-		},
-	}
-	reach := &FakeReachabilityChecker{ReachableValue: true}
-	reason, ok := runHealthWindow(context.Background(), c, reach, HealthWindowConfig{Window: time.Hour, PollInterval: time.Hour}, nil)
-	if ok || reason != reasonHealthNotServing {
-		t.Fatalf("reason=%s ok=%v, want reasonHealthNotServing/false (a pending tetra.ErrTimeout 1 hour before the deadline must not shorten the window)", reason, ok)
-	}
-}
-
-// TestRunHealthWindow_StreamClosesExactlyAtDeadline_Passes mirrors
-// TestRunHealthWindow_ErrorExactlyAtDeadline_Passes for a clean close
-// instead of an error: internal/tetra.GetEvents closes both channels,
-// without sending, exactly when its ctx ends (client.go's ctx.Err()
-// check) — ending up here as events closing (ok=false) right at the
-// deadline, which must still pass.
-func TestRunHealthWindow_StreamClosesExactlyAtDeadline_Passes(t *testing.T) {
-	c := &ctxControlledClient{
-		healthy: true,
-		getEvents: func(ctx context.Context) (<-chan tetra.Event, <-chan error) {
-			events := make(chan tetra.Event)
-			errc := make(chan error, 1)
-			go func() {
-				defer close(events)
-				defer close(errc)
-				<-ctx.Done()
-			}()
-			return events, errc
-		},
-	}
-	reach := &FakeReachabilityChecker{ReachableValue: true}
-	reason, ok := runHealthWindow(context.Background(), c, reach, HealthWindowConfig{Window: 50 * time.Millisecond, PollInterval: 10 * time.Millisecond}, nil)
-	if !ok {
-		t.Fatalf("reason=%s ok=%v, want ok=true (the stream closing exactly at the deadline must not fail an otherwise-healthy window)", reason, ok)
+	if (HealthWindowConfig{}).maxWindow() != 600*time.Second {
+		t.Fatal("default maxWindow is not 600s")
 	}
 }
 
 func TestCheckHealthServing_EmptyResponseIsNotServing(t *testing.T) {
-	c := &inProcessClient{healthy: true}
-	// Override GetHealth via a thin wrapper that returns an empty slice.
+	c := newInProcessClient(true)
 	_, ok := checkHealthServing(context.Background(), emptyHealthClient{c})
 	if ok {
 		t.Fatal("checkHealthServing treated an empty HealthStatus list as serving")

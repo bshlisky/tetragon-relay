@@ -144,22 +144,28 @@ const (
 	// MaxApplyHealthWindow bounds a configured health window from above.
 	MaxApplyHealthWindow = 600 * time.Second
 
+	// SentinelInterval is how often the health window fires a freshness
+	// sentinel (step-07b-decisions-3.md F0.1; ADR 0042): once at the
+	// window's start and every SentinelInterval after.
+	SentinelInterval = 2 * time.Second
+	// SentinelMaxLatency is the longest a sentinel may take from firing to
+	// arriving on the window's event stream. A sentinel later than this
+	// (or never seen) makes the observation path unverifiable and restarts
+	// the clean span the window needs (F0.1).
+	SentinelMaxLatency = 3 * time.Second
+	// SentinelSettleMargin is how long the window keeps listening after
+	// the closing sentinel arrived, for per-CPU ring-buffer reordering
+	// (F0.1).
+	SentinelSettleMargin = 1 * time.Second
+
 	// DefaultApplySurgeThreshold is the default enforcement-events-per-
 	// minute rollback threshold (step 3 prompt Part D5).
 	DefaultApplySurgeThreshold = 500
 
-	// HealthWindowDeadlineTolerance bounds how early a stream timeout
-	// (tetra.ErrTimeout, on either runHealthWindow select branch that
-	// observes one) may be treated as "the health window's own deadline
-	// arrived" rather than a real, independent timeout from Tetragon
-	// (step-03b-review.md R3B-2). A timeout observed with more than this
-	// much of the window still remaining is never the window's own
-	// GetEvents(windowCtx, ...) deadline — internal/tetra.GetEvents
-	// applies windowCtx directly with no shorter timeout of its own
-	// (Part B3) — so treating it as "the window completed" would let a
-	// misbehaving or compromised Tetragon shorten a 60s window to
-	// seconds without the health check ever noticing.
-	HealthWindowDeadlineTolerance = 2 * time.Second
+	// (HealthWindowDeadlineTolerance, step-03b-review.md R3B-2, was
+	// retired by ADR 0042: the health window no longer sets a deadline on
+	// its own GetEvents stream, so no timeout from it can mean "the window
+	// ended".)
 
 	// MaxLoadedPolicyNameBytes is Tetragon v1.8.0's own name limit
 	// (RFC 1123 DNS subdomain, apivalidation.NameIsDNSSubdomain; ADR

@@ -271,6 +271,9 @@ func (w *ApplyWorker) processBundle(ctx context.Context, envelope []byte) {
 		res.LoadedDigestAfter = digest
 	}
 	w.settle(events)
+	if res.Status == controlv1.ApplyResult_ROLLED_BACK_UNVERIFIABLE {
+		w.cfg.Alerter.Raise(controlv1.Alert_HEALTH_UNVERIFIABLE, fmt.Sprintf("bundle %x epoch %d: %s", res.BundleDigest, res.Epoch, res.Detail))
+	}
 	if degraded != "" {
 		// ADR 0037: ROLLBACK_FAILED has its own alert kind; the DRIFT
 		// alert stays, since Tetragon's loaded set may differ from LKG.
@@ -316,6 +319,12 @@ func (w *ApplyWorker) mapApplyOutcome(res *controlv1.ApplyResult, ar *apply.Resu
 		return []Event{EventHealthPass}, ""
 	case apply.StatusRolledBack:
 		res.Status = controlv1.ApplyResult_ROLLED_BACK
+		res.Detail = ar.Detail
+		return rolledBack, ""
+	case apply.StatusRolledBackUnverifiable:
+		// ADR 0042: LKG is loaded again, as for ROLLED_BACK; the
+		// HEALTH_UNVERIFIABLE alert is raised by processBundle.
+		res.Status = controlv1.ApplyResult_ROLLED_BACK_UNVERIFIABLE
 		res.Detail = ar.Detail
 		return rolledBack, ""
 	case apply.StatusRollbackFailed:

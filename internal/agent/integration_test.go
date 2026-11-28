@@ -148,6 +148,7 @@ func TestIntegration_AgentRestartPersistsEpochAndLKG(t *testing.T) {
 	e1 := apply.NewEngine(client, apply.RealPolicyParser{}, res1.Store, &apply.FakeReachabilityChecker{ReachableValue: true}, &apply.FakeAuditor{}, apply.Config{
 		PersistDir:   t.TempDir(),
 		HealthWindow: apply.HealthWindowConfig{Window: 15 * time.Second, PollInterval: time.Second},
+		Sentinel:     integrationSentinel(t),
 	})
 
 	policyYAML := itestPolicyYAML("itest-agent-restart")
@@ -278,4 +279,20 @@ func TestIntegration_AgentRestartPersistsEpochAndLKG(t *testing.T) {
 	if err := res2.Store.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
+}
+
+// integrationSentinel is the real apply.FileSentinel for this test binary
+// (ADR 0042), in a short fresh directory.
+func integrationSentinel(t *testing.T) *apply.FileSentinel {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "snt")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	s, err := apply.NewSelfSentinel(dir)
+	if err != nil {
+		t.Fatalf("NewSelfSentinel: %v", err)
+	}
+	return s
 }

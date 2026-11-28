@@ -42,6 +42,7 @@ func newIntegrationEngineWithPersistDir(t *testing.T, client *tetra.Client, pers
 	return NewEngine(client, RealPolicyParser{}, NewFakeLKGStore(), &FakeReachabilityChecker{ReachableValue: true}, &FakeAuditor{}, Config{
 		PersistDir:   persistDir,
 		HealthWindow: HealthWindowConfig{Window: 15 * time.Second, PollInterval: time.Second},
+		Sentinel:     integrationSentinel(t),
 	})
 }
 
@@ -125,6 +126,7 @@ func newIntegrationEngineWithAuditor(t *testing.T, client *tetra.Client) (*Engin
 	e := NewEngine(client, RealPolicyParser{}, NewFakeLKGStore(), &FakeReachabilityChecker{ReachableValue: true}, auditor, Config{
 		PersistDir:   t.TempDir(),
 		HealthWindow: HealthWindowConfig{Window: 15 * time.Second, PollInterval: time.Second},
+		Sentinel:     integrationSentinel(t),
 	})
 	return e, auditor
 }
