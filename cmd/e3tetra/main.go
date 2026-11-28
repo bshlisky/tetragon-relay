@@ -42,13 +42,15 @@ func run(args []string) error {
 	socket := fs.String("socket", "/var/run/tetragon/tetragon.sock", "Tetragon gRPC unix socket")
 	tetragonBinary := fs.String("tetragon-binary", "", "path to the Tetragon daemon binary (for internal/tetra's own socket-peer verification)")
 	relayGroup := fs.String("relay-group", "tetragon-relay", "POSIX group the socket must be owned by")
-	mode := fs.String("mode", "", "preload | list | check | delete | env-probe")
+	mode := fs.String("mode", "", "preload | list | check | delete | env-probe | add | drain")
 	domain := fs.String("domain", "", "delete mode: the policy's domain (relayd loads its policies in domain \"relay-managed\")")
 	policyName := fs.String("policy-name", "e3-baseline", "preload mode: the TracingPolicy's metadata.name")
 	expectNames := fs.String("expect-names", "", "check mode: comma-separated list of policy names that must be exactly what is loaded (order-independent)")
 	probeBinary := fs.String("binary", "", "env-probe mode: the exec'd binary whose events to inspect")
 	probeEnv := fs.String("env-name", "", "env-probe mode: the environment variable name to look for (its value is never printed)")
-	probeFor := fs.Duration("duration", 20*time.Second, "env-probe mode: how long to watch")
+	probeFor := fs.Duration("duration", 20*time.Second, "env-probe and drain modes: how long to watch")
+	policyFile := fs.String("file", "", "add mode: a TracingPolicy YAML file to load (no domain)")
+	drainRate := fs.Int("rate", 0, "drain mode: read at most this many messages per second (0: as fast as possible)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -87,8 +89,22 @@ func run(args []string) error {
 		return nil
 	case "env-probe":
 		return envProbe(client, *probeBinary, *probeEnv, *probeFor)
+	case "add":
+		// step-07b-decisions-3.md F1: the canary kill policy for the
+		// Tetragon memory rounds.
+		doc, err := os.ReadFile(*policyFile) //nolint:gosec // G304: a test harness path
+		if err != nil {
+			return err
+		}
+		if err := client.AddTracingPolicy(ctx, string(doc), ""); err != nil {
+			return fmt.Errorf("AddTracingPolicy(%s): %w", *policyFile, err)
+		}
+		fmt.Printf("e3tetra: loaded %s\n", *policyFile)
+		return nil
+	case "drain":
+		return drain(client, *probeFor, *drainRate)
 	default:
-		return fmt.Errorf("--mode must be preload, list, check, delete or env-probe, got %q", *mode)
+		return fmt.Errorf("--mode must be preload, list, check, delete, env-probe, add or drain, got %q", *mode)
 	}
 }
 
@@ -226,6 +242,56 @@ func envProbe(client *tetra.Client, binary, envName string, d time.Duration) err
 	fmt.Printf("e3tetra: ENVPROBE binary=%s exec_events=%d with_env=%d with_%s=%d env_names=%v\n", binary, execs, withEnv, envName, withName, keys)
 	if execs == 0 {
 		return fmt.Errorf("no exec event of %s in %s", binary, d)
+	}
+	return nil
+}
+
+// drain is a GetEvents client for every event type, reading at most rate
+// messages per second (0: unpaced) for d, then printing what it received
+// (step-07b-decisions-3.md F1: Tetragon's memory under a flood with a
+// client shaped like relayd at its quota, or like T-S6's slow one).
+func drain(client *tetra.Client, d time.Duration, rate int) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stop := time.AfterFunc(d, cancel)
+	defer stop.Stop()
+	var every time.Duration
+	if rate > 0 {
+		every = time.Second / time.Duration(rate)
+	}
+	next := time.Now()
+	var n, execs, exits, kprobes int
+	types := []tetragonpb.EventType{tetragonpb.EventType_PROCESS_EXEC, tetragonpb.EventType_PROCESS_EXIT, tetragonpb.EventType_PROCESS_KPROBE}
+	err := client.StreamEvents(ctx, types, nil, func(raw []byte) bool {
+		n++
+		var ev tetragonpb.GetEventsResponse
+		if proto.Unmarshal(raw, &ev) == nil {
+			switch {
+			case ev.GetProcessExec() != nil:
+				execs++
+			case ev.GetProcessExit() != nil:
+				exits++
+			case ev.GetProcessKprobe() != nil:
+				kprobes++
+			}
+		}
+		if every > 0 {
+			next = next.Add(every)
+			if w := time.Until(next); w > 0 {
+				select {
+				case <-time.After(w):
+				case <-ctx.Done():
+					return false
+				}
+			} else if w < -time.Second {
+				next = time.Now()
+			}
+		}
+		return ctx.Err() == nil
+	})
+	fmt.Printf("DRAIN received=%d exec=%d exit=%d kprobe=%d rate_limit=%d/s secs=%.0f\n", n, execs, exits, kprobes, rate, d.Seconds())
+	if err != nil && ctx.Err() == nil {
+		return err
 	}
 	return nil
 }

@@ -341,6 +341,63 @@ jobs:
         if: always()
         run: sudo systemctl stop tetragon.service || true
 
+  # step-07b-decisions-3.md F1 (report only): Tetragon v1.8.0's memory
+  # under an exec flood, with each queue/cache flag its --help lists set
+  # small, and whether the canary kill still works. Its own runner, in
+  # parallel with e3, so e3's timing is unaffected. It fails only on
+  # harness errors, never on what it measures.
+  tetragon-memory:
+    timeout-minutes: 75
+    runs-on: ubuntu-24.04
+    needs: [ci, integration]
+    env:
+      TETRAGON_VERSION: v1.8.0
+      TETRAGON_TARBALL_SHA256: "e88691c5f05a2a61aba58974a080603050b924c7f13ecc06f3d05172feb05f59"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Download and verify Tetragon release tarball
+        run: |
+          set -euo pipefail
+          url="https://github.com/cilium/tetragon/releases/download/${TETRAGON_VERSION}/tetragon-${TETRAGON_VERSION}-amd64.tar.gz"
+          curl -fsSL -o tetragon.tar.gz "$url"
+          echo "${TETRAGON_TARBALL_SHA256}  tetragon.tar.gz" | sha256sum -c -
+          mkdir -p /tmp/tetragon-install
+          tar -xzf tetragon.tar.gz -C /tmp/tetragon-install
+          tetragon_bin="$(find /tmp/tetragon-install -maxdepth 6 -type f -name tetragon | head -1)"
+          chmod +x "${tetragon_bin}"
+          echo "TETRAGON_BIN=${tetragon_bin}" >> "$GITHUB_ENV"
+
+      - name: Group, socket directory and tools
+        run: |
+          set -euo pipefail
+          sudo groupadd -f tetragon-relay
+          sudo mkdir -p /var/run/tetragon
+          sudo chown root:tetragon-relay /var/run/tetragon
+          sudo usermod -a -G tetragon-relay "$(id -un)"
+          sudo mkdir -p /opt/e3bin
+          go build -tags e3 -o /tmp/e3tetra ./cmd/e3tetra
+          go build -tags e3 -o /tmp/e3execflood ./cmd/e3execflood
+          sudo cp /tmp/e3tetra /tmp/e3execflood /opt/e3bin/
+          sudo chmod 0755 /opt/e3bin/e3tetra /opt/e3bin/e3execflood
+
+      - name: F1 rounds (report only)
+        run: |
+          export BIN_DIR=/opt/e3bin
+          export TETRAGON_BIN="${TETRAGON_BIN}"
+          sg tetragon-relay -c 'bash scripts/f1-tetragon-memory.sh'
+
+      - name: Stop Tetragon
+        if: always()
+        run: sudo systemctl stop tetragon.service || true
+
   # docs/prompts/step-06a-e3-prompt.md: relayd as a real process under the
   # production systemd unit's own sandbox settings (reproduced verbatim by
   # scripts/e3-run.sh, parsed directly from packaging/systemd/
