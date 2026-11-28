@@ -63,6 +63,11 @@ message Hello {
   uint64 trust_root_version = 11;
   bytes  pcr_quote          = 12; // optional TPM quote over nonce from HelloAck
   bytes  config_digest      = 13; // sha256 of relay.yaml (section 8.5); step 1 review A8
+  // "on", "off" or "unknown": whether the running Tetragon collects
+  // process environment variables (relay-probe's host fact;
+  // step-07b-decisions-3.md F4). "on" also raises
+  // Alert{TETRAGON_ENV_COLLECTION} once per connection.
+  string tetragon_env_collection = 14;
 }
 
 message Heartbeat {
@@ -153,6 +158,10 @@ message Alert {
     // A health window ended unverifiable; detail carries the measured
     // sentinel latencies (ADR 0042).
     HEALTH_UNVERIFIABLE = 8;
+    // The running Tetragon collects process environment variables
+    // (Hello.tetragon_env_collection == "on"); once per connection
+    // (step-07b-decisions-3.md F4).
+    TETRAGON_ENV_COLLECTION = 9;
   }
   Kind   kind      = 1;
   string detail    = 2; // bounded 4 KiB, no secrets

@@ -55,3 +55,19 @@ func (a *Alerter) Raise(kind controlv1.Alert_Kind, detail string) bool {
 	}}})
 	return true
 }
+
+// EnvCollectionConnected returns an OnConnected hook that raises Alert
+// TETRAGON_ENV_COLLECTION once per connection when the host fact says the
+// running Tetragon collects process environment variables
+// (step-07b-decisions-3.md F4). It is a privacy finding: enforcement
+// bundles still apply. next, if non-nil, runs first.
+func EnvCollectionConnected(alerter *Alerter, envCollection string, next func()) func() {
+	return func() {
+		if next != nil {
+			next()
+		}
+		if envCollection == "on" {
+			alerter.Raise(controlv1.Alert_TETRAGON_ENV_COLLECTION, "the running Tetragon collects process environment variables (--enable-process-environment-variables or its equivalent); relayd filters and redacts them, but Tetragon still holds them and serves them to other clients of its socket. Production configuration ships without it.")
+		}
+	}
+}

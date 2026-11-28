@@ -997,6 +997,12 @@ scenario_ts1() {
 		ok=false
 	fi
 	grep -qE 'telemetry_last_seq=[1-9]' /tmp/e3controller-ts1.log || { echo "heartbeat telemetry_last_seq never set" >&2; ok=false; }
+	# F4 (step-07b-decisions-3.md): e3's Tetragon runs with the
+	# environment flag, so relay-probe's host fact is "on" (from the flag)
+	# and relayd raises TETRAGON_ENV_COLLECTION once per connection.
+	sudo grep -o '"tetragon_env_collection[a-z_]*":"[^"]*"' /run/tetragon-relay/host-facts.json | sed 's/^/F4 host fact: /'
+	sudo grep -q '"tetragon_env_collection":"on"' /run/tetragon-relay/host-facts.json || { echo "F4: host fact is not tetragon_env_collection=on" >&2; ok=false; }
+	grep -q 'kind=TETRAGON_ENV_COLLECTION' <<<"$(scenario_journal)" || { echo "F4: no TETRAGON_ENV_COLLECTION alert" >&2; ok=false; }
 	scenario_journal
 	record_result T-S1 "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
 }

@@ -151,6 +151,10 @@ const (
 	// A health window ended unverifiable; detail carries the measured
 	// sentinel latencies (ADR 0042).
 	Alert_HEALTH_UNVERIFIABLE Alert_Kind = 8
+	// The running Tetragon collects process environment variables
+	// (Hello.tetragon_env_collection == "on"); once per connection
+	// (step-07b-decisions-3.md F4).
+	Alert_TETRAGON_ENV_COLLECTION Alert_Kind = 9
 )
 
 // Enum value maps for Alert_Kind.
@@ -165,17 +169,19 @@ var (
 		6: "TRUST_UPDATE_REJECTED",
 		7: "ROLLBACK_FAILED",
 		8: "HEALTH_UNVERIFIABLE",
+		9: "TETRAGON_ENV_COLLECTION",
 	}
 	Alert_Kind_value = map[string]int32{
-		"KIND_UNSPECIFIED":      0,
-		"DRIFT":                 1,
-		"TETRAGON_UNHEALTHY":    2,
-		"TRUST_EXPIRED":         3,
-		"TAMPER":                4,
-		"GUARDRAIL_REJECT":      5,
-		"TRUST_UPDATE_REJECTED": 6,
-		"ROLLBACK_FAILED":       7,
-		"HEALTH_UNVERIFIABLE":   8,
+		"KIND_UNSPECIFIED":        0,
+		"DRIFT":                   1,
+		"TETRAGON_UNHEALTHY":      2,
+		"TRUST_EXPIRED":           3,
+		"TAMPER":                  4,
+		"GUARDRAIL_REJECT":        5,
+		"TRUST_UPDATE_REJECTED":   6,
+		"ROLLBACK_FAILED":         7,
+		"HEALTH_UNVERIFIABLE":     8,
+		"TETRAGON_ENV_COLLECTION": 9,
 	}
 )
 
@@ -571,8 +577,13 @@ type Hello struct {
 	TrustRootVersion uint64            `protobuf:"varint,11,opt,name=trust_root_version,json=trustRootVersion,proto3" json:"trust_root_version,omitempty"`
 	PcrQuote         []byte            `protobuf:"bytes,12,opt,name=pcr_quote,json=pcrQuote,proto3" json:"pcr_quote,omitempty"`             // optional TPM quote over nonce from HelloAck
 	ConfigDigest     []byte            `protobuf:"bytes,13,opt,name=config_digest,json=configDigest,proto3" json:"config_digest,omitempty"` // sha256 of relay.yaml (section 8.5); step 1 review A8
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// "on", "off" or "unknown": whether the running Tetragon collects
+	// process environment variables (relay-probe's host fact;
+	// step-07b-decisions-3.md F4). "on" also raises
+	// Alert{TETRAGON_ENV_COLLECTION} once per connection.
+	TetragonEnvCollection string `protobuf:"bytes,14,opt,name=tetragon_env_collection,json=tetragonEnvCollection,proto3" json:"tetragon_env_collection,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *Hello) Reset() {
@@ -694,6 +705,13 @@ func (x *Hello) GetConfigDigest() []byte {
 		return x.ConfigDigest
 	}
 	return nil
+}
+
+func (x *Hello) GetTetragonEnvCollection() string {
+	if x != nil {
+		return x.TetragonEnvCollection
+	}
+	return ""
 }
 
 type Heartbeat struct {
@@ -1453,7 +1471,7 @@ const file_relay_control_v1_control_proto_rawDesc = "" +
 	"\x0frotate_identity\x18\r \x01(\v2 .relay.control.v1.RotateIdentityH\x00R\x0erotateIdentity\x12B\n" +
 	"\ftrust_update\x18\x0e \x01(\v2\x1d.relay.control.v1.TrustUpdateH\x00R\vtrustUpdate\x12;\n" +
 	"\tterminate\x18\x0f \x01(\v2\x1b.relay.control.v1.TerminateH\x00R\tterminateB\x06\n" +
-	"\x04body\"\xc7\x04\n" +
+	"\x04body\"\xff\x04\n" +
 	"\x05Hello\x12\x1b\n" +
 	"\thost_uuid\x18\x01 \x01(\tR\bhostUuid\x12#\n" +
 	"\ragent_version\x18\x02 \x01(\tR\fagentVersion\x12,\n" +
@@ -1468,7 +1486,8 @@ const file_relay_control_v1_control_proto_rawDesc = "" +
 	" \x01(\fR\x0ftrustRootDigest\x12,\n" +
 	"\x12trust_root_version\x18\v \x01(\x04R\x10trustRootVersion\x12\x1b\n" +
 	"\tpcr_quote\x18\f \x01(\fR\bpcrQuote\x12#\n" +
-	"\rconfig_digest\x18\r \x01(\fR\fconfigDigest\x1a9\n" +
+	"\rconfig_digest\x18\r \x01(\fR\fconfigDigest\x126\n" +
+	"\x17tetragon_env_collection\x18\x0e \x01(\tR\x15tetragonEnvCollection\x1a9\n" +
 	"\vEpochsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\xc1\x02\n" +
@@ -1526,11 +1545,11 @@ const file_relay_control_v1_control_proto_rawDesc = "" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05state\x18\x02 \x01(\tR\x05state\x12\x18\n" +
 	"\aenabled\x18\x03 \x01(\bR\aenabled\x12)\n" +
-	"\x10canonical_sha256\x18\x04 \x01(\fR\x0fcanonicalSha256\"\xae\x02\n" +
+	"\x10canonical_sha256\x18\x04 \x01(\fR\x0fcanonicalSha256\"\xcb\x02\n" +
 	"\x05Alert\x120\n" +
 	"\x04kind\x18\x01 \x01(\x0e2\x1c.relay.control.v1.Alert.KindR\x04kind\x12\x16\n" +
 	"\x06detail\x18\x02 \x01(\tR\x06detail\x12\x1b\n" +
-	"\tunix_time\x18\x03 \x01(\x03R\bunixTime\"\xbd\x01\n" +
+	"\tunix_time\x18\x03 \x01(\x03R\bunixTime\"\xda\x01\n" +
 	"\x04Kind\x12\x14\n" +
 	"\x10KIND_UNSPECIFIED\x10\x00\x12\t\n" +
 	"\x05DRIFT\x10\x01\x12\x16\n" +
@@ -1541,7 +1560,8 @@ const file_relay_control_v1_control_proto_rawDesc = "" +
 	"\x10GUARDRAIL_REJECT\x10\x05\x12\x19\n" +
 	"\x15TRUST_UPDATE_REJECTED\x10\x06\x12\x13\n" +
 	"\x0fROLLBACK_FAILED\x10\a\x12\x17\n" +
-	"\x13HEALTH_UNVERIFIABLE\x10\b\"^\n" +
+	"\x13HEALTH_UNVERIFIABLE\x10\b\x12\x1b\n" +
+	"\x17TETRAGON_ENV_COLLECTION\x10\t\"^\n" +
 	"\bHelloAck\x12\x14\n" +
 	"\x05nonce\x18\x01 \x01(\fR\x05nonce\x12<\n" +
 	"\x1aheartbeat_interval_seconds\x18\x02 \x01(\rR\x18heartbeatIntervalSeconds\"*\n" +

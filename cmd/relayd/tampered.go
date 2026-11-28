@@ -163,7 +163,7 @@ func runTampered(cfg *config.Config, auditor *agentAuditor, tpmConn transport.TP
 			},
 		},
 		Hello: func() controlclient.HelloFields {
-			return buildHelloFields(sessionCtx, cfg, nil, tetraClient, bootID, buildDigest, snapshot)
+			return buildHelloFields(sessionCtx, cfg, nil, tetraClient, bootID, buildDigest, hostCaps.TetragonEnvCollection(), snapshot)
 		},
 		ControlLoop:       controlLoop,
 		Clock:             time.Now,

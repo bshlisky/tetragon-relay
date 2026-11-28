@@ -827,3 +827,24 @@ func testOutbox() *Outbox {
 	}
 	return o
 }
+
+func TestEnvCollectionConnected(t *testing.T) {
+	o, err := NewOutbox(&FakeAuditor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alerter, err := NewAlerter(o, &FakeAuditor{}, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ran := 0
+	EnvCollectionConnected(alerter, "off", func() { ran++ })()
+	EnvCollectionConnected(alerter, "unknown", nil)()
+	if ran != 1 || o.Len() != 0 {
+		t.Fatalf("ran=%d queued=%d, want the hook run and no alert", ran, o.Len())
+	}
+	EnvCollectionConnected(alerter, "on", nil)()
+	if m := o.Peek(); o.Len() != 1 || m.GetAlert().GetKind() != controlv1.Alert_TETRAGON_ENV_COLLECTION {
+		t.Fatalf("queued %v, want one TETRAGON_ENV_COLLECTION alert", m)
+	}
+}

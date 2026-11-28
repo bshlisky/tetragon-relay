@@ -30,6 +30,9 @@ type HelloFields struct {
 	TrustRootDigest  []byte
 	TrustRootVersion uint64
 	ConfigDigest     []byte
+	// TetragonEnvCollection is the host fact "on", "off" or "unknown"
+	// (step-07b-decisions-3.md F4).
+	TetragonEnvCollection string
 	// PCRQuote is intentionally left nil/unset by every caller in this
 	// step: remote attestation (architecture doc 6.3 step 3; the PCR
 	// quote over HelloAck's nonce) is a later step.
@@ -50,6 +53,8 @@ func (f HelloFields) toProto() *controlv1.Hello {
 		TrustRootDigest:  f.TrustRootDigest,
 		TrustRootVersion: f.TrustRootVersion,
 		ConfigDigest:     f.ConfigDigest,
+
+		TetragonEnvCollection: f.TetragonEnvCollection,
 	}
 }
 

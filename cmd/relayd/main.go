@@ -413,7 +413,7 @@ func run(configPath string, auditor *agentAuditor) error {
 			},
 		},
 		Hello: func() controlclient.HelloFields {
-			return buildHelloFields(sessionCtx, cfg, startupResult, tetraClient, bootID, buildDigest, snapshotProvider)
+			return buildHelloFields(sessionCtx, cfg, startupResult, tetraClient, bootID, buildDigest, hostCaps.TetragonEnvCollection(), snapshotProvider)
 		},
 		ControlLoop:       controlLoop,
 		Clock:             time.Now,
@@ -423,7 +423,7 @@ func run(configPath string, auditor *agentAuditor) error {
 		HeartbeatInterval: cfg.HeartbeatInterval,
 		Outbox:            outbox,
 		Link:              link,
-		OnConnected:       trustExpiry.Connected,
+		OnConnected:       agent.EnvCollectionConnected(alerter, hostCaps.TetragonEnvCollection(), trustExpiry.Connected),
 		OnHeartbeat:       trustExpiry.Check,
 	}
 

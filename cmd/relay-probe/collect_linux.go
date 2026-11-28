@@ -163,6 +163,8 @@ func collect(tetragonBinaryPath string) (*hostprobe.HostFacts, error) {
 		return nil, fmt.Errorf("hash Tetragon binary %s: %w", tetragonBinaryPath, err)
 	}
 
+	envCollection, envSource := readTetragonEnvCollection(tetragonBinaryPath)
+
 	return &hostprobe.HostFacts{
 		SchemaVersion:        hostprobe.HostFactsSchemaVersion,
 		BootID:               bootID,
@@ -179,5 +181,8 @@ func collect(tetragonBinaryPath string) (*hostprobe.HostFacts, error) {
 		SELinuxMode:          readSELinuxMode(),
 		TetragonBinaryPath:   tetragonBinaryPath,
 		TetragonBinarySHA256: sha,
+
+		TetragonEnvCollection:       envCollection,
+		TetragonEnvCollectionSource: envSource,
 	}, nil
 }

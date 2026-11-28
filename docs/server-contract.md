@@ -51,6 +51,14 @@ Sent as the very first `AgentMessage` after the TLS handshake completes (archite
 `6.3` step 3). Field-by-field semantics and source are in section 11 below (this step's
 Hello field-by-field table, since this repository is the one that fills these in).
 
+`tetragon_env_collection` (field 14, step-07b-decisions-3.md F4) is `"on"`, `"off"` or
+`"unknown"`: whether the host's running Tetragon collects process environment variables,
+as relay-probe found it (flag, `TETRAGON_*` environment or configuration file) at unit
+start. Production ships with it off. `"on"` is a privacy finding, not an enforcement one:
+bundles still apply, and the agent raises `Alert{TETRAGON_ENV_COLLECTION}` once per
+connection. `"unknown"` means the host facts were missing or stale, or no Tetragon
+process was found.
+
 ### 1.4 `Heartbeat`, `control.proto:68-75`
 
 Sent every 15 s in steady state (architecture `6.3` step 5). `epochs` and `loaded_digest`
@@ -361,6 +369,7 @@ Status refinements:
 | `GUARDRAIL_REJECT` | A bundle was rejected `REJECTED_GUARDRAIL` or `REJECTED_CAPABILITY` by a guardrail. `detail`: the bundle digest and the reason, which names the rule (`guardrail rejection: G5`). | Fix the bundle; the agent's guardrails are compiled in. |
 | `TRUST_UPDATE_REJECTED` | A `TrustUpdate` (or a step of it) was not adopted (section 10.5). | Check the root chain you sent. |
 | `ROLLBACK_FAILED` | A health-window rollback could not re-assert LKG (`ApplyResult.ROLLBACK_FAILED`). The agent is `DEGRADED`; Tetragon's loaded set may differ from LKG. | Treat as drift that the agent could not repair; architecture 10.4. |
+| `TETRAGON_ENV_COLLECTION` | Once per connection while `Hello.tetragon_env_collection` is `"on"` (section 1.3). relayd excludes and redacts environments, but Tetragon still collects them for every exec, holds them, and serves them to any other client of its socket or file exporter. | Fix the host's Tetragon configuration (drop `--enable-process-environment-variables`). |
 | `HEALTH_UNVERIFIABLE` | A health window ended `ROLLED_BACK_UNVERIFIABLE` (ADR 0042). `detail`: `bundle <digest> epoch <n>: ` and the `ApplyResult.detail` above, with the measured sentinel latencies. | The host's event path is behind (an exec flood, or Tetragon's own backlog). Investigate the host's load; an enforce rollout to it is delayed, not lost. |
 | `KIND_UNSPECIFIED` or any other number | Never sent by this agent. | Log and keep it as an alert of unknown kind; never drop it. |
 

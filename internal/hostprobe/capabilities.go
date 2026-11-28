@@ -53,6 +53,22 @@ func (c *Capabilities) UsrmergeOK() bool {
 	return c.facts.UsrmergeOK
 }
 
+// TetragonEnvCollection reports the host fact (F4), or
+// EnvCollectionUnknown when the facts are missing or stale or the value is
+// not one of the three known ones.
+func (c *Capabilities) TetragonEnvCollection() string {
+	f, ok := c.Facts()
+	if !ok {
+		return EnvCollectionUnknown
+	}
+	switch f.TetragonEnvCollection {
+	case EnvCollectionOn, EnvCollectionOff:
+		return f.TetragonEnvCollection
+	default:
+		return EnvCollectionUnknown
+	}
+}
+
 // Facts returns the underlying HostFacts if this Capabilities is not fail
 // closed, and (nil, false) otherwise. Callers that need more than the
 // guard.HostCapabilities/UsrmergeOK surface (e.g. an operator-facing

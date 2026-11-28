@@ -14,7 +14,10 @@ import "time"
 // HostFactsSchemaVersion is bumped whenever HostFacts's shape changes in a
 // way old readers must not silently misinterpret. LoadHostCapabilities
 // rejects any other value outright rather than guessing at compatibility.
-const HostFactsSchemaVersion = 1
+//
+// 2: tetragon_env_collection and tetragon_env_collection_source
+// (step-07b-decisions-3.md F4).
+const HostFactsSchemaVersion = 2
 
 // HostFactsPath is the default path cmd/relay-probe writes to and
 // LoadHostCapabilities reads from (step 3 prompt Part C4).
@@ -25,6 +28,15 @@ const HostFactsPath = "/run/tetragon-relay/host-facts.json"
 // read (step 3 prompt Part C1: "else record 'unknown' and treat
 // KprobeOverride as false").
 const ErrorInjectionUnknown = "unknown"
+
+// TetragonEnvCollection values (step-07b-decisions-3.md F4): whether the
+// running Tetragon collects process environment variables
+// (--enable-process-environment-variables).
+const (
+	EnvCollectionOn      = "on"
+	EnvCollectionOff     = "off"
+	EnvCollectionUnknown = "unknown"
+)
 
 // HostFacts is the versioned schema cmd/relay-probe writes to
 // HostFactsPath and this package reads back. Field names are the stable,
@@ -90,4 +102,15 @@ type HostFacts struct {
 	// TetragonBinarySHA256 is the sha256 of the file at
 	// TetragonBinaryPath at probe time, hex-encoded.
 	TetragonBinarySHA256 string `json:"tetragon_binary_sha256"`
+
+	// TetragonEnvCollection is EnvCollectionOn, EnvCollectionOff or
+	// EnvCollectionUnknown: whether the running Tetragon was started with
+	// process environment collection (its flag, environment variable or
+	// configuration file; F4). Production ships without it; "on" is a
+	// privacy finding, not an enforcement one.
+	TetragonEnvCollection string `json:"tetragon_env_collection"`
+	// TetragonEnvCollectionSource says where the value came from (e.g.
+	// "flag", "env", "conf.d:/etc/tetragon/tetragon.conf.d", "default",
+	// or why it is unknown).
+	TetragonEnvCollectionSource string `json:"tetragon_env_collection_source,omitempty"`
 }

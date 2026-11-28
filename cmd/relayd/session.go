@@ -46,13 +46,15 @@ func clientCertificate(chain []*x509.Certificate, signer crypto.Signer) tls.Cert
 // call: Hello is rebuilt fresh on every reconnect attempt, and the
 // binary on disk cannot change out from under an already-running
 // process, so re-hashing it every attempt would be pure waste.
-func buildHelloFields(ctx context.Context, cfg *config.Config, startupResult *agent.StartupResult, tetraClient *tetra.Client, bootID, buildDigest string, snapshot agent.SnapshotProvider) controlclient.HelloFields {
+func buildHelloFields(ctx context.Context, cfg *config.Config, startupResult *agent.StartupResult, tetraClient *tetra.Client, bootID, buildDigest, envCollection string, snapshot agent.SnapshotProvider) controlclient.HelloFields {
 	fields := controlclient.HelloFields{
 		HostUUID:         cfg.HostUUID,
 		AgentVersion:     version,
 		BootID:           bootID,
 		ConfigDigest:     cfg.Digest(),
 		AgentBuildDigest: buildDigest,
+		// F4: relay-probe's host fact ("unknown" without fresh facts).
+		TetragonEnvCollection: envCollection,
 	}
 	if tv, err := tetraClient.GetVersion(ctx); err == nil {
 		fields.TetragonVersion = tv
