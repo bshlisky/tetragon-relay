@@ -183,3 +183,26 @@ func TestCurrentBootID_ErrorIsNonFatal(t *testing.T) {
 	// dependent (linux reads a real file, other platforms always error).
 	_, _ = CurrentBootID()
 }
+
+// step-07b-decisions-3.md F4.
+func TestCapabilities_TetragonEnvCollection(t *testing.T) {
+	withStat(t, goodStat)
+	for in, want := range map[string]string{
+		EnvCollectionOn: EnvCollectionOn, EnvCollectionOff: EnvCollectionOff,
+		EnvCollectionUnknown: EnvCollectionUnknown, "": EnvCollectionUnknown, "maybe": EnvCollectionUnknown,
+	} {
+		f := validFacts("boot-a")
+		f.TetragonEnvCollection = in
+		c, err := Load(writeFacts(t, t.TempDir(), f))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if got := c.TetragonEnvCollection(); got != want {
+			t.Errorf("%q: got %q, want %q", in, got, want)
+		}
+	}
+	c, _ := Load(filepath.Join(t.TempDir(), "missing.json"))
+	if got := c.TetragonEnvCollection(); got != EnvCollectionUnknown {
+		t.Errorf("missing facts: %q", got)
+	}
+}
