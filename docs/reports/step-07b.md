@@ -723,9 +723,15 @@ which found a real enforcement-safety problem (S3.9 Q1).** The gate was not rela
   - relayd's health window never received the kill event, so the window passed and
     epoch 8 was committed (`ApplyResult status=APPLIED epoch=8`).
   - In the same window the canary's kprobe event never reached telemetry.
-  - Tetragon ran at 104 % of one core, and its own counter
-    `tetragon_notify_overflowed_events_total` grows when a client falls behind (T-S6
-    below). This is the starvation path E1.1 was meant to test.
+  - No kprobe event of any kind reached relayd during P5, including the canary's,
+    though its policy was loaded.
+  - Tetragon ran at about 1.05 cores. Its drop counters stayed flat
+    (`notify_overflowed` 104,262 → 104,262; ringbuf lost 0), while **its RSS grew from
+    1.76 GB to 6.97 GB**. That is consistent with Tetragon's own processing falling
+    behind the kernel and queueing, so the events arrive after the window. This is
+    inferred, not proven.
+  - The same failure happened in two runs (46121973985, 46126491257). This is the
+    starvation path E1.1 was meant to test.
 - **T-S6 (V3): Tetragon drops events for a slow client with no signal on the stream.**
   - relayd read at most 100 msgs/s while 2,000 events/s were generated for 60 s.
   - relayd received 12,017 of 120,004 events.
@@ -738,11 +744,16 @@ which found a real enforcement-safety problem (S3.9 Q1).** The gate was not rela
   canary's `SECRET_TOKEN`; that client is the positive control. No event relayd
   forwarded carried an environment (`env=0` throughout). The first run failed on a
   harness bug: my own `grep -F <token>` put the token in argv, and Tetragon reported
-  that exec. Fixed in `940b9d5`; the result is in S3.14.
-- **E1.3 (chunked handoff):** in the local benchmark it costs 10.0–10.4 µs per event,
-  against 13.5–14.7 µs for one channel send per event. The E3 A/B was confounded in its
-  first run, because after the first flood Tetragon itself became the bottleneck. It now
-  runs first, alternating rounds (S3.11).
+  that exec. Fixed in `940b9d5`; V2 then passed (run 46126491257: the token was absent
+  from the decoded events, the collector store, the spool and the journal). T-S1 still
+  failed in that run, because the positive-control probe hit a deadline race (fixed in
+  the next commit).
+- **E1.3 (chunked handoff): no measurable gain in E3.** In the local benchmark it costs
+  10.0–10.4 µs per event, against 13.5–14.7 µs for one channel send per event. In E3,
+  Tetragon becomes the bottleneck after the first flood of the job. In the one pair of
+  rounds run under the same conditions, per-event cost **4,953 ns** per delivered
+  message and chunked **4,812 ns** (about 3 %). relayd was never at its quota in that
+  pair. Keep or drop is S3.9 Q4.
 - **E1.5 (aggregation_options):** v1.8.0 does not aggregate exec or exit. In six
   alternating rounds (three aggregated, three control) all 20 execs and 20 exits
   arrived, with no `aggregation_info`. One earlier aggregated round got 19 execs and 20
@@ -753,7 +764,7 @@ which found a real enforcement-safety problem (S3.9 Q1).** The gate was not rela
 | Decisions committed; progress line for `da61669` | done | `846d5cb`, `2d634ab` |
 | 1 E1.2 P4-RSS CPU report-only; E2 RSS 96/64 MiB; e3 green | done, e3 ✓ (run 46113949265) | `2d634ab` |
 | 2 E1.1 compiled generator; P5 quota assertion; enforce/rollback case | done. **P5 FAIL: rollback not seen under saturation** (S3.9 Q1) | `fbe4b11`, `940b9d5` |
-| 3 E1.3 chunked handoff; gRPC read buffer / window, measured | built; per-event kept as `HandoffChunk 1`; testca knobs; E3 A/B `P4-TUNING` (S3.11) | `d426451`, `940b9d5` |
+| 3 E1.3 chunked handoff; gRPC read buffer / window, measured | built and measured: no meaningful E3 gain (S3.11); keep or drop is Q4 | `d426451`, `940b9d5` |
 | 4 E1.5 aggregation_options (report only) | done: no aggregation of exec/exit | `283e142`, `9457c24` |
 | 5 V1 environment flag from `--help` | done | `b5b1306`, `dd4f3a3` |
 | 5 V2 secret-token proof | built; S3.14 | `b5b1306`, `940b9d5` |
@@ -892,7 +903,9 @@ None.
 
 - Tetragon's RSS in e3 is 3.5–4.4 GB late in the job, with the environment flag on and
   after about 2M exec events. That is Tetragon, not relayd, but it shares the runner.
-- The E3 A/B for E1.3 and the gRPC buffer sizes is pending a clean run (S3.11).
+- **e3's Tetragon degrades after its first flood:** CPU about 1 core → 55–60 %,
+  generated rate 6.2k → 3.9k/s, RSS up to 7 GB. That limits what E3 can measure about
+  relayd late in the job.
 
 ## S3.9 Open questions for the architect
 
@@ -902,10 +915,10 @@ None.
   committed as APPLIED.
 - The health window's stream is separate from telemetry's: it asks only for
   kprobe/uprobe/LSM events of the bundle's policies. Tetragon still did not deliver the
-  event. T-S6 shows Tetragon drops events for clients that fall behind, counted only in
-  `tetragon_notify_overflowed_events_total`.
-- I have not proven which listener's queue overflowed. The next run prints that counter
-  before and after P5.
+  event in time.
+- Tetragon's drop counters were flat during P5, and its RSS grew by 5.2 GB. So this is
+  most likely delay inside Tetragon, not a counted drop. An absent event, delayed or
+  dropped, reads as "healthy".
 - Options:
   - (a) The health window fails safe when it can't trust its event stream. That needs a
     loss signal relayd can read; relayd can't reach Tetragon's metrics endpoint.
@@ -913,7 +926,8 @@ None.
     arrive, and the window fails if it doesn't.
   - (c) Accept the risk and document it: an attacker who can flood exec can also blind
     the health window.
-- My recommendation is (b). It turns "no event" from "healthy" into "unknown".
+- My recommendation is (b). It turns "no event" from "healthy" into "unknown", and it
+  catches delay and drops alike.
 
 **Q2. Detecting Tetragon's silent drops (V3).**
 - The stream carries no sequence number, and RateLimitInfo only comes from Tetragon's
@@ -924,6 +938,14 @@ None.
   estimate, not a count, and it needs a bounded exec_id set.
 - Shall I build that (an `Alert` plus a `dropped` record with `reason=tetragon_overflow`
   and an estimated count), or leave it to Tetragon's metric?
+
+**Q4. E1.3: keep the chunked handoff?** The decision said to keep it if E3 cost drops.
+In E3 it did not drop measurably (4,953 → 4,812 ns per delivered message, one
+comparable pair, relayd below its quota). It is about 25 % cheaper in the local
+benchmark. Neither gRPC setting changed much: window 1 MiB measured 4,191 ns and read
+buffer 256 KiB 4,951 ns, one round each. My reading: E3 can't show the effect because
+Tetragon saturates first. I'd drop the gRPC settings and either revert the handoff or
+keep it on the benchmark's evidence. Your call.
 
 **Q3. Tetragon's environment flag.** V2 needs it, and the help text warns about size
 and performance. Should production deployments run Tetragon with it at all? relayd
@@ -957,8 +979,21 @@ bottleneck from the second round on):
 | chunked + read buffer 256 KiB | 2,533/s | 1.19 % | 4.7 µs |
 | chunked + window 1 MiB | 2,524/s | 1.07 % | 4.3 µs |
 
-P4-RSS (chunked, first flood of that run): 6,258 generated/s, 20.36 % of one core,
-**cpu_per_delivered 32.7 µs**, 62.9 MiB. The clean A/B is in the next run (S3.14).
+Run 46126491257 (P4-TUNING first, alternating, Tetragon's CPU per round):
+
+| Round | Setting | Tetragon CPU | Delivered | relayd CPU | cpu_per_delivered |
+| --- | --- | --- | --- | --- | --- |
+| 1 | per-event | 103.8 % | 6,102/s | 21.42 % (nr_throttled +53) | 35.1 µs |
+| 2 | chunked | 54.2 % | 2,112/s | 1.16 % | 5.5 µs |
+| 3 | per-event | 60.4 % | 3,617/s | 1.79 % | 4.95 µs |
+| 4 | chunked | 60.6 % | 3,600/s | 1.73 % | 4.81 µs |
+| 5 | chunked + window 1 MiB | 57.3 % | 3,463/s | 1.45 % | 4.19 µs |
+| 6 | chunked + read buffer 256 KiB | 56.7 % | 3,340/s | 1.65 % | 4.95 µs |
+
+Rounds 3 and 4 are the comparable pair. From round 2 on, Tetragon delivers less than
+relayd can take, and relayd's cost per message falls about sevenfold (probably because
+reads coalesce when it isn't busy; not measured). Round 1 is the only one at
+saturation.
 
 ## S3.12 Compression ratio and spool hours
 
@@ -973,7 +1008,31 @@ error and no end. relayd therefore can't tell today. Detection: S3.9 Q2.
 
 ## S3.14 E3 evidence
 
-<PENDING>
+Run 46126491257 (`940b9d5`): ci ✓, bench ✓, integration ✓, e3 ✗.
+
+- **PASS:** S1–S13, T-S2–T-S5, P4-RSS (62.4 MiB) and NO_SIGSYS.
+- **INFO:** P4-TUNING (S3.11) and T-S6. T-S6 received 11,767 of 120,004. Tetragon's
+  VmRSS was 5.62 GB before, 5.98 GB at most, and 1.76 GB after.
+- **T-S1 FAIL.** V2's absence checks passed:
+  `V2: SECRET_TOKEN (fresh, 37 chars) absent from the decoded events, the collector
+  store, the spool and relayd's journal`. The positive-control probe ended with
+  `tetra: call timed out: GetEvents` (a deadline race; it now cancels instead). In run
+  46121973985 the probe saw it: `ENVPROBE binary=/usr/bin/cat exec_events=1 with_env=1
+  with_SECRET_TOKEN=1`.
+- **P5 FAIL** (Q1):
+
+```
+e3execflood workers=4 secs=148.5 execs=743649 generated=1487298 rate=10016/s failed=0
+P5 generated=1487298 (10020/s) received=298082 (2008/s) wall=148.4s relayd_cpu=34.21s (23.05% of one core) nr_throttled=+1256
+P5 saturation: relayd was at its CPU quota during the flood
+P5 tetragon before: VmRSS=1760252 KiB tetragon_notify_overflowed_events_total 104262 tetragon_observer_ringbuf_events_lost_total 0
+P5 tetragon after:  VmRSS=6974640 KiB tetragon_notify_overflowed_events_total 104262 tetragon_observer_ringbuf_events_lost_total 0
+P5 tetragon.service CPU: 157.83s (106.3% of one core)
+P5 admin-path shell exit status: 137 (137 = SIGKILL)
+e3controller: bundle 1 OK: APPLIED (5 heartbeats while waiting)
+e3controller: FAIL: bundle 2: ApplyResult status APPLIED, want ROLLED_BACK (detail "action-rewrite")
+telemetry during P5: 133,039 ProcessExec, 165,043 ProcessExit, 0 ProcessKprobe
+```
 
 ## Progress log
 
@@ -1005,3 +1064,4 @@ One dated line per push: commit, what changed, the CI result observed.
 - 2026-11-28 `fbe4b11`, `d426451`, `283e142`, `b5b1306`, `56501c2` (E1.1, E1.3, E1.5, V1/V2, T-S6): run 46117755144: ci ✓, bench ✓, integration ✓ (E1.5 20/20), e3 ✗ at the V1 step: v1.8.0 has two flags naming "environment" (`--enable-process-environment-variables`, `--filter-environment-variables`).
 - 2026-11-28 `dd4f3a3` (V1 picks the boolean --enable-* flag; progress line for `2d634ab`): run 46119904742: ci ✓, bench ✓, integration ✗ (E1.5: one aggregated round got 19 exec / 20 exit), e3 skipped.
 - 2026-11-28 `9457c24` (E1.5 alternates aggregated and control rounds): run 46121973985: ci ✓, bench ✓, integration ✓ (6 rounds, all 20/20), e3 ✗: **T-S1 FAIL** (harness: the token in my own grep's argv), **P5 FAIL** (at saturation, 10,363 generated/s, relayd 23.22 %, nr_throttled +1,271: the enforce bundle was APPLIED, not ROLLED_BACK; the kill event never reached the health window). Everything else PASS; T-S6 INFO (12,017 of 120,004 received at 100 msgs/s; `tetragon_notify_overflowed_events_total` 145 → 167,801; no RateLimitInfo).
+- 2026-11-28 `940b9d5` (T-S1 token in a pattern file; P5 Tetragon counters; P4-TUNING first): run 46126491257: ci ✓, bench ✓, integration ✓, e3 ✗: **T-S1 FAIL** (V2's absence checks pass; the positive-control probe hit a deadline race), **P5 FAIL** (same as before: APPLIED, not ROLLED_BACK; Tetragon's drop counters flat, RSS 1.76 → 6.97 GB; 0 kprobe events delivered during the flood). Everything else PASS. P4-TUNING: per-event 4,953 vs chunked 4,812 ns per delivered message in the comparable pair.

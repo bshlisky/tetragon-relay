@@ -185,8 +185,13 @@ func envProbe(client *tetra.Client, binary, envName string, d time.Duration) err
 	if binary == "" || envName == "" {
 		return fmt.Errorf("env-probe needs --binary and --env-name")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), d)
+	// A cancel after d, not a deadline: a deadline can reach the stream
+	// as DeadlineExceeded before ctx.Err() is set, which StreamEvents
+	// reports as ErrTimeout (run 46126491257). A cancel is its clean stop.
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	stop := time.AfterFunc(d, cancel)
+	defer stop.Stop()
 	var execs, withEnv, withName int
 	names := map[string]bool{}
 	err := client.StreamEvents(ctx, []tetragonpb.EventType{tetragonpb.EventType_PROCESS_EXEC}, nil, func(raw []byte) bool {

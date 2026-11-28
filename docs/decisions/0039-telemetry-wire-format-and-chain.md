@@ -253,9 +253,15 @@ and exit events per second were generated for 60 s.
   nothing.
 
 The chain therefore proves completeness from the spool onward, but not from Tetragon:
-an event Tetragon drops for relayd leaves no trace. The same mechanism is the likely
-cause of the missed health-window event in P5 (step 7b report S3.9 Q1). Detection from
-the stream (exec/exit pairing on `process.exec_id`) is proposed there, not decided.
+an event Tetragon drops for relayd leaves no trace. Detection from the stream (exec/exit
+pairing on `process.exec_id`) is proposed in the step 7b report, S3.9 Q2, not decided.
+
+A second, different behaviour shows up when Tetragon itself saturates (P5, 10k exec
+events/s, Tetragon at about 1.05 cores). No kprobe event reached any client during the
+flood. Tetragon's drop counters stayed flat, while its RSS grew from 1.76 GB to
+6.97 GB. That is consistent with Tetragon queueing internally and delivering late. The
+effect on relayd is the same as a drop: an enforce bundle's health window passes
+without the event that should fail it (S3.9 Q1).
 
 ## Consequences
 
