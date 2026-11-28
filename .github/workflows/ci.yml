@@ -436,7 +436,7 @@ jobs:
 
           [Service]
           Type=simple
-          ExecStart=${TETRAGON_BIN} --server-address unix:///var/run/tetragon/tetragon.sock --tracing-policy-dir /etc/tetragon/tetragon.tp.d --bpf-lib ${TETRAGON_BPF_LIB} ${TETRAGON_ENV_FLAG}
+          ExecStart=${TETRAGON_BIN} --server-address unix:///var/run/tetragon/tetragon.sock --tracing-policy-dir /etc/tetragon/tetragon.tp.d --bpf-lib ${TETRAGON_BPF_LIB} ${TETRAGON_ENV_FLAG} --metrics-server 127.0.0.1:2112
           EOF
           sudo systemctl daemon-reload
           sudo systemctl start tetragon.service

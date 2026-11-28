@@ -37,9 +37,9 @@ type telemetryDeps struct {
 	epochs     func() map[string]uint64
 	clientCert func() tls.Certificate
 	caBundle   []*x509.Certificate
-	// handoffChunk is telemetry.Config.HandoffChunk (0: the default; set
-	// only by the testca build's e3Tuning).
-	handoffChunk int
+	// e3 are the testca build's measurement settings (e3Tuning); zero in
+	// production.
+	e3 e3Knobs
 }
 
 // telemetryAuditor adapts agent.Auditor to telemetry.Auditor.
@@ -102,10 +102,10 @@ func startTelemetry(ctx context.Context, d telemetryDeps) (*telemetry.Pipeline, 
 		},
 	}
 	p, err := telemetry.New(telemetry.Config{
-		Source: tetraEventSource{d.tetraClient}, EventTypes: types, Redactor: redactor, Spool: spool,
+		Source: e3Source(tetraEventSource{d.tetraClient}, d.e3), EventTypes: types, Redactor: redactor, Spool: spool,
 		Dialer: dialer, BatchMaxEvents: d.cfg.BatchMaxEvents, BatchMaxAge: d.cfg.BatchMaxAge,
 		MaxEventRate: d.cfg.MaxEventRate, Clock: time.Now, Auditor: aud, Liveness: d.liveness,
-		HandoffChunk: d.handoffChunk,
+		HandoffChunk: d.e3.handoffChunk,
 	})
 	if err != nil {
 		return nil, err

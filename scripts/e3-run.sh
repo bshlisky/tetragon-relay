@@ -1167,6 +1167,64 @@ scenario_p4_rss() {
 	record_result P4-RSS "$([ "${ok}" = true ] && echo PASS || echo FAIL)"
 }
 
+# T-S6 (step 7b V3; observation in this form, report only): Tetragon's
+# behaviour toward a slow client. relayd reads at most TS6_READ_RATE
+# messages/s from Tetragon (testca RELAYD_E3_SOURCE_RATE, a test drop-in)
+# while cmd/e3execflood generates TS6_EXECS execs/s (2 events each) for
+# 60 s; relayd keeps reading for TS6_DRAIN s after. Recorded: Tetragon's
+# VmRSS before, during (max) and after; Tetragon's own metrics naming
+# drop/lost/overflow/queue (its --metrics-server on 127.0.0.1:2112)
+# before and after; RateLimitInfo as relayd saw it; Tetragon's log lines
+# about queues or drops; generated versus received.
+TS6_READ_RATE=${TS6_READ_RATE:-100}
+TS6_EXECS=${TS6_EXECS:-1000}
+TS6_DRAIN=${TS6_DRAIN:-60}
+tetragon_rss() { awk '/^VmRSS:/ {print $2}' "/proc/$(systemctl show tetragon.service -p MainPID --value)/status" 2>/dev/null || echo 0; }
+tetragon_metrics() { curl -fsS --max-time 5 http://127.0.0.1:2112/metrics 2>/dev/null | grep -iE '^tetragon_[a-z_]*(drop|lost|overflow|queue|missed)[a-z_]*' | grep -v '^#' || echo "(no metrics)"; }
+scenario_ts6() {
+	log "T-S6: slow client (${TS6_READ_RATE} msgs/s) under ${TS6_EXECS} execs/s for 60 s (observation)"
+	local store=${COLLECTOR_DIR}/ts6.jsonl counts=/tmp/e3-ts6-counts rss0 rss1 rss2 rssmax=0 r gen n tsince m0 m1
+	write_dropins "e3.conf=$(e3_dropin)" "ts6.conf=$(printf '[Service]\nEnvironment=RELAYD_E3_SOURCE_RATE=%s' "${TS6_READ_RATE}")"
+	rm -f "${store}"
+	sudo find "${SPOOL_DIR}" -mindepth 1 -delete
+	start_collector ts6 "${store}"
+	SCENARIO_SINCE=$(date '+%Y-%m-%d %H:%M:%S')
+	tsince=${SCENARIO_SINCE}
+	start_unit || true
+	sleep 5
+	scenario_journal | grep -o 'source_rate=[0-9]*' | head -1
+	rss0=$(tetragon_rss)
+	m0=$(tetragon_metrics)
+	flood_pids=()
+	flood 60 2 "${counts}" "${TS6_EXECS}"
+	for _ in $(seq 1 12); do
+		sleep 5
+		r=$(tetragon_rss)
+		[ "${r:-0}" -gt "${rssmax}" ] && rssmax=${r}
+	done
+	wait "${flood_pids[@]}" || true
+	rss1=$(tetragon_rss)
+	cat "${counts}"
+	gen=$(flood_events "${counts}")
+	sleep "${TS6_DRAIN}"
+	rss2=$(tetragon_rss)
+	m1=$(tetragon_metrics)
+	stop_unit
+	wait_spool_empty 30 || true
+	n=$(collector_report "${store}" | grep -o '"kind":"events","class":"[a-z_]*","count":[0-9]*' | awk -F: '{s += $NF} END {print s + 0}')
+	echo "T-S6 tetragon VmRSS: before=${rss0} KiB, max during=${rssmax} KiB, at flood end=${rss1} KiB, ${TS6_DRAIN} s after=${rss2} KiB"
+	echo "T-S6 generated=${gen} received=${n} (relayd read at most ${TS6_READ_RATE}/s for $((60 + TS6_DRAIN)) s = $(((60 + TS6_DRAIN) * TS6_READ_RATE)))"
+	echo "T-S6 tetragon metrics before:"; echo "${m0}"
+	echo "T-S6 tetragon metrics after:"; echo "${m1}"
+	echo "T-S6 RateLimitInfo seen by relayd: $(scenario_journal | grep -c '"step":"telemetry_tetragon_rate_limited"')"
+	echo "T-S6 relayd ingest stream ends: $(scenario_journal | grep -c '"step":"telemetry_ingest_stream_ended"')"
+	echo "T-S6 tetragon log lines about queues, drops or slow clients:"
+	sudo journalctl -u tetragon.service --since "${tsince}" --no-pager | grep -iE 'drop|queue|full|slow|overflow|lost|discard' | head -20 || true
+	stop_collector
+	write_dropins "e3.conf=$(e3_dropin)"
+	record_result T-S6 INFO
+}
+
 # P4-TUNING (report only; step-07b-decisions-2.md E1.3, ADR 0041): P4-RSS's
 # load, once per setting, back to back on the same runner. Each setting is
 # testca-only environment (cmd/relayd/e3tuning_testca.go) in a test
@@ -1534,6 +1592,7 @@ main() {
 			# delivered no events to T-S4/T-S5 (run 46051067160).
 			scenario_p4_rss
 			scenario_p4_tuning # report only (E1.3)
+			scenario_ts6 # observation (V3)
 			scenario_p5  # after P4-RSS: its own bundle at epoch 7
 			scenario_s13 # needs S10's root-v2.json and S12's bundle; restores the index
 			scenario_s4  # last: revocation is terminal for this store (ADR 0035)

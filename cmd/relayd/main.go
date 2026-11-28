@@ -180,7 +180,7 @@ func run(configPath string, auditor *agentAuditor) error {
 		auditor.Record(agent.AuditEvent{Step: "host_facts", Detail: "host facts missing or stale; enforcement bundles are rejected (REJECTED_CAPABILITY)", Err: factsErr})
 	}
 
-	tetraCfg, handoffChunk := e3Tuning(auditor, tetra.Config{
+	tetraCfg, knobs := e3Tuning(auditor, tetra.Config{
 		SocketPath:           cfg.TetragonSocket,
 		RelayGroupName:       relayPersistGroup,
 		AllowSELinuxDisabled: cfg.AllowSELinuxDisabled,
@@ -372,7 +372,7 @@ func run(configPath string, auditor *agentAuditor) error {
 	// for its headers, and HeartbeatStats for the heartbeat.
 	if pipeline, terr := startTelemetry(sessionCtx, telemetryDeps{
 		cfg: cfg, auditor: auditor, sealer: tpmComponents.Sealer, tetraClient: tetraClient, liveness: liveness,
-		bootID: bootID, epochs: storeEpochs(startupResult.Store, cfg.AllowedScopes), handoffChunk: handoffChunk,
+		bootID: bootID, epochs: storeEpochs(startupResult.Store, cfg.AllowedScopes), e3: knobs,
 		clientCert: func() tls.Certificate { return clientCertificate(certManager.Chain(), hostSigner) },
 		caBundle:   enrollmentBundle,
 	}); terr != nil {
