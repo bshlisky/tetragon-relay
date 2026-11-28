@@ -404,22 +404,32 @@ jobs:
 
       # Step 7b V1: the flag that makes Tetragon populate
       # process.environment_variables, read from the pinned binary's own
-      # --help rather than assumed. Exactly one flag naming "environment"
-      # must exist; it is passed to the daemon below (T-S1's secret-token
-      # proof, V2, needs Tetragon to send environments).
+      # --help rather than assumed. Exactly one --enable-* flag naming
+      # "environment" must exist, and be boolean (no type after its name);
+      # it is passed to the daemon below (T-S1's secret-token proof, V2,
+      # needs Tetragon to send environments). v1.8.0 (run 46117755144):
+      # "--enable-process-environment-variables  Include environment
+      # variables in process_exec events. Disabled by default." It also
+      # has --filter-environment-variables strings, a Tetragon-side
+      # filter, not used here.
       - name: "V1: tetragon --help, the process-environment flag"
         run: |
           set -euo pipefail
           "${TETRAGON_BIN}" --help >/tmp/tetragon-help.txt 2>&1 || true
           echo "== tetragon --help lines naming env (v${TETRAGON_VERSION#v}) =="
           grep -inE 'env' /tmp/tetragon-help.txt || true
-          mapfile -t flags < <(grep -oE -- '--[a-z0-9-]*environment[a-z0-9-]*' /tmp/tetragon-help.txt | sort -u)
-          echo "flags naming environment: ${flags[*]:-none}"
+          mapfile -t flags < <(grep -oE -- '--enable-[a-z0-9-]*environment[a-z0-9-]*' /tmp/tetragon-help.txt | sort -u)
+          echo "--enable-* flags naming environment: ${flags[*]:-none}"
           if [ "${#flags[@]}" -ne 1 ]; then
-            echo "want exactly one environment flag in tetragon --help, got ${#flags[@]}" >&2
+            echo "want exactly one --enable-* environment flag in tetragon --help, got ${#flags[@]}" >&2
             exit 1
           fi
-          grep -E -- "${flags[0]}( |=|$)" /tmp/tetragon-help.txt
+          line=$(grep -E -- "${flags[0]}( |$)" /tmp/tetragon-help.txt)
+          echo "${line}"
+          if grep -qE -- "${flags[0]} +(string|strings|int|uint|duration|stringArray)( |$)" <<<"${line}"; then
+            echo "${flags[0]} takes a value; expected a boolean flag" >&2
+            exit 1
+          fi
           echo "TETRAGON_ENV_FLAG=${flags[0]}" >> "$GITHUB_ENV"
 
       - name: Start Tetragon (root, from a unit file) on the unix socket
