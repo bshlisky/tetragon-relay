@@ -1401,10 +1401,14 @@ scenario_p5() {
 	flood "${P5_MAX_SECS}" "${P5_WORKERS}" "${counts}"
 	# The enforce bundle's health window: trigger the admin-path kill 35 s
 	# after it was sent (S12's timing: the policy is loaded by then).
-	for _ in $(seq 1 300); do
+	# Bundle 2 follows bundle 1's window, which may extend to 600 s
+	# (ADR 0042): wait up to 900 s for it (run 46149776060 waited only
+	# 300 s and triggered before the enforce policy was loaded).
+	for _ in $(seq 1 900); do
 		grep -q 'sent bundle 2' /tmp/e3controller-p5.log && break
 		sleep 1
 	done
+	grep -q 'sent bundle 2' /tmp/e3controller-p5.log || echo "P5: bundle 2 was never sent" >&2
 	sleep 35
 	touch "${go_file}"
 	wait "${trigger_pid}" || trigger_rc=$?
