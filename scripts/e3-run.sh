@@ -1457,7 +1457,7 @@ scenario_p5() {
 	if [ "${st1}" = APPLIED ]; then
 		grep -qE "event .*ProcessKprobe binary=\"${CANARY}\"" <<<"${rep}" || { echo "the canary's kprobe event was not delivered" >&2; ok=false; }
 	fi
-	echo "P5 sentinel events in telemetry: $(grep -c 'ProcessKprobe binary="[^"]*relayd' <<<"${rep}" || true)"
+	echo "P5 sentinel events in telemetry: $(grep -c 'ProcessKprobe .*/var/lib/tetragon-relay/sentinel/' <<<"${rep}" || true)"
 	journal=$(scenario_journal)
 	if grep -i 'watchdog timeout' <<<"${journal}"; then
 		echo "systemd watchdog timeout during the flood" >&2

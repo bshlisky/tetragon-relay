@@ -40,7 +40,10 @@ type ApplyWorkerConfig struct {
 	Clock    func() time.Time
 	// HealthWindow is the engine's configured health window. The worker
 	// keeps reporting liveness during one apply for at most
-	// HealthWindow + limits.ApplyWorkerLivenessSlack.
+	// max(HealthWindow, limits.MaxApplyHealthWindow) +
+	// limits.ApplyWorkerLivenessSlack: since ADR 0042 an unverifiable
+	// window extends up to limits.MaxApplyHealthWindow before it rolls
+	// back.
 	HealthWindow time.Duration
 
 	// touchInterval overrides sessionLivenessTouchInterval if positive
@@ -172,10 +175,18 @@ func (w *ApplyWorker) drainJobs(ctx context.Context) {
 }
 
 // runJob runs job on its own goroutine and waits for it, touching
-// liveness meanwhile, but only for HealthWindow +
-// limits.ApplyWorkerLivenessSlack: a job still running after that is
+// liveness meanwhile, but only for jobBound(): a job still running after that is
 // stalled, and withholding liveness lets systemd's watchdog restart
 // relayd (B2).
+// jobBound is the longest one job may legitimately run: the health
+// window at its ADR 0042 maximum (an unverifiable window extends to
+// limits.MaxApplyHealthWindow; E3 run 46144734386 showed the old
+// HealthWindow + slack bound restarting relayd mid-extension), plus the
+// slack for Apply's own Tetragon calls and the rollback.
+func (w *ApplyWorker) jobBound() time.Duration {
+	return max(w.cfg.HealthWindow, limits.MaxApplyHealthWindow) + limits.ApplyWorkerLivenessSlack
+}
+
 func (w *ApplyWorker) runJob(ctx context.Context, job func(context.Context)) {
 	done := make(chan struct{})
 	go func() {
@@ -183,7 +194,7 @@ func (w *ApplyWorker) runJob(ctx context.Context, job func(context.Context)) {
 		job(ctx)
 	}()
 	started := w.cfg.Clock()
-	bound := w.cfg.HealthWindow + limits.ApplyWorkerLivenessSlack
+	bound := w.jobBound()
 	ticker := time.NewTicker(w.touchEvery())
 	defer ticker.Stop()
 	w.cfg.Liveness.Touch(applyWorkerComponent)

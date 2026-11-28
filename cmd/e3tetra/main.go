@@ -136,7 +136,20 @@ func check(ctx context.Context, client *tetra.Client, expect string) error {
 	if err != nil {
 		return fmt.Errorf("ListTracingPolicies: %w", err)
 	}
-	got := policyNames(statuses)
+	// ADR 0042: relayd's freshness sentinel (relay-sentinel-*) is a
+	// deliberate, relay-managed policy outside LKG; it is reported, not
+	// compared.
+	var got, sentinels []string
+	for _, n := range policyNames(statuses) {
+		if strings.HasPrefix(n, "relay-sentinel-") {
+			sentinels = append(sentinels, n)
+			continue
+		}
+		got = append(got, n)
+	}
+	if len(sentinels) > 0 {
+		fmt.Printf("e3tetra: freshness sentinel loaded (not compared): %v\n", sentinels)
+	}
 	want := strings.Split(expect, ",")
 	sort.Strings(want)
 	if !equalStrings(got, want) {

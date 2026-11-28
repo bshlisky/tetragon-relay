@@ -220,13 +220,6 @@ func run(configPath string, auditor *agentAuditor) error {
 		},
 		Sentinel: sentinel,
 	})
-	if sentinel != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		if serr := engine.EnsureSentinel(ctx); serr != nil {
-			auditor.Record(agent.AuditEvent{Step: "sentinel_load_failed", Detail: "reconcile and the next apply retry it", Err: serr})
-		}
-		cancel()
-	}
 
 	// Part D1: the state machine starts in UNENROLLED (architecture doc
 	// 8.4) on every boot; it is only advanced by a running control loop
@@ -289,6 +282,17 @@ func run(configPath string, auditor *agentAuditor) error {
 	if len(certManager.Chain()) == 0 {
 		auditor.Record(agent.AuditEvent{Step: "identity", Detail: "no persisted identity and no production Enroller available; staying UNENROLLED (architecture doc 5.2/5.3 enrollment is not yet wired into this binary)"})
 		return runUntilSignal(auditor, assembled)
+	}
+
+	// ADR 0042: load the freshness sentinel only once a session can run.
+	// An UNENROLLED host never applies a bundle, so it changes nothing in
+	// Tetragon (E3 S1/S2). Reconcile and every Apply re-assert it.
+	if sentinel != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if serr := engine.EnsureSentinel(ctx); serr != nil {
+			auditor.Record(agent.AuditEvent{Step: "sentinel_load_failed", Detail: "reconcile and the next apply retry it", Err: serr})
+		}
+		cancel()
 	}
 
 	sessionCtx, cancelSession := context.WithCancel(context.Background())

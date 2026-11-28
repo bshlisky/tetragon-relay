@@ -326,8 +326,9 @@ func (noCaps) KprobeOverride() bool { return false }
 func (noCaps) LSMBPF() bool         { return false }
 
 // TestApplyWorker_RunJobLivenessBound: the worker keeps reporting
-// liveness while a job runs, through a 60 s health window on an injected
-// clock, and stops once the job exceeds HealthWindow + slack (B2).
+// liveness while a job runs, through a 60 s health window and its ADR 0042
+// extension to limits.MaxApplyHealthWindow on an injected clock, and stops
+// once the job exceeds that maximum + slack (B2).
 func TestApplyWorker_RunJobLivenessBound(t *testing.T) {
 	clk := &syncClock{now: time.Unix(1000, 0)}
 	reg, _ := NewLivenessRegistry(clk.Now)
@@ -341,12 +342,13 @@ func TestApplyWorker_RunJobLivenessBound(t *testing.T) {
 		w.runJob(context.Background(), func(context.Context) { <-release })
 		close(done)
 	}()
-	// Walk through the health window in 5 s steps: still healthy.
-	for i := 0; i < 12; i++ {
+	// Walk through the window and its extension to the maximum in 5 s
+	// steps: still healthy.
+	for i := 0; i < int(limits.MaxApplyHealthWindow/(5*time.Second)); i++ {
 		clk.Advance(5 * time.Second)
 		time.Sleep(5 * time.Millisecond)
 		if ok, stale, _ := reg.Healthy(); !ok {
-			t.Fatalf("apply worker stale (%s) %ds into the health window", stale, (i+1)*5)
+			t.Fatalf("apply worker stale (%s) %ds into the (extended) health window", stale, (i+1)*5)
 		}
 	}
 	// Past the bound: liveness is withheld.
