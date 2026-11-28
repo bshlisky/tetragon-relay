@@ -1,4 +1,9 @@
-# Step 7b report (session 1 of 2): telemetry performance (Part P) and compression (Part Z)
+# Step 7b report: telemetry performance (Part P), compression (Part Z), D0 and D1
+
+Session 1 (Parts P and Z) is the first half of this file. Session 2 (the architect's
+decisions, items 1–5) follows it, before the progress log.
+
+# Session 1
 
 Prompt: `docs/prompts/step-07b.md`. Review: `docs/reviews/step-07a-review.md`.
 Base: `eaa6c0b` (step 7a accepted). Date: 2026-11-27.
@@ -379,6 +384,323 @@ Its journal, now dumped by the e3 job, has no drop, rate-limit or slow-client wa
 during the 5.6k events/s load. That's a starting point for T-S6, not a conclusion:
 relayd kept up, at its quota.
 
+
+# Session 2: docs/reviews/step-07b-decisions.md, items 1–5
+
+Base: `07e3784`. Decisions: `docs/reviews/step-07b-decisions.md` (committed verbatim in
+`fd86543`). Date: 2026-11-27.
+
+## S2.1 Summary
+
+**Boundary:** items 1–5 are done, and the boundary is not fully green. ci,
+integration and bench are green. e3 is green except **P4-RSS, whose new E3 CPU gate
+fails**. That failure is a finding for the architect (S2.9), not a regression, and the
+gate was not relaxed.
+
+- **D0: the control plane keeps its timing under a flood. P5-CONTROL-UNDER-LOAD
+  passes** (runs 46073322092, 46073560126, 46073777071). With a monitor bundle delivered
+  during the flood, the worst heartbeat gap was 15.0 s, the bundle was APPLIED in its
+  health window, there was no watchdog timeout, `rate_limited` dropped records are in
+  the chain, and the canary's kprobe events arrived.
+- **D0 found and fixed a real starvation path.** The heartbeat read
+  `Spool.Stats()`, which takes the spool mutex, and that mutex is held across
+  compression, four fsyncs and overflow handling (`d9e83a4`).
+- **D1 (a): wire-level redaction.** Pipeline CPU went from **15.4 µs to 9.7 µs per
+  event** on one machine (7.7 % → 4.9 % of one core at 5k/s). A differential fuzz
+  target checks it against decode → Redact → marshal.
+- **D1 field filters: verified on the real v1.8.0 and wired in. They save 0 bytes by
+  default**, because Tetragon sends no environment without its flag.
+- **D1 gates.**
+  - The benchmark regression gate (≤ 1.25 × `f80fcf4`, same runner) is blocking and
+    passes: 9,737 against a limit of 12,139 ns.
+  - **The E3 gate (≤ 15 % of one core at ≥ 5k generated events/s) fails: 24.76 % at
+    5,608/s.**
+- **The E3 relayd profile explains the E3 failure.** About 46 % of relayd's CPU is the
+  gRPC reader's `read` syscalls on the Tetragon socket, about a third is the Go
+  scheduler, and the pipeline is about 5 %. Tetragon sends one message per event, and
+  that receive cost is paid before admission control can drop anything.
+
+| Item | Status | Commits |
+| --- | --- | --- |
+| 1 Decisions file committed; bench gate report-only in the same commit | decisions committed. **The report-only change was blocked by this session's permission classifier**, so the 6 µs gate stayed blocking until item 5 replaced it (deviation S2.6.1) | `fd86543` |
+| 2 D0 admission control | done | `799589d`, `e9c15fb`, `d9e83a4` |
+| 2 D0 P5-CONTROL-UNDER-LOAD | done, PASS | `79cfddb` |
+| 3 D1 wire-level redaction with differential fuzzing | done | `eccab9a`, `f80fcf4` |
+| 4 D1 field filters (verify, then measure separately) | verified (integration), wired in, measured: 0 B saved by default | `c36fdc8`, `db86b5b` |
+| 5 D1 E3 relayd profile | done (artifact `e3-relayd-profile-<run>`) | `3cbc170` |
+| 5 New gates | benchmark gate blocking, PASS. E3 gate in P4-RSS, **FAIL** (S2.9) | `eb863df`, `3cbc170`, `55ef95b` |
+| 5 ADR 0041 finalized | rewritten with D0/D1/D2 figures. Status stays Proposed: the CPU row for the whole relayd is open | this commit |
+| ADR 0039 amended (D0, D1, D4) | section 10 | this commit |
+
+## S2.2 Files added or changed (since `07e3784`)
+
+```
+.github/workflows/ci.yml            bench: regression gate vs f80fcf4, history adds D0/D1; e3: profile artifact
+.github/workflows/nightly-fuzz.yml  FuzzPeekAdmit, FuzzWireRedact
+Makefile                            fuzz-short: the two targets; -fuzzminimizetime=5s
+cmd/e3controller/                   --bundle-delay, --max-heartbeat-gap
+cmd/e3collector/main.go             rate_limited_events per chain
+cmd/relayd/e3profile{,_testca}.go   SIGUSR1 CPU profile, testca build only
+cmd/relayd/telemetry.go             max_event_rate, field filters, GOMAXPROCS in telemetry_started
+docs/decisions/0039-...md           section 10: D0, D1, D4
+docs/decisions/0041-...md           sections 7-8, decision table
+docs/telemetry-contract.md          the rate_limited dropped record
+internal/config, internal/limits    collector.max_event_rate (default 2000, hard maximum 5000)
+internal/telemetry/admit.go         new: event peek, token bucket, drop accounting
+internal/telemetry/wire.go          new: the wire-level rewriter
+internal/telemetry/pipeline.go      raw ingest, admission, rewrite, HeartbeatStats lock-free, ExcludedFields
+internal/telemetry/spool.go         AppendRateLimited, HeartbeatView
+internal/telemetry/batch/payload.go Dropped.Reason/Events
+internal/telemetry/chainverify      reports rate_limited events
+internal/tetra/client.go            StreamEvents: raw bytes (raw codec), excludeFields
+internal/tetra/fieldfilter_integration_test.go   new
+scripts/bench-gate.sh               regression gate
+scripts/e3-run.sh                   P5-CONTROL-UNDER-LOAD, P4-RSS E3 gate and profile, P4-GOMAXPROCS1
+```
+
+## S2.3 Command output
+
+Local, at the end (macOS):
+
+```
+$ GOOS=linux golangci-lint run ./...
+0 issues.
+$ go test -count=1 ./...        (every package ok)
+$ go test -run=NONE -fuzz=FuzzPeekAdmit -fuzztime=30s ./internal/telemetry
+fuzz: elapsed: 31s, execs: 1254864 ... PASS
+$ go test -run=NONE -fuzz=FuzzWireRedact -fuzztime=40s -fuzzminimizetime=3s ./internal/telemetry
+fuzz: elapsed: 39s, execs: 226149 (6118/sec), new interesting: 193 (total: 229)
+PASS
+```
+
+The benchmark gate, run 46073777071, job `bench` (Intel Xeon 6975P-C):
+
+```
+REF  BenchmarkPipeline5k-4  200000  20078 ns/op  4.856 %core@5k/s  9711 cpu-ns/event
+HEAD BenchmarkPipeline5k-4  200000  20084 ns/op  4.868 %core@5k/s  9737 cpu-ns/event
+REF  BenchmarkPipeline5k-4  200000  20097 ns/op  4.896 %core@5k/s  9792 cpu-ns/event
+HEAD BenchmarkPipeline5k-4  200000  20090 ns/op  4.825 %core@5k/s  9650 cpu-ns/event
+REF  BenchmarkPipeline5k-4  200000  20088 ns/op  4.829 %core@5k/s  9657 cpu-ns/event
+HEAD BenchmarkPipeline5k-4  200000  20084 ns/op  4.865 %core@5k/s  9729 cpu-ns/event
+GATE: worst HEAD run = 9737 cpu-ns/event (4.87 % of one core at 5k events/s); median f80fcf4 = 9711; limit 12139 (x1.25)
+```
+
+Field filters on the real Tetragon v1.8.0 (integration run 46073322092):
+
+```
+FIELD-FILTER none: exclude=[] events=20 bytes/event=528 ... args="--marker-arg x" cwd="/tmp" env=0 parent=true
+FIELD-FILTER environment: exclude=[process.environment_variables parent.environment_variables ancestors.environment_variables] events=20 bytes/event=528 ... cwd="/tmp" env=0
+FIELD-FILTER cwd: exclude=[process.cwd] events=20 bytes/event=522 ... cwd="" env=0
+FIELD-FILTER arguments+cwd: exclude=[process.arguments process.cwd] events=20 bytes/event=506 ... args="" cwd=""
+--- PASS: TestIntegration_FieldFilters (8.05s)
+```
+
+## S2.4 Mapping: item → functions → tests
+
+| Item | Functions | Tests |
+| --- | --- | --- |
+| D0 raw ingest | `tetra.Client.StreamEvents` (`rawResponseCodec`) | `TestClient_StreamEvents`, `TestRawResponseCodec_RejectsWrongTypes` |
+| D0 admission | `peekAdmit`, `tokenBucket`, `rateDrops`, `Pipeline.ingest`/`build` (`declare`), `Spool.AppendRateLimited` | `TestPeekAdmit`, `TestTokenBucket`, `TestPipeline_AdmissionControl`, `TestPipeline_MaxEventRateBounds`, `TestRateDrops_PutBack`, `TestSpool_AppendRateLimited`, `FuzzPeekAdmit` |
+| D0 record format | `batch.Dropped{Reason,Events}`, `ParseDropped`, chainverify | `TestDropped_RateLimited` |
+| D0 config | `collector.max_event_rate` | config table tests |
+| D0 heartbeat | `Spool.unlock`/`HeartbeatView`, `Pipeline.HeartbeatStats` | `TestHeartbeatStats_NeverWaitsForTheSpoolLock` |
+| D0 E3 | `scenario_p5`, e3controller `hbWatch` | E3 P5-CONTROL-UNDER-LOAD |
+| D1 rewriter | `wirePlanBuilder`, `wireRewriter.rewrite`, `wireState.*`, `fixLength`, `packedOK` | `FuzzWireRedact`, `TestWirePlan_CoversTheGeneratedRedactor`, `TestWire_MatchesRedactOnFilledEvents`, `TestWire_Rejections`, `TestWire_DepthBound`, `TestWire_LongNestedMessagesKeepTheirLengths`, `TestWire_MapEntriesAreLenientLikeUnmarshal`, `TestWire_PackedScalars`, `BenchmarkStageRewrite` |
+| D1 field filters | `StreamEvents(excludeFields)`, `telemetry.ExcludedFields` | `TestClient_StreamEvents_ExcludeFields`, `TestIntegration_FieldFilters`, `TestPipeline_ConfigAndIngestReconnect` |
+| D1 profile and gates | `startE3Profiler` (testca), `scripts/bench-gate.sh`, `scenario_p4_rss` | bench job, E3 P4-RSS |
+
+## S2.5 Invariants and threats addressed
+
+- **Event noise can't starve the control plane.** Non_security events are budgeted
+  before decode. Security events always pass, and so does anything else only within
+  the budget. The peek is conservative: a malformed response, or one with two
+  distinct event fields, counts as non_security. `FuzzPeekAdmit` checks that nothing
+  admitted as security decodes as anything else.
+- **Loss stays declared.** Every admission drop is counted, in a `rate_limited`
+  record in the chain. A record that can't be spooled is put back and declared in the
+  next one.
+- **The heartbeat takes no telemetry lock** (atomics published on every spool unlock).
+- **The rewriter is a parser at parser standards.**
+  - It rejects exactly what decode rejects, plus three stricter cases: a known field
+    with the wrong wire type, depth over 32, and two oneof cases in one message.
+  - The fuzz oracle's strictness comes from an independent, descriptor-driven scan.
+  - The output is checked `proto.Equal` to decode → Redact → marshal. Unknown fields
+    are dropped. The environment is validated, then removed.
+
+## S2.6 Deviations
+
+1. **Item 1: the bench gate was not made report-only in the decisions commit.** This
+   session's permission classifier refused that change. The 6 µs gate therefore
+   stayed blocking (bench red) until `eb863df` replaced it with D1's regression gate,
+   which is blocking and green. The refused change was:
+   `BENCH_GATE_ENFORCE: "0"` on the bench step.
+2. **The rewriter rejects three inputs `proto.Unmarshal` accepts** (S2.5). D1 asks
+   both for "wrong wire type for a known field … rejected" and for "exactly one
+   rejecting is a failure". Go keeps a mistyped known field as an unknown field, so
+   the fuzz oracle is decode **plus** `strictScan`, a descriptor-driven check of those
+   three rules that is independent of the rewriter's plan. Inside map entries the
+   rewriter is lenient exactly as Go's `consumeMap` is, because Go leaves no trace
+   there to check against.
+3. **The rewriter's plan is built at startup, not generated.** It comes from the same
+   vendored descriptors redactgen uses, and `TestWirePlan_CoversTheGeneratedRedactor`
+   ties the two message sets together. The plan has one extra message,
+   `tetragon.EnvVar`, which it validates before dropping.
+4. **P5's flood did not exceed 5k events/s.** Four shell loops generated 4.3k, 2.3k
+   and 4.1k events/s on the three runs. Exec throughput on the 4-vCPU runner (with
+   Tetragon's hooks) is the limit. P5 still passed at each rate, and prints a note
+   when the rate is ≤ 5k/s.
+5. **P4-RSS's E3 gate counts generated events** (loop iterations × 2). It fails the
+   scenario if the runner generates < 5k/s, because the gate is then not evaluated.
+   P4 now runs 3 loops.
+6. **Commit sizes.** `e9c15fb` (raw ingest and admission, about 500 lines with tests)
+   and `eccab9a` (the rewriter and its tests, about 780) are over the ~400 guideline.
+   Each is one parser or mechanism with its tests.
+7. **Outside the items:**
+   - `-fuzzminimizetime=5s` in `fuzz-short`. Go's 60 s default minimization (its
+     execs aren't counted) took most of each 60 s smoke run: `FuzzWireRedact` did
+     24,586 execs in CI, and `FuzzRedactEquivalence` showed the same stall.
+   - A timing-dependent assertion in `TestPipeline_HostileAckDeletesNothingAndResends`
+     was fixed (`c817fb1`).
+   - `P4-GOMAXPROCS1` (report-only) was added as data for S2.9.
+
+## S2.7 Dependencies added
+
+None.
+
+## S2.8 Known limitations
+
+- The E3 gate fails (S2.9).
+- `peekAdmit` and the rewriter's plan know v1.8.0's event field numbers. A newer
+  Tetragon's new event types count as non_security for admission (conservative) and as
+  unclassified in the builder.
+- The field filter's saving is 0 B until Tetragon's environment flag is on (V1).
+- Admission drops are declared per `batch_max_age`. A crash loses the count of up to
+  one window of drops, as with any events not yet spooled (ADR 0039, Consequences).
+
+## S2.9 Open questions for the architect
+
+1. **The E3 CPU gate can't be met by relayd's pipeline.**
+   - At 5,608 generated events/s, relayd uses 24.76 % of a core (its quota) while
+     admitting 1,992/s.
+   - About 46 % of its CPU is `read` syscalls on the Tetragon socket, about 33 % is
+     the Go scheduler, and about 5 % is the pipeline.
+   - The receive happens before any admission decision.
+   - Options (ADR 0041 section 8):
+     - (a) shed at the source with `GetEventsRequest.deny_list` from signed policy;
+     - (b) tune the per-message cost (GOMAXPROCS, read buffers);
+     - (c) set the E3 gate on admitted events, or at the measured cap, relying on P5
+       for the control plane.
+   - I recommend (c) with P5 as the binding gate. P5 already proves what D0 asked
+     for, and (a) doesn't bound an attacker's own exec noise.
+   - The GOMAXPROCS figure: P4-GOMAXPROCS1, below.
+2. **D2's arithmetic.** "At least 4 h at 1k/s even with the pessimistic ratio" doesn't
+   hold. At 243 B per event, 2 GiB holds 2.45 h at 1k/s, and 4 h needs ≤ 149 B per
+   event. ADR 0041 states the measured 2.5–25 h at 1k/s. Do you want a different
+   default cap, or is the statement enough?
+3. **P5's flood rate.** The runner can't exceed about 4.3k events/s with shell loops.
+   Is that acceptable as "the maximum rate the runner can generate", or should P5 use a
+   compiled exec generator?
+
+## S2.10 Self-review: where a reviewer is most likely to find a bug
+
+1. **`fixLength`'s in-place shift** when a nested message's length needs more than
+   one byte. Outer starts are recorded before inner content, so nested shifts compose.
+   `TestWire_LongNestedMessagesKeepTheirLengths` (70 KB strings) and the fuzz cover it.
+2. **`opDrop` validation into `st.discard`.** The buffer is reused, and a nested drop
+   would alias it. The output is discarded, but a bug there could panic rather than
+   err. v1.8.0 has no nested `environment_variables`.
+3. **`peekAdmit` vs the rewriter's oneof rule.** Both treat two distinct event fields
+   as not security (peek) or as rejected (rewrite). A response with the same event
+   field twice is security in both.
+4. **`rateDrops.putBack`** after a failed spool write. The count is declared in the
+   next window, with `first_ts` widened. `TestRateDrops_PutBack` caught a real
+   min/max bug during development.
+5. **The token bucket's clock.** It uses `Config.Clock` (`time.Now`, wall clock). A
+   backward step refills nothing, and a forward jump refills at most one burst.
+
+## S2.11 Profile breakdown, before and after (same machine)
+
+Intel Xeon 6975P-C, run 46073777071 (`bench-out/history.txt`), mean of 2 runs:
+
+| Commit | Change | Decode | Rewrite | Redact | Marshal | Compress | Spool (+ compress) | **Pipeline** | % core at 5k/s |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `7a35c03` | 7a pipeline | 3.93 µs | — | 11.56 | 2.08 | — | 7.34 | **34.1 µs** | 17.0 % |
+| `0b99e92` | session 1's last (zstd) | 3.86 | — | 1.88 | 2.05 | 2.86 | 3.92 | **14.6 µs** | 7.3 % |
+| `d9e83a4` | D0 (decode moves into the pipeline) | 3.86 | — | 1.93 | 1.97 | 2.83 | 3.91 | **15.4 µs** | 7.7 % |
+| `f80fcf4` | D1 wire-level redaction | (3.85) | **3.89** (9 allocs) | (2.04) | (2.01) | 2.86 | 3.92 | **9.7 µs** | 4.9 % |
+
+On `f80fcf4`, the figures in parentheses are stages no longer in the pipeline path.
+Shares of the pipeline profile on HEAD: rewrite 40 %, spool 34 % (compress 28 %),
+redact (inside rewrite) 13 %, export 6 %, GC 2 %.
+
+relayd itself in E3 (run 46073560126, 50 s profile under P4-RSS load, 10.32 s of
+samples): `syscall` 45.6 % flat, `futex` 16.6 %, scheduler about 33 % cumulative, the
+telemetry pipeline 5.5 %, `grpc.recv` 5.3 %. ADR 0041 section 8 has the table.
+
+## S2.12 Compression ratio and spool hours
+
+These are unchanged from session 1 (section 12). With admission, P4-RSS's received
+events compress 15.7–16.7× (fewer repeats per batch at 2k/s). ADR 0041's spool row
+restates capacity per D2 as hours per GiB at a rate and ratio (S2.9 question 2).
+
+## S2.13 Tetragon's slow-client behaviour
+
+Not in items 1–5 (V3/T-S6 is the next session).
+
+## S2.14 E3 evidence
+
+**P5-CONTROL-UNDER-LOAD**, run 46073322092 (`c36fdc8`):
+
+```
+e3controller: [2026-11-27T22:38:10Z] sent bundle 1 (/tmp/e3-bundles/p5-monitor.json, ...)
+e3controller: heartbeat gaps OK: 6 heartbeats, worst gap 15.003s <= 20s
+canary under the monitor bundle, during the flood: rc=0
+REPORT   event *tetragon.GetEventsResponse_ProcessKprobe binary="/usr/local/bin/e3-canary-sh" ...
+P5 generated=645176 (4309/s) received=300002 (2003/s) wall=149.7s relayd_cpu=24.62s (16.44% of one core)
+E3 RESULT: P5-CONTROL-UNDER-LOAD PASS
+```
+
+Runs 46073560126 and 46073777071 also passed (worst gap 15.003 s each, at 2,265/s and
+4,068/s generated).
+
+**P4-RSS and the E3 gate**, run 46073777071 (`eb863df`):
+
+```
+P4-RSS generated=337926 (5608/s) events=120002 wall=60.3s rate=1992/s relayd_cpu=14.92s (24.76% of one core) cpu_per_event=124331ns cpu_per_generated=44152ns max_vmrss=63.2MiB
+E3 CPU gate: relayd used 24.76% of one core at 5608 events/s (> 15%)
+E3 RESULT: P4-RSS FAIL
+```
+
+Admission at work in P4-RSS (run 46073322092): `rate_limited_events=216931` over one
+clean chain (`contiguous=92 max=92`, no gap).
+
+**The last code commit**, run 46083840295 (`c817fb1`): ci ✓, bench ✓, integration ✓,
+e3 ✗ on P4-RSS only:
+
+```
+E3 RESULT: S1..S13 PASS, T-S1..T-S5 PASS, P5-CONTROL-UNDER-LOAD PASS, NO_SIGSYS PASS
+GOMAXPROCS 2
+P4-RSS E3 CPU gate not evaluated: the runner generated 4689 events/s (< 5000)
+P4-RSS generated=283542 (4689/s) events=120005 wall=60.5s rate=1985/s relayd_cpu=14.52s (24.01% of one core) cpu_per_event=120995ns cpu_per_generated=51209ns max_vmrss=63.2MiB
+E3 RESULT: P4-RSS FAIL
+GOMAXPROCS 1
+P4-GOMAXPROCS1 generated=166424 (2805/s) received=120001 (2023/s) relayd_cpu=9.22s (15.54% of one core) cpu_per_generated=55401ns
+e3controller: heartbeat gaps OK: 6 heartbeats, worst gap 15.006s <= 20s
+P5 generated=491200 (3292/s) received=148245 (994/s) wall=149.2s relayd_cpu=3.64s (2.44% of one core)
+GATE: worst HEAD run = 15193 cpu-ns/event (7.60 % of one core at 5k events/s); median f80fcf4 = 15248; limit 19060 (x1.25)
+GATE PASS
+```
+
+- **GOMAXPROCS=1 doesn't help.** It used 55.4 µs of relayd CPU per generated event,
+  against 51.2 µs at the default (2 under the 25 % quota). The scheduler share isn't
+  an easy lever (S2.9 question 1, option b).
+- **The bench gate is stable across machines.** This run's runner was slower (15.2 µs
+  per event for both HEAD and `f80fcf4`), and the same-machine ratio still held.
+- **P5 in this run received only 994 events/s** (under the 2000/s budget) at 3,292/s
+  generated, and relayd used 2.44 % of a core. That is consistent with relayd's CPU
+  following the messages Tetragon delivers. I didn't establish why Tetragon delivered
+  fewer here; it is a question for T-S6, not an assumption.
+
 ## Progress log
 
 One dated line per push: commit, what changed, the CI result observed.
@@ -395,3 +717,12 @@ One dated line per push: commit, what changed, the CI result observed.
 - 2026-11-27 `e0485e2` (T-S4 cap 64 KiB): run 46051067160: ci ✓, bench ✗ (gate), integration ✓, e3 ✗. **S1–S13, T-S1–T-S3 and P4-RSS PASS** (5,676 events/s, 62.5 MiB, ≥ 43.8 µs per event, 21.5× compression). T-S4 and T-S5 FAIL: P4-RSS left a collector running that acked T-S4's batches (my harness bug; section 14).
 - 2026-11-27 `39e8580` (P4-RSS after T-S5, post-flood probe, Tetragon log): run 46056428748: ci ✓, bench ✗ (the gate: worst of 3 is 15149 ns per event > 6000 ns, on the Xeon 6975P-C; red as intended until the CPU decision), integration ✓, **e3 ✓: S1–S13, T-S1–T-S5, P4-RSS and NO_SIGSYS all PASS.** P4-RSS: 5,610 events/s, 61.7 MiB, ≥ 44.1 µs per event, 21.45×; Tetragon still delivering after the flood.
 - 2026-11-27 `07e3784` (session-1 report, ADR 0041 Proposed): run 46061521266: ci ✓, bench ✗ (the gate, 21373 ns per event > 6000, as intended until the decision), integration ✓, e3 ✓.
+- 2026-11-27 `fd86543` (decisions file; progress line for `07e3784`): run 46070173156: ci ✓, bench ✗ (the 6 µs gate, still blocking: deviation S2.6.1), integration ✓, e3 ✓.
+- 2026-11-27 `799589d`, `e9c15fb`, `d9e83a4`, `79cfddb` (D0, P5): run 46071629220: ci ✓, bench ✗ (6 µs gate; 15.6 µs), integration ✓, e3 ✓ (P5 PASS).
+- 2026-11-27 `eccab9a`, `f80fcf4`, `c36fdc8` (D1 rewriter; field-filter verification): run 46073322092: ci ✓, bench ✗ (6 µs gate), integration ✓ (`TestIntegration_FieldFilters` PASS), **e3 ✓: S1–S13, T-S1–T-S5, P4-RSS, P5 PASS** (P4-RSS had no gate yet).
+- 2026-11-27 `3cbc170` (E3 profile, E3 gate): run 46073560126: ci ✓, bench ✗ (6 µs gate), integration ✓, e3 ✗: **P4-RSS FAIL** (4,247 generated events/s, gate not evaluated; relayd at 24.74 %). Everything else PASS.
+- 2026-11-27 `eb863df` (bench regression gate): run 46073777071: ci ✓, **bench ✓** (9,737 ≤ 12,139 ns), integration ✓, e3 ✗: **P4-RSS FAIL, E3 gate 24.76 % at 5,608 events/s**. Everything else PASS.
+- 2026-11-27 `55ef95b`, `db86b5b` (3 P4 loops; field filters wired): run 46078322926: ci ✗ (gofmt, `pipeline_test.go`), integration and e3 skipped.
+- 2026-11-27 `3fc8e80`, `4d7b9a7` (P4-GOMAXPROCS1; fuzz minimize time): runs 46078620253, 46078755365: ci ✗ (the same gofmt).
+- 2026-11-27 `f77f7c2` (gofmt): run 46078900606: ci ✗ (`TestPipeline_HostileAckDeletesNothingAndResends`, a timing-dependent count), bench ✓.
+- 2026-11-28 `c817fb1` (that test): run 46083840295: ci ✓, bench ✓ (15,193 ≤ 19,060 ns, slower runner), integration ✓, e3 ✗: **P4-RSS FAIL** (4,689 generated events/s, gate not evaluated; 24.0 %). Everything else PASS, P5 PASS. P4-GOMAXPROCS1: 15.5 % at 2,805/s (55.4 µs per generated event, against 51.2 µs).

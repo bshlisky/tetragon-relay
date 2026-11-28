@@ -2,9 +2,11 @@
 
 ## Status
 
-Proposed (docs/prompts/step-07b.md P4 and Z4). Amends architecture doc 8.13. **The CPU row
-is undecided.** The 6 µs per event gate (P3) is enforced and fails at about 15 µs.
-Section 4 lists the options, and the decision is the architect's.
+Proposed (docs/prompts/step-07b.md P4 and Z4; docs/reviews/step-07b-decisions.md D0,
+D1, D2). Amends architecture doc 8.13. The decisions replaced the 6 µs gate with two
+gates (section 7). **The benchmark gate passes. The E3 gate fails (section 8): most of
+relayd's CPU at a high event rate is spent receiving from Tetragon, before admission
+control can drop anything.** That finding goes back to the architect.
 
 ## Context
 
@@ -170,19 +172,124 @@ pessimistic one. A real host falls between 0.5 h and 5 h.
 The architect decides between a larger cap, a shorter outage window, or a
 lower rate target.
 
+### 7. Step 7b session 2: D0 and D1, on one machine
+
+Intel Xeon 6975P-C, ci job `bench`, run 46073777071 (`BENCH_HISTORY`, mean of 2 runs of
+200,000 events):
+
+| Commit | Change | Pipeline CPU per event | % core at 5k/s |
+| --- | --- | --- | --- |
+| `0b99e92` | zstd (session 1's last) | 14.64 µs | 7.3 % |
+| `d9e83a4` | D0: raw bytes from `GetEvents`, admission control (decode moves into the pipeline) | 15.36 µs | 7.7 % |
+| `f80fcf4` | D1: wire-level redaction | **9.73 µs** | **4.9 %** |
+
+Stages on that run: rewrite 3.9 µs (9 allocations), against decode 3.8 + redact 1.8 +
+marshal 2.0 µs for the path it replaces; compress 2.84 µs; spool 3.93 µs per event
+(compression included). Share of the pipeline profile: rewrite 40 %, spool 34 % (of
+which compress 28 %), export 6 %, GC 2 %.
+
+**The two gates (D1):**
+
+- **Benchmark (regression) gate**, blocking, in ci job `bench`: the worst of 3 runs of
+  HEAD uses at most 1.25 × the median of 3 runs of `f80fcf4`, built and run alternately
+  on the same runner. On run 46073777071: worst HEAD 9,737 ns, reference median 9,711 ns,
+  limit 12,139 ns. **PASS.**
+- **E3 gate**, in `P4-RSS`: at ≥ 5k generated events/s, the whole relayd uses ≤ 15 % of
+  one core, which leaves 10 points of the 25 % quota for the control plane. Admission
+  control may reach this by dropping non_security events: that is the configured
+  budget's job.
+- The 6 µs gate is retired.
+
+**5k events/s of non_security events is above the default admission budget**
+(`collector.max_event_rate`, 2000/s, hard maximum 5000/s). At the default, a host
+flooding exec events sends at most 2000 of them per second, and declares the rest in
+`rate_limited` dropped records.
+
+**Field filters (D1, measured separately).** Tetragon v1.8.0 accepts
+`GetEventsRequest.field_filters` with action EXCLUDE and keeps streaming. Paths are
+relative to the event message (integration run 46073322092, `TestIntegration_FieldFilters`).
+Bytes per exec event as received:
+
+| Filter | Bytes per event |
+| --- | --- |
+| none | 528 |
+| `process/parent/ancestors.environment_variables` | 528 |
+| `process.cwd` | 522 |
+| `process.arguments`, `process.cwd` | 506 |
+
+relayd now excludes the environment. That saves nothing by default, because Tetragon
+sends no environment unless its flag is set (V1). Redaction still removes it.
+
+### 8. relayd itself under load (E3, with D0 and D1)
+
+`P4-RSS` with the default budget, the real unit (`CPUQuota=25%`, `MemoryMax=256M`):
+
+| Run | Commit | Generated | Received (admitted) | relayd CPU | Max VmRSS |
+| --- | --- | --- | --- | --- | --- |
+| 46073322092 | `c36fdc8` (D0, before D1 in E3) | not counted (2 loops) | 2,025/s | **24.78 %** | 62.8 MiB |
+| 46073560126 | `3cbc170` (D0 + D1) | 4,247/s (2 loops) | 1,988/s | **24.74 %** | 61.5 MiB |
+| 46073777071 | `eb863df` (D0 + D1) | **5,608/s** (2 loops) | 1,992/s | **24.76 %** | 63.2 MiB |
+| 46083840295 | `c817fb1` (D0 + D1, field filters) | 4,689/s (3 loops) | 1,985/s | **24.01 %** (GOMAXPROCS 2) | 63.2 MiB |
+| 46083840295 | `c817fb1`, `GOMAXPROCS=1` (P4-GOMAXPROCS1, report-only) | 2,805/s | 2,023/s | 15.54 % | — |
+
+**The E3 gate fails:** 24.76 % of one core at 5,608 generated events/s, against ≤ 15 %
+(run 46073777071, `E3 CPU gate: relayd used 24.76% of one core at 5608 events/s (> 15%)`).
+On `3cbc170` the runner generated under 5k events/s, so the gate was not evaluated, and
+relayd still sat at its quota.
+
+**relayd's own CPU profile** (`3cbc170`, 50 s during the load, artifact
+`e3-relayd-profile-46073560126`): 10.32 s of samples in 50 s (20.6 % of a core).
+
+| Where | Share |
+| --- | --- |
+| `syscall` (the gRPC reader's `read` on the Tetragon socket, `http2Client.reader` 42 % cumulative) | 45.6 % flat |
+| `futex` (goroutine wake-ups) | 16.6 % flat |
+| scheduler (`schedule`/`findRunnable`, incl. `netpoll`/`epoll_wait`) | ~33 % cumulative |
+| the telemetry pipeline (`Pipeline.build`, the rewrite included) | 5.5 % cumulative |
+| `grpc.recv` (message reassembly) | 5.3 % cumulative |
+
+Tetragon sends one gRPC message per event. Each one costs relayd socket reads, HTTP/2
+frame parsing and goroutine hand-offs (reader → stream → ingest), **before admission
+control sees it**. Admission drops non_security events before decode, but the receive
+cost is already paid. That is why relayd stays at its quota while admitting only 2k
+events/s. The pipeline itself is now about 5 % of relayd's CPU.
+
+D0's goal holds regardless: P5-CONTROL-UNDER-LOAD passed on both runs (no heartbeat gap
+above 15.0 s, `APPLIED` during the flood, no watchdog timeout). The 15 % gate does not
+hold at this event rate, and no change inside relayd's pipeline can make it hold. The
+options, for the architect:
+
+1. **Shed at the source.** Tetragon's `GetEventsRequest` has `deny_list` filters
+   (binary, namespace, pod, ...). relayd cannot rate-limit there, but a signed policy
+   (Part S) could deny known-noisy binaries. That doesn't bound an attacker's own exec
+   noise.
+2. **Cut the per-message cost**: GOMAXPROCS (the scheduler share; measured in
+   `P4-GOMAXPROCS1`, report-only), gRPC read-buffer sizes, or a dedicated receive path.
+   These are tuning, and they don't change the per-event receive. Measured:
+   GOMAXPROCS=1 costs 55.4 µs per generated event, against 51.2 µs at the default of 2
+   (run 46083840295), so it is not a lever.
+3. **Accept the receive cost and set the E3 gate on admitted events**, or raise it to
+   the measured whole-relayd value at 5k generated/s. The quota still caps relayd at
+   25 %, and P5 shows the control plane keeps its timing at that cap.
+
 ## Decision (proposed)
 
 8.13's table becomes:
 
 | Metric | Target |
 | --- | --- |
-| RSS steady state | < 64 MiB, unchanged. relayd measured 62.5 MiB max at 5.7k events/s (E3 P4-RSS) |
-| CPU steady state | **open**: pipeline gated at ≤ 6 µs per event (3 % of one core at 5k/s) by step 7b. Measured 15 µs in-process, and ≥ 43.8 µs for the whole relayd (at its 25 % CPU quota). Options in section 4 |
+| RSS steady state | < 64 MiB, unchanged (`MemoryMax=256M` untouched). relayd measured 61.5–63.2 MiB max under load (E3 P4-RSS) |
+| CPU, pipeline | Regression gate: ≤ 1.25 × `f80fcf4`'s CPU per event on the same runner (`bench`). Measured 9.7 µs per event, 4.9 % of one core at 5k/s, on an Intel Xeon 6975P-C |
+| CPU, whole relayd | E3 gate: ≤ 15 % of one core at ≥ 5k generated events/s, admission control included. **Not met**: 24.76 % (at its quota) at 5.6k generated / 2.0k admitted events/s; the receive from Tetragon dominates (section 8). Open, for the architect |
+| Control plane under load | E3 `P5-CONTROL-UNDER-LOAD`: no heartbeat gap above 20 s, applies complete in their health window, no watchdog timeout, at the heaviest flood the runner generates. Met |
+| Event budget | `collector.max_event_rate` non_security events/s, default 2000, hard maximum 5000. Security events are not rate-limited. 5k/s of non_security events is above the default budget |
 | Apply latency, reconnect | unchanged |
-| Spool capacity | 2 GiB holds **≈ 0.5–5 h at 5k events/s** (measured, zstd fastest: 4.5× on a varied corpus, 21.5× on E3's repetitive events). 8 h needs up to ≈ 33 GiB, or ≤ 300 events/s |
+| Spool capacity (D2) | 2 GiB, configurable. Stated as hours per GiB at a rate and ratio: on disk an event takes 23 B (E3's repetitive load, 21.5×) to 243 B (varied corpus, 4.5×), so 2 GiB holds **0.49–5.0 h at 5k events/s** and **2.5–25 h at 1k events/s** (2 GiB / (243 B × 1000/s) = 2.45 h). D2's "at least 4 h at 1k/s even with the pessimistic ratio" does not hold at 243 B per event: 4 h at 1k/s needs ≤ 149 B per event (flagged in the step 7b report). With the default budget, sustained non_security traffic is at most 2k/s (1.2–12.6 h per 2 GiB), about 2.5× the 5k/s figures. Overflow drops non_security batches first. Operators size the spool per site from the observed rate (contract formula, step 7b item 8) |
 
 ## Consequences
 
-- The `bench` job fails until the CPU row is decided and met. That failure is the
-  P3 gate working.
+- The `bench` job blocks on a regression against D1's commit, measured on the same
+  machine, not on an absolute number.
+- `P4-RSS`'s E3 gate fails until the architect decides section 8's options. The e3 job
+  is red on that one scenario. Every other scenario, P5 included, passes.
 - `BENCH_HISTORY` keeps the same-machine comparison reproducible.
