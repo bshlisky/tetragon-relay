@@ -350,8 +350,9 @@ jobs:
   # full design and per-scenario evidence.
   e3:
     # A hung scenario must not hold a runner for the 6 h default (step 7b:
-    # run 46040250809's P4-RSS waited on the collector).
-    timeout-minutes: 60
+    # run 46040250809's P4-RSS waited on the collector). 90 since ADR 0042:
+    # P5's two health windows may each extend to 600 s under the flood.
+    timeout-minutes: 90
     runs-on: ubuntu-24.04
     needs: [ci, integration]
     env:

@@ -211,7 +211,7 @@ func runBundles(ctx context.Context, cfg config, n int64, stream testcontroller.
 				}
 			}
 		}
-		if got := res.GetStatus().String(); got != cfg.expects[i] {
+		if got := res.GetStatus().String(); !statusExpected(got, cfg.expects[i]) {
 			return fmt.Errorf("bundle %d: ApplyResult status %s, want %s (detail %q)", i+1, got, cfg.expects[i], res.GetDetail())
 		}
 		if heartbeats < cfg.minHeartbeatsDuringApply {
@@ -290,4 +290,16 @@ func stateScript(cfg config, resultCh chan<- error) testcontroller.Script {
 		<-ctx.Done()
 		return err
 	}
+}
+
+// statusExpected reports whether got is one of want's "|"-separated
+// alternatives (P5, step-07b-decisions-3.md F0.3: ROLLED_BACK or
+// ROLLED_BACK_UNVERIFIABLE, never APPLIED).
+func statusExpected(got, want string) bool {
+	for _, w := range strings.Split(want, "|") {
+		if got == w {
+			return true
+		}
+	}
+	return false
 }

@@ -562,8 +562,11 @@ scenario_s6() {
 # tag) with the E3 test root's targets key.
 # ---------------------------------------------------------------------
 
+# loaded_names: Tetragon's loaded policies, without relayd's freshness
+# sentinel (ADR 0042: relay-managed but outside LKG and loaded_digest;
+# relayd loads it at startup, so it is not a change a scenario made).
 loaded_names() {
-	"${BIN_DIR}/e3tetra" --mode=list --tetragon-binary "${TETRAGON_BIN}" | tr '\n' ',' | sed 's/,$//'
+	"${BIN_DIR}/e3tetra" --mode=list --tetragon-binary "${TETRAGON_BIN}" | { grep -v '^relay-sentinel-' || true; } | tr '\n' ',' | sed 's/,$//'
 }
 
 check_loaded_unchanged() {
@@ -1329,23 +1332,32 @@ unit_cpu_stat() {
 # events/s), cmd/e3execflood (P5_WORKERS fork/execve loops) floods exec
 # events from before the connection until the controller is done. During
 # the flood the controller delivers:
-#   1. a monitor bundle (S7's canary policy, epoch 7): APPLIED;
+#   1. a monitor bundle (S7's canary policy, epoch 7): APPLIED (after the
+#      health window extended) or ROLLED_BACK_UNVERIFIABLE;
 #   2. an enforce bundle (S12's admin-path kill policy, epoch 8), whose
-#      health window sees the admin-path kill: ROLLED_BACK.
+#      health window sees the admin-path kill: ROLLED_BACK (the kill was
+#      observed once the path caught up) or ROLLED_BACK_UNVERIFIABLE.
+#      Never APPLIED (step-07b-decisions-3.md F0.3; ADR 0042).
 # Pass:
 #   - relayd was at its quota during the flood: the unit cgroup's
 #     nr_throttled grew, or its usage was >= 23 % of one core. Otherwise
 #     the saturated case was not tested and P5 FAILs as "not evaluated";
 #   - no heartbeat gap above 20 s at the controller over the connection,
 #     both applies included;
-#   - APPLIED and ROLLED_BACK within the controller's apply timeout;
+#   - both results as above within the controller's apply timeout (a
+#     window may extend to 600 s);
+#   - ROLLED_BACK carries the admin-path reason; ROLLED_BACK_UNVERIFIABLE
+#     carries a health_window_unverifiable record and Alert
+#     HEALTH_UNVERIFIABLE;
+#   - every health window's sentinel statistics are printed (F0.2);
 #   - no "Watchdog timeout" and no restart;
 #   - rate_limited dropped records in the chain;
-#   - the canary's kprobe events (security) still delivered.
+#   - if the monitor bundle was APPLIED: the canary runs (rc 0) and its
+#     kprobe event (security) is delivered.
 # Runs after P4-RSS (unit and collector stopped).
 # ---------------------------------------------------------------------
 P5_WORKERS=${P5_WORKERS:-4}
-P5_MAX_SECS=${P5_MAX_SECS:-420}
+P5_MAX_SECS=${P5_MAX_SECS:-1800} # killed when the controller is done
 scenario_p5() {
 	log "P5-CONTROL-UNDER-LOAD: monitor and enforce bundles during a ${P5_WORKERS}-worker exec flood"
 	write_dropins "e3.conf=$(e3_dropin)"
@@ -1367,10 +1379,10 @@ scenario_p5() {
 	sign_bundle "${BUNDLE_DIR}/p5-enforce.json" "${E3_KEYS}/v3/targets.key" 8 enforce "e3-admin-kill=${BUNDLE_DIR}/e3-p5-admin-kill.yaml" || ok=false
 	start_collector p5 "${store}"
 	# Bundle 1 goes out 30 s after the connection, with the flood running.
-	start_controller p5 --mode bundles --overall-timeout 480s --apply-timeout 180s \
+	start_controller p5 --mode bundles --overall-timeout 1600s --apply-timeout 720s \
 		--bundle-delay 30s --max-heartbeat-gap 20s --min-heartbeats-during-apply 2 \
-		--bundle "${BUNDLE_DIR}/p5-monitor.json" --expect APPLIED \
-		--bundle "${BUNDLE_DIR}/p5-enforce.json" --expect ROLLED_BACK
+		--bundle "${BUNDLE_DIR}/p5-monitor.json" --expect 'APPLIED|ROLLED_BACK_UNVERIFIABLE' \
+		--bundle "${BUNDLE_DIR}/p5-enforce.json" --expect 'ROLLED_BACK|ROLLED_BACK_UNVERIFIABLE'
 	SCENARIO_SINCE=$(date '+%Y-%m-%d %H:%M:%S')
 	start_unit || ok=false
 	sleep 3
@@ -1394,11 +1406,20 @@ scenario_p5() {
 	[ "${trigger_rc}" = 137 ] || { echo "the admin-path shell was not killed under load" >&2; ok=false; }
 	wait "${ctrl_pid}" || ok=false
 	cat /tmp/e3controller-p5.log
-	# After the rollback the monitor bundle is loaded again: the canary's
-	# exec hook posts a kprobe event instead of killing it.
-	rc=$(run_canary)
-	echo "canary under the monitor bundle, during the flood: rc=${rc}"
-	[ "${rc}" = 0 ] || { echo "canary rc=${rc} under a monitor bundle (want 0)" >&2; ok=false; }
+	local st1 st2
+	st1=$(sed -n 's/.*bundle 1 OK: \([A-Z_]*\).*/\1/p' /tmp/e3controller-p5.log)
+	st2=$(sed -n 's/.*bundle 2 OK: \([A-Z_]*\).*/\1/p' /tmp/e3controller-p5.log)
+	echo "P5 outcome: monitor=${st1:-none} enforce=${st2:-none}"
+	[ "${st2}" = APPLIED ] && { echo "the enforce bundle was APPLIED under the flood" >&2; ok=false; }
+	if [ "${st1}" = APPLIED ]; then
+		# After the enforce rollback the monitor bundle is loaded again:
+		# the canary's exec hook posts a kprobe event instead of killing it.
+		rc=$(run_canary)
+		echo "canary under the monitor bundle, during the flood: rc=${rc}"
+		[ "${rc}" = 0 ] || { echo "canary rc=${rc} under a monitor bundle (want 0)" >&2; ok=false; }
+	else
+		echo "P5 INFO: the monitor bundle was ${st1:-not reported}; the canary checks are skipped"
+	fi
 	read -r u1 th1 < <(unit_cpu_stat)
 	read -r tu1 _ < <(unit_cpu_stat tetragon.service)
 	t1=$(date +%s.%N)
@@ -1427,14 +1448,31 @@ scenario_p5() {
 	grep -E 'reason=rate_limited' <<<"${rep}" | head -3
 	grep -q 'reason=rate_limited' <<<"${rep}" || { echo "no rate_limited dropped record in the chain" >&2; ok=false; }
 	grep -E "event .*ProcessKprobe binary=\"${CANARY}\"" <<<"${rep}" | head -2
-	grep -qE "event .*ProcessKprobe binary=\"${CANARY}\"" <<<"${rep}" || { echo "the canary's kprobe event was not delivered" >&2; ok=false; }
+	if [ "${st1}" = APPLIED ]; then
+		grep -qE "event .*ProcessKprobe binary=\"${CANARY}\"" <<<"${rep}" || { echo "the canary's kprobe event was not delivered" >&2; ok=false; }
+	fi
+	echo "P5 sentinel events in telemetry: $(grep -c 'ProcessKprobe binary="[^"]*relayd' <<<"${rep}" || true)"
 	journal=$(scenario_journal)
 	if grep -i 'watchdog timeout' <<<"${journal}"; then
 		echo "systemd watchdog timeout during the flood" >&2
 		ok=false
 	fi
-	grep '"step":"health_window_failed"' <<<"${journal}" | grep -q 'admin_path_enforcement_event' || { echo "no admin-path health-window failure in the journal" >&2; ok=false; }
-	grep -q '"step":"rolled_back"' <<<"${journal}" || { echo "no rolled_back record in the journal" >&2; ok=false; }
+	# F0.2: each window's sentinel latencies, relayd's throttling and the
+	# window stream's receive rate.
+	grep -o '"step":"health_window_stats"[^}]*' <<<"${journal}" | sed 's/^/P5 /'
+	grep -q '"step":"health_window_stats"' <<<"${journal}" || { echo "no health_window_stats record" >&2; ok=false; }
+	case "${st2}" in
+	ROLLED_BACK)
+		grep '"step":"health_window_failed"' <<<"${journal}" | grep -q 'admin_path_enforcement_event' || { echo "ROLLED_BACK without an admin-path health-window failure" >&2; ok=false; }
+		grep -q '"step":"rolled_back"' <<<"${journal}" || { echo "no rolled_back record in the journal" >&2; ok=false; }
+		;;
+	ROLLED_BACK_UNVERIFIABLE)
+		grep -q '"step":"health_window_unverifiable"' <<<"${journal}" || { echo "ROLLED_BACK_UNVERIFIABLE without a health_window_unverifiable record" >&2; ok=false; }
+		;;
+	esac
+	if [ "${st1}" = ROLLED_BACK_UNVERIFIABLE ] || [ "${st2}" = ROLLED_BACK_UNVERIFIABLE ]; then
+		grep -q 'kind=HEALTH_UNVERIFIABLE' <<<"${journal}" || { echo "no HEALTH_UNVERIFIABLE alert" >&2; ok=false; }
+	fi
 	grep -c '"step":"telemetry_rate_limited"' <<<"${journal}" || true
 	[ "$(systemctl show "${UNIT}" -p MainPID --value)" = "${pid}" ] || { echo "relayd restarted under load" >&2; ok=false; }
 	stop_unit
